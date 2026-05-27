@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+psycopg2-binary
+bcrypt
+pyjwt
+python-dotenv
+boto3
+aiofiles
+alembic
+sqlalchemy

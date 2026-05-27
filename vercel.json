@@ -1,0 +1,22 @@
+{
+  "redirects": [
+    { "source": "/", "destination": "/login", "permanent": false },
+    { "source": "/login.html", "destination": "/login", "permanent": true },
+    { "source": "/home.html",  "destination": "/home",  "permanent": true },
+    { "source": "/index.html", "destination": "/index", "permanent": true },
+    { "source": "/member.html","destination": "/member","permanent": true },
+    { "source": "/club.html",  "destination": "/club",  "permanent": true },
+    { "source": "/admin.html",          "destination": "/admin",           "permanent": true },
+    { "source": "/change-password.html","destination": "/change-password", "permanent": true }
+  ],
+  "rewrites": [
+    { "source": "/api/:path*",      "destination": "/api/index.py"          },
+    { "source": "/login",           "destination": "/login.html"            },
+    { "source": "/home",            "destination": "/home.html"             },
+    { "source": "/index",           "destination": "/index.html"            },
+    { "source": "/member",          "destination": "/member.html"           },
+    { "source": "/club",            "destination": "/club.html"             },
+    { "source": "/admin",           "destination": "/admin.html"            },
+    { "source": "/change-password", "destination": "/change-password.html" }
+  ]
+}

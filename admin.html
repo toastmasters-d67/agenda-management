@@ -1,0 +1,721 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>企業家國際演講會｜用戶管理</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft JhengHei", sans-serif;
+      background: #f1f5f9; color: #0f172a; min-height: 100vh; display: flex;
+    }
+    .sidebar {
+      width: 220px; min-height: 100vh; background: #0f172a;
+      display: flex; flex-direction: column; flex-shrink: 0;
+      position: fixed; top: 0; left: 0; bottom: 0; z-index: 100;
+    }
+    .sidebar-brand {
+      padding: 16px 16px 14px; border-bottom: 1px solid #1e293b;
+      display: flex; align-items: center; gap: 10px;
+    }
+    .sidebar-brand-logo { width: 36px; height: 36px; object-fit: contain; flex-shrink: 0; }
+    .sidebar-brand-text { min-width: 0; }
+    .sidebar-brand-name { font-size: 13px; font-weight: 700; color: #f8fafc; letter-spacing: 0.3px; line-height: 1.4; }
+    .sidebar-brand-sub  { font-size: 10px; color: #64748b; margin-top: 2px; }
+    .sidebar-nav { padding: 12px 10px; flex: 1; }
+    .nav-section-label {
+      font-size: 10px; font-weight: 600; color: #475569;
+      letter-spacing: 0.8px; text-transform: uppercase; padding: 8px 10px 4px;
+    }
+    .nav-item {
+      display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 8px;
+      color: #94a3b8; font-size: 13px; font-weight: 500; cursor: pointer;
+      transition: background 0.15s, color 0.15s; text-decoration: none; margin-bottom: 2px;
+    }
+    .nav-item:hover { background: #1e293b; color: #f1f5f9; }
+    .nav-item.active { background: #1e3a5f; color: #60a5fa; }
+    .nav-item svg { flex-shrink: 0; opacity: 0.8; }
+    .nav-item.active svg { opacity: 1; }
+    .sidebar-toggle-tab { display: none; }
+    .sidebar-backdrop { display: none; }
+    .sidebar-footer { padding: 14px 10px; border-top: 1px solid #1e293b; }
+    .sidebar-user { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 8px; }
+    .user-avatar {
+      width: 30px; height: 30px; border-radius: 50%; background: #1e3a5f;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 12px; font-weight: 700; color: #60a5fa; flex-shrink: 0;
+    }
+    .user-info { flex: 1; min-width: 0; }
+    .user-name { font-size: 12px; font-weight: 600; color: #e2e8f0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .user-role { font-size: 10px; color: #64748b; }
+    .btn-logout-sidebar {
+      background: none; border: none; color: #64748b; cursor: pointer; padding: 4px;
+      border-radius: 4px; display: flex; align-items: center; transition: color 0.15s; flex-shrink: 0;
+    }
+    .btn-logout-sidebar:hover { color: #f87171; }
+    .main-area { margin-left: 220px; flex: 1; display: flex; flex-direction: column; min-height: 100vh; }
+    .topbar {
+      height: 58px; background: #fff; border-bottom: 1px solid #e2e8f0;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 28px; flex-shrink: 0; position: sticky; top: 0; z-index: 50;
+    }
+    .topbar-title { font-size: 16px; font-weight: 700; color: #0f172a; }
+    .content { padding: 28px; flex: 1; }
+    .stats-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 28px; }
+    .stat-card {
+      background: #fff; border-radius: 12px; padding: 20px 22px;
+      display: flex; align-items: center; gap: 16px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.06); border: 1px solid #e2e8f0;
+    }
+    .stat-icon { width: 44px; height: 44px; border-radius: 10px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+    .stat-icon.blue  { background: #e6f0f7; color: #004165; }
+    .stat-icon.red   { background: #f5eced; color: #772432; }
+    .stat-icon.green { background: #f0fdf4; color: #22c55e; }
+    .stat-body { flex: 1; }
+    .stat-value { font-size: 26px; font-weight: 700; color: #0f172a; line-height: 1; }
+    .stat-label { font-size: 12px; color: #64748b; margin-top: 4px; }
+    .table-card {
+      background: #fff; border-radius: 12px; border: 1px solid #e2e8f0;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.06); overflow: hidden;
+    }
+    .table-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 16px 20px; border-bottom: 1px solid #f1f5f9; gap: 12px; flex-wrap: wrap;
+    }
+    .table-header-left { display: flex; align-items: center; gap: 12px; }
+    .table-title { font-size: 14px; font-weight: 700; color: #0f172a; }
+    .badge-count { font-size: 11px; font-weight: 600; background: #f1f5f9; color: #64748b; padding: 2px 8px; border-radius: 20px; }
+    .search-wrap { padding: 12px 20px; border-bottom: 1px solid #f1f5f9; }
+    .search-input {
+      width: 100%; max-width: 320px; padding: 8px 12px;
+      border: 1px solid #e2e8f0; border-radius: 8px; font-size: 13px; background: #f8fafc;
+      transition: border-color 0.2s, background 0.2s;
+    }
+    .search-input:focus { outline: none; border-color: #004165; background: #fff; }
+    .user-table-wrap { overflow-x: auto; }
+    table.user-list { width: 100%; border-collapse: collapse; font-size: 13px; }
+    table.user-list thead tr { background: #f8fafc; border-bottom: 1px solid #e2e8f0; }
+    table.user-list th {
+      padding: 10px 16px; text-align: left; font-size: 11px; font-weight: 600;
+      color: #64748b; letter-spacing: 0.4px; text-transform: uppercase; white-space: nowrap;
+    }
+    table.user-list tbody tr { border-bottom: 1px solid #f1f5f9; transition: background 0.1s; }
+    table.user-list tbody tr:hover { background: #f8fafc; }
+    table.user-list tbody tr:last-child { border-bottom: none; }
+    table.user-list td { padding: 12px 16px; vertical-align: middle; }
+    .td-user { display: flex; align-items: center; gap: 10px; }
+    .ua-avatar {
+      width: 34px; height: 34px; border-radius: 50%; background: #0f172a; color: #f2df74;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 12px; font-weight: 700; flex-shrink: 0;
+    }
+    .ua-username { font-weight: 600; color: #0f172a; font-size: 13px; }
+    .ua-name { font-size: 11px; color: #64748b; margin-top: 1px; }
+    .ua-level { font-size: 10px; color: #94a3b8; margin-top: 1px; }
+    .role-badge {
+      display: inline-block; font-size: 11px; font-weight: 600;
+      border-radius: 5px; padding: 3px 9px; white-space: nowrap;
+    }
+    .role-badge.system_admin { background: #fdf9e8; color: #a07800; }
+    .role-badge.club_admin   { background: #e6f0f7; color: #004165; }
+    .role-badge.club_member  { background: #f1f5f9; color: #64748b; }
+    .td-actions { text-align: right; white-space: nowrap; }
+    .btn-edit-row {
+      padding: 5px 14px; background: #e6f0f7; color: #004165; border: 1px solid #b3cfe0;
+      border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer;
+      transition: all 0.15s; margin-right: 6px; display: inline-flex; align-items: center; gap: 5px;
+    }
+    .btn-edit-row:hover { background: #004165; color: #fff; border-color: #004165; }
+    .btn-del-row {
+      padding: 5px 8px; background: none; border: 1px solid #e2e8f0; border-radius: 6px;
+      cursor: pointer; color: #94a3b8; display: inline-flex; align-items: center; transition: all 0.15s;
+    }
+    .btn-del-row:hover { background: #f5eced; border-color: #d4a0a8; color: #772432; }
+    .btn-del-row:disabled { opacity: 0.3; cursor: not-allowed; }
+    .table-empty { text-align: center; padding: 48px; color: #94a3b8; font-size: 13px; }
+    .loading-spinner { display: flex; justify-content: center; padding: 40px; }
+    .spinner { width: 28px; height: 28px; border: 3px solid #e2e8f0; border-top-color: #772432; border-radius: 50%; animation: spin 0.7s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 200; align-items: center; justify-content: center; }
+    .modal-overlay.open { display: flex; }
+    .modal { background: #fff; border-radius: 14px; padding: 28px 28px 24px; width: 400px; max-width: 92vw; box-shadow: 0 8px 32px rgba(0,0,0,0.18); }
+    .modal-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+    .modal h3 { font-size: 16px; font-weight: 700; color: #0f172a; }
+    .modal-close { background: none; border: none; font-size: 18px; cursor: pointer; color: #94a3b8; padding: 2px 6px; border-radius: 4px; line-height: 1; }
+    .modal-close:hover { background: #f1f5f9; color: #0f172a; }
+    .modal-user-info { background: #f8fafc; border-radius: 8px; padding: 12px 14px; margin-bottom: 16px; }
+    .modal-user-info-name { font-weight: 700; font-size: 14px; }
+    .modal-user-info-sub { font-size: 12px; color: #64748b; margin-top: 2px; }
+    .modal-field { margin-bottom: 14px; }
+    .modal-field label { display: block; font-size: 11px; font-weight: 600; color: #64748b; margin-bottom: 5px; }
+    .modal-field select, .modal-field input[type="text"], .modal-field input[type="password"] {
+      width: 100%; padding: 9px 12px; border: 1px solid #e2e8f0; border-radius: 8px;
+      font-size: 13px; background: #fff; transition: border-color 0.2s; cursor: pointer;
+    }
+    .modal-field select:focus, .modal-field input[type="text"]:focus, .modal-field input[type="password"]:focus { outline: none; border-color: #004165; }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 22px; }
+    .btn-modal-cancel { padding: 8px 18px; background: #f1f5f9; border: none; border-radius: 8px; font-size: 13px; cursor: pointer; color: #64748b; transition: background 0.15s; }
+    .btn-modal-cancel:hover { background: #e2e8f0; }
+    .btn-modal-save { padding: 8px 22px; background: #772432; color: #fff; border: none; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; transition: background 0.15s; }
+    .btn-modal-save:hover { background: #5a1a25; }
+    @media (max-width: 900px) {
+      .sidebar { width: 64px; }
+      .sidebar-brand-name, .sidebar-brand-sub, .nav-section-label, .nav-item span, .user-info { display: none; }
+      .nav-item { justify-content: center; padding: 10px; }
+      .sidebar-footer { padding: 10px 8px; }
+      .sidebar-user { padding: 6px; justify-content: center; }
+      .btn-logout-sidebar { display: none; }
+      .main-area { margin-left: 64px; }
+      .topbar { padding: 0 20px; }
+      .content { padding: 20px; }
+      .stats-row { grid-template-columns: repeat(2, 1fr); }
+    }
+    @media (max-width: 640px) {
+      html, body { overflow-x: hidden; max-width: 100%; }
+      .main-area { overflow-x: hidden; min-width: 0; }
+      .stats-row { grid-template-columns: 1fr; }
+      .content { padding: 12px; }
+      .topbar { padding: 0 12px; height: 50px; }
+      .topbar-title { font-size: 13px; }
+      .sidebar { width: 220px; transform: translateX(-100%); transition: transform 0.3s cubic-bezier(0.4,0,0.2,1); z-index: 200; }
+      .sidebar-brand-name, .sidebar-brand-sub, .nav-section-label, .nav-item span, .user-info { display: revert; }
+      .nav-item { justify-content: flex-start; padding: 9px 10px; }
+      .sidebar-footer { padding: 14px 10px; }
+      .sidebar-user { padding: 8px 10px; justify-content: flex-start; }
+      .btn-logout-sidebar { display: flex; }
+      .sidebar.sidebar-open { transform: translateX(0); }
+      .sidebar-toggle-tab {
+        display: flex; position: fixed; left: 0; top: 50%; transform: translateY(-50%);
+        width: 20px; height: 56px; background: #0f172a; border-radius: 0 8px 8px 0;
+        align-items: center; justify-content: center; cursor: pointer; z-index: 201;
+        transition: left 0.3s cubic-bezier(0.4,0,0.2,1); box-shadow: 2px 0 8px rgba(0,0,0,0.3);
+      }
+      .sidebar-toggle-tab.open { left: 220px; }
+      .sidebar-toggle-tab svg { color: #94a3b8; transition: transform 0.3s ease; }
+      .sidebar-toggle-tab.open svg { transform: rotate(180deg); }
+      .sidebar-backdrop { display: block; position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 199; opacity: 0; pointer-events: none; transition: opacity 0.3s ease; }
+      .sidebar-backdrop.visible { opacity: 1; pointer-events: auto; }
+      .main-area { margin-left: 0; }
+    }
+    @media (max-width: 480px) {
+      .stat-card { padding: 14px 16px; }
+      .stat-value { font-size: 22px; }
+      .modal { padding: 20px 16px 16px; }
+      .modal-actions { flex-direction: column; }
+      .btn-modal-cancel, .btn-modal-save { width: 100%; text-align: center; }
+    }
+    /* ---- sortable column headers ---- */
+    th.sortable { cursor: pointer; user-select: none; }
+    th.sortable:hover { background: #f1f5f9; color: #0f172a; }
+    .sort-icon { margin-left: 4px; font-style: normal; font-size: 10px; opacity: 0.4; }
+    th.sort-asc .sort-icon, th.sort-desc .sort-icon { opacity: 1; color: #004165; }
+
+    /* ---- filter tabs ---- */
+    .filter-tabs { display: flex; padding: 0 20px; border-bottom: 1px solid #f1f5f9; }
+    .filter-tab {
+      padding: 10px 16px; background: none; border: none;
+      border-bottom: 2px solid transparent; margin-bottom: -1px;
+      font-size: 13px; font-weight: 500; color: #64748b;
+      cursor: pointer; display: flex; align-items: center; gap: 7px; transition: color 0.15s;
+    }
+    .filter-tab.active { color: #004165; border-bottom-color: #004165; font-weight: 600; }
+    .filter-tab:hover:not(.active) { color: #0f172a; }
+    .pending-badge {
+      background: #fef3c7; color: #92400e;
+      font-size: 11px; font-weight: 700;
+      border-radius: 10px; padding: 1px 7px; min-width: 18px; text-align: center;
+    }
+    .pending-badge.zero { background: #f1f5f9; color: #94a3b8; }
+
+    /* ---- approve button ---- */
+    .btn-approve-row {
+      padding: 5px 13px; background: #dcfce7; color: #166534;
+      border: 1px solid #86efac; border-radius: 6px;
+      font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.15s; margin-right: 6px;
+    }
+    .btn-approve-row:hover { background: #166534; color: #fff; border-color: #166534; }
+  </style>
+</head>
+<body>
+
+<!-- SIDEBAR -->
+<div class="sidebar-backdrop" id="sidebarBackdrop" onclick="toggleSidebar()"></div>
+<div class="sidebar-toggle-tab" id="sidebarToggleTab" onclick="toggleSidebar()">
+  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+</div>
+<aside class="sidebar" id="sidebar">
+  <div class="sidebar-brand">
+    <img src="media/toastmasters_logo.png" class="sidebar-brand-logo" alt="TM Logo">
+    <div class="sidebar-brand-text">
+      <div class="sidebar-brand-name">企業家國際演講會</div>
+      <div class="sidebar-brand-sub">Entrepreneur TMC</div>
+    </div>
+  </div>
+  <nav class="sidebar-nav">
+    <div class="nav-section-label">主選單</div>
+    <a class="nav-item" href="/home">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+      <span>總覽</span>
+    </a>
+    <a class="nav-item" href="/index">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+      <span>新建議程</span>
+    </a>
+    <a class="nav-item" href="/member">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+      <span>會員管理</span>
+    </a>
+    <a class="nav-item system-admin-only" href="/club" style="display:none">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+      <span>分會管理</span>
+    </a>
+    <a class="nav-item active" href="/admin">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M20 21a8 8 0 1 0-16 0"/><path d="M16 11l1.5 1.5L21 9"/></svg>
+      <span>用戶管理</span>
+    </a>
+  </nav>
+  <div class="sidebar-footer">
+    <div class="sidebar-user">
+      <div class="user-avatar" id="userAvatar">—</div>
+      <div class="user-info">
+        <div class="user-name" id="navUser">—</div>
+        <div class="user-role">系統管理員</div>
+      </div>
+      <button class="btn-logout-sidebar" onclick="doLogout()" title="登出">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+      </button>
+    </div>
+  </div>
+</aside>
+
+<!-- MAIN AREA -->
+<div class="main-area">
+  <header class="topbar">
+    <div class="topbar-title">用戶管理</div>
+    <div>
+      <button style="display:flex;align-items:center;gap:6px;padding:8px 18px;background:#772432;color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;" onclick="openAddModal()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+        新增用戶
+      </button>
+    </div>
+  </header>
+
+  <div class="content">
+    <div class="stats-row">
+      <div class="stat-card">
+        <div class="stat-icon blue">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+        </div>
+        <div class="stat-body">
+          <div class="stat-value" id="statTotal">—</div>
+          <div class="stat-label">用戶總數</div>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon red">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M20 21a8 8 0 1 0-16 0"/><path d="M16 11l1.5 1.5L21 9"/></svg>
+        </div>
+        <div class="stat-body">
+          <div class="stat-value" id="statAdmins">—</div>
+          <div class="stat-label">管理員數</div>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon green">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/></svg>
+        </div>
+        <div class="stat-body">
+          <div class="stat-value" id="statMembers">—</div>
+          <div class="stat-label">一般用戶數</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="table-card">
+      <div class="table-header">
+        <div class="table-header-left">
+          <span class="table-title">用戶名單</span>
+          <span class="badge-count" id="badgeCount">0 位</span>
+        </div>
+      </div>
+      <!-- Filter tabs -->
+      <div class="filter-tabs">
+        <button class="filter-tab active" id="filterActive" onclick="setFilter('active')">正式用戶</button>
+        <button class="filter-tab" id="filterPending" onclick="setFilter('pending')">
+          待審核申請 <span class="pending-badge zero" id="pendingBadge">0</span>
+        </button>
+      </div>
+
+      <div class="search-wrap">
+        <input type="text" class="search-input" id="searchInput" placeholder="搜尋帳號或姓名…" oninput="renderList()">
+      </div>
+      <div class="user-table-wrap">
+        <table class="user-list">
+          <thead>
+            <tr>
+              <th class="sortable" data-key="username" onclick="sortBy('username')">用戶 <i class="sort-icon">↕</i></th>
+              <th class="sortable" data-key="role"     onclick="sortBy('role')">角色 <i class="sort-icon">↕</i></th>
+              <th class="sortable" data-key="clubName" onclick="sortBy('clubName')">所屬分會 <i class="sort-icon">↕</i></th>
+              <th style="text-align:right">操作</th>
+            </tr>
+          </thead>
+          <tbody id="userTableBody">
+            <tr><td colspan="4"><div class="loading-spinner"><div class="spinner"></div></div></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Add / Edit Modal -->
+<div class="modal-overlay" id="modal">
+  <div class="modal">
+    <div class="modal-header">
+      <h3 id="modalTitle">新增用戶</h3>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+
+    <!-- Add mode only: username + password -->
+    <div id="addFields">
+      <div class="modal-field">
+        <label>帳號（至少 3 字元）</label>
+        <input type="text" id="fUsername" placeholder="john_wang" autocomplete="off">
+      </div>
+      <div class="modal-field">
+        <label>密碼（至少 6 字元）</label>
+        <input type="password" id="fPassword" placeholder="請輸入初始密碼" autocomplete="new-password">
+      </div>
+    </div>
+
+    <!-- Edit mode only: show username (read-only) -->
+    <div id="editInfo" style="display:none" class="modal-user-info">
+      <div class="modal-user-info-name" id="mUsername"></div>
+      <div class="modal-user-info-sub" id="mUserFullname"></div>
+    </div>
+
+    <div class="modal-field">
+      <label>中文姓名</label>
+      <input type="text" id="fNameZh" placeholder="王小明">
+    </div>
+    <div class="modal-field">
+      <label>英文姓名</label>
+      <input type="text" id="fNameEn" placeholder="John Wang">
+    </div>
+    <div class="modal-field">
+      <label>等級</label>
+      <input type="text" id="fLevel" placeholder="TM / L1 / L2 / L3 / L4 / L5 / DTM">
+    </div>
+    <div class="modal-field">
+      <label>角色</label>
+      <select id="fRole">
+        <option value="club_member">club_member — 一般會員（唯讀）</option>
+        <option value="club_admin">club_admin — 分會管理員（可編輯本分會）</option>
+        <option value="system_admin">system_admin — 系統管理員（全權限）</option>
+      </select>
+    </div>
+    <div class="modal-field">
+      <label>所屬分會</label>
+      <select id="fClubId">
+        <option value="">— 未分配 —</option>
+      </select>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-modal-cancel" onclick="closeModal()">取消</button>
+      <button class="btn-modal-save" onclick="saveUser()">儲存</button>
+    </div>
+  </div>
+</div>
+
+<script src="auth.js"></script>
+<script>
+  let users = [];
+  let clubs = [];
+  let editingUsername = null;
+  let sortKey = null;
+  let sortDir = 'asc';
+  let filterStatus = 'active'; // 'active' | 'pending'
+
+  async function init() {
+    applyRoleUI();
+    const token = getToken();
+    if (!token) { location.href = '/login'; return; }
+    try {
+      const res = await fetch(`${API_BASE}/api/auth/verify`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setAuth(getToken(), data.username, data.role, data.club_id, data.must_change_pw);
+        if (data.must_change_pw) { location.href = '/change-password'; return; }
+        document.getElementById('navUser').textContent = data.username;
+        document.getElementById('userAvatar').textContent = data.username.slice(0,1).toUpperCase();
+        applyRoleUI();
+        // Only system_admin can access this page
+        if (!isSystemAdmin()) { location.href = '/home'; return; }
+      } else {
+        clearAuth(); location.href = '/login'; return;
+      }
+    } catch {
+      clearAuth(); location.href = '/login'; return;
+    }
+    await Promise.all([fetchClubs(), fetchUsers()]);
+  }
+
+  async function fetchClubs() {
+    try {
+      const res = await fetch(`${API_BASE}/api/clubs`, { headers: { Authorization: `Bearer ${getToken()}` } });
+      if (!res.ok) return;
+      clubs = await res.json();
+      const sel = document.getElementById('fClubId');
+      sel.innerHTML = '<option value="">— 未分配 —</option>' +
+        clubs.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
+    } catch { /* ignore */ }
+  }
+
+  async function fetchUsers() {
+    document.getElementById('userTableBody').innerHTML =
+      '<tr><td colspan="4"><div class="loading-spinner"><div class="spinner"></div></div></td></tr>';
+    try {
+      const res = await fetch(`${API_BASE}/api/users`, { headers: { Authorization: `Bearer ${getToken()}` } });
+      if (!res.ok) throw new Error();
+      users = await res.json();
+      updateStats();
+      renderList();
+    } catch {
+      document.getElementById('userTableBody').innerHTML =
+        '<tr><td colspan="4"><div class="table-empty">載入失敗</div></td></tr>';
+    }
+  }
+
+  function setFilter(status) {
+    filterStatus = status;
+    document.getElementById('filterActive').classList.toggle('active',  status === 'active');
+    document.getElementById('filterPending').classList.toggle('active', status === 'pending');
+    document.getElementById('searchInput').value = '';
+    renderList();
+  }
+
+  function updateStats() {
+    const activeUsers  = users.filter(u => (u.status || 'active') === 'active');
+    const pendingUsers = users.filter(u => u.status === 'pending');
+    document.getElementById('statTotal').textContent =
+      activeUsers.length;
+    document.getElementById('statAdmins').textContent =
+      activeUsers.filter(u => u.role === 'system_admin' || u.role === 'club_admin').length;
+    document.getElementById('statMembers').textContent =
+      activeUsers.filter(u => u.role === 'club_member').length;
+
+    const badge = document.getElementById('pendingBadge');
+    if (badge) {
+      badge.textContent = pendingUsers.length;
+      badge.className = 'pending-badge' + (pendingUsers.length === 0 ? ' zero' : '');
+    }
+  }
+
+  const ROLE_LABEL = { system_admin: '系統管理員', club_admin: '分會管理員', club_member: '一般會員' };
+
+  function sortBy(key) {
+    sortDir = (sortKey === key && sortDir === 'asc') ? 'desc' : 'asc';
+    sortKey = key;
+    document.querySelectorAll('th.sortable').forEach(th => {
+      th.classList.remove('sort-asc', 'sort-desc');
+      const ic = th.querySelector('.sort-icon');
+      if (ic) ic.textContent = '↕';
+    });
+    const active = document.querySelector(`th[data-key="${key}"]`);
+    if (active) {
+      active.classList.add(sortDir === 'asc' ? 'sort-asc' : 'sort-desc');
+      const ic = active.querySelector('.sort-icon');
+      if (ic) ic.textContent = sortDir === 'asc' ? '↑' : '↓';
+    }
+    renderList();
+  }
+
+  function renderList() {
+    const q = document.getElementById('searchInput').value.trim().toLowerCase();
+
+    // Filter by status tab first
+    let filtered = users.filter(u => (u.status || 'active') === filterStatus);
+
+    if (q) {
+      filtered = filtered.filter(u =>
+        u.username.toLowerCase().includes(q) ||
+        (u.nameEn || '').toLowerCase().includes(q) ||
+        (u.nameZh || '').toLowerCase().includes(q));
+    }
+
+    if (sortKey) {
+      filtered = [...filtered].sort((a, b) => {
+        const av = (a[sortKey] ?? '').toString().toLowerCase();
+        const bv = (b[sortKey] ?? '').toString().toLowerCase();
+        const cmp = av.localeCompare(bv, 'zh-TW');
+        return sortDir === 'asc' ? cmp : -cmp;
+      });
+    }
+
+    document.getElementById('badgeCount').textContent = `${filtered.length} 位`;
+    const tbody = document.getElementById('userTableBody');
+    if (!filtered.length) {
+      const emptyMsg = filterStatus === 'pending' ? '目前沒有待審核的申請' : '沒有符合的用戶';
+      tbody.innerHTML = `<tr><td colspan="4"><div class="table-empty">${emptyMsg}</div></td></tr>`;
+      return;
+    }
+    tbody.innerHTML = filtered.map(u => {
+      const isAdmin    = u.username === 'admin';
+      const isPending  = filterStatus === 'pending';
+      const actions = isPending
+        ? `<button class="btn-approve-row" onclick="approveUser('${u.username}')">批准</button>
+           <button class="btn-del-row" onclick="deleteUser('${u.username}')" title="拒絕並刪除">
+             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
+           </button>`
+        : `<button class="btn-edit-row" onclick="openModal('${u.username}')">
+             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+             編輯
+           </button>
+           <button class="btn-del-row" onclick="deleteUser('${u.username}')" title="刪除" ${isAdmin ? 'disabled' : ''}>
+             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
+           </button>`;
+      return `
+      <tr>
+        <td>
+          <div class="td-user">
+            <div class="ua-avatar">${u.username.slice(0,1).toUpperCase()}</div>
+            <div>
+              <div class="ua-username">${u.username}</div>
+              <div class="ua-name">${u.nameZh || ''} ${u.nameEn ? '/ ' + u.nameEn : ''}</div>
+              <div class="ua-level">${isPending ? (u.clubName || '未指定分會') : '等級：' + (u.level || 'TM')}</div>
+            </div>
+          </div>
+        </td>
+        <td><span class="role-badge ${u.role}">${ROLE_LABEL[u.role] || u.role}</span></td>
+        <td style="font-size:12px;color:${u.clubName ? '#0f172a' : '#94a3b8'}">${u.clubName || '—'}</td>
+        <td class="td-actions">${actions}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  async function approveUser(username) {
+    try {
+      const res = await fetch(`${API_BASE}/api/users/${username}/approve`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${getToken()}` },
+      });
+      if (!res.ok) throw new Error((await res.json()).detail || '批准失敗');
+      await fetchUsers();
+    } catch(e) { alert(e.message); }
+  }
+
+  function openAddModal() {
+    editingUsername = null;
+    document.getElementById('modalTitle').textContent = '新增用戶';
+    document.getElementById('addFields').style.display = '';
+    document.getElementById('editInfo').style.display  = 'none';
+    document.getElementById('fUsername').value = '';
+    document.getElementById('fPassword').value = '';
+    document.getElementById('fNameZh').value   = '';
+    document.getElementById('fNameEn').value   = '';
+    document.getElementById('fLevel').value    = 'TM';
+    document.getElementById('fRole').value     = 'club_member';
+    document.getElementById('fRole').disabled  = false;
+    document.getElementById('fClubId').value   = '';
+    document.getElementById('modal').classList.add('open');
+    document.getElementById('fUsername').focus();
+  }
+
+  function openModal(username) {
+    const u = users.find(u => u.username === username);
+    editingUsername = username;
+    document.getElementById('modalTitle').textContent = '編輯用戶';
+    document.getElementById('addFields').style.display = 'none';
+    document.getElementById('editInfo').style.display  = '';
+    document.getElementById('mUsername').textContent = u.username;
+    document.getElementById('mUserFullname').textContent = [u.nameZh, u.nameEn].filter(Boolean).join(' / ');
+    document.getElementById('fNameZh').value = u.nameZh || '';
+    document.getElementById('fNameEn').value = u.nameEn || '';
+    document.getElementById('fLevel').value  = u.level  || 'TM';
+    document.getElementById('fRole').value   = u.role;
+    document.getElementById('fClubId').value = u.clubId ?? '';
+    // admin's role is locked
+    document.getElementById('fRole').disabled = username === 'admin';
+    document.getElementById('modal').classList.add('open');
+  }
+
+  function closeModal() {
+    document.getElementById('modal').classList.remove('open');
+    editingUsername = null;
+  }
+
+  async function saveUser() {
+    const role    = document.getElementById('fRole').value;
+    const clubVal = document.getElementById('fClubId').value;
+    const name_zh = document.getElementById('fNameZh').value.trim();
+    const name_en = document.getElementById('fNameEn').value.trim();
+    const level   = document.getElementById('fLevel').value.trim() || 'TM';
+    const club_id = clubVal ? parseInt(clubVal) : null;
+
+    try {
+      if (!editingUsername) {
+        // ---- ADD mode ----
+        const username = document.getElementById('fUsername').value.trim();
+        const password = document.getElementById('fPassword').value;
+        if (!username) { alert('請輸入帳號'); return; }
+        if (!password) { alert('請輸入密碼'); return; }
+        if (!name_zh || !name_en) { alert('請輸入中英文姓名'); return; }
+        const res = await fetch(`${API_BASE}/api/users`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
+          body: JSON.stringify({ username, password, name_zh, name_en, role, club_id, level }),
+        });
+        if (!res.ok) throw new Error((await res.json()).detail || '新增失敗');
+      } else {
+        // ---- EDIT mode ----
+        const res = await fetch(`${API_BASE}/api/users/${editingUsername}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
+          body: JSON.stringify({ role, club_id, name_zh, name_en, level }),
+        });
+        if (!res.ok) throw new Error((await res.json()).detail || '儲存失敗');
+      }
+      closeModal();
+      await fetchUsers();
+    } catch (e) { alert(e.message); }
+  }
+
+  async function deleteUser(username) {
+    if (username === 'admin') return;
+    if (!confirm(`確定要刪除用戶「${username}」嗎？`)) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/users/${username}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${getToken()}` },
+      });
+      if (!res.ok) throw new Error((await res.json()).detail || '刪除失敗');
+      await fetchUsers();
+    } catch (e) { alert(e.message); }
+  }
+
+  function toggleSidebar() {
+    const sidebar  = document.getElementById('sidebar');
+    const backdrop = document.getElementById('sidebarBackdrop');
+    const tab      = document.getElementById('sidebarToggleTab');
+    const open = sidebar.classList.toggle('sidebar-open');
+    backdrop.classList.toggle('visible', open);
+    tab.classList.toggle('open', open);
+  }
+
+  function doLogout() {
+    if (!confirm('確定要登出嗎？')) return;
+    clearAuth(); location.href = '/login';
+  }
+
+  document.getElementById('modal').addEventListener('click', e => {
+    if (e.target === document.getElementById('modal')) closeModal();
+  });
+
+  applyRoleUI(); // 立即執行，消除切換頁面時的閃爍延遲
+  document.addEventListener('DOMContentLoaded', init);
+</script>
+</body>
+</html>
