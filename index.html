@@ -110,15 +110,15 @@
         <div class="time-override-row">
           <div class="time-override-label">總主持人串場 TME hosting</div>
           <input type="number" id="dur_tmeMins" min="0" max="30" value="4" style="width:60px"
-                 oninput="updateDuration('tmeMins', this.value)"> 分鐘
+                 oninput="updateDuration('tmeMins', this.value)"> <span class="time-unit">分鐘</span>
         </div>
         <div class="time-override-row">
           <div class="time-override-label">總講評串場 GE hosting</div>
           <input type="number" id="dur_geMins" min="0" max="30" value="4" style="width:60px"
-                 oninput="updateDuration('geMins', this.value)"> 分鐘
+                 oninput="updateDuration('geMins', this.value)"> <span class="time-unit">分鐘</span>
         </div>
         <hr style="margin:6px 0;border-color:#ddd">
-        <p class="time-override-hint">空白 = 自動計算｜輸入 HH:MM 手動覆蓋</p>
+        <p class="time-override-hint">空白 = 自動計算｜手動輸入分鐘數覆蓋</p>
         <div class="time-override-row">
           <div class="time-override-label">
             目標結束 End Time
@@ -130,75 +130,79 @@
         </div>
         <div class="time-override-row">
           <div class="time-override-label">
-            開幕 Opening
+            開始時間 Start Time
             <span id="auto_openingStart" class="time-auto"></span>
           </div>
           <input type="text" id="to_openingStart" maxlength="5" placeholder="HH:MM"
                  oninput="updateTimeOverride('openingStart', this.value)">
           <button class="btn-time-reset" onclick="resetTimeOverride('openingStart')" title="還原自動">⟳</button>
         </div>
+        <hr style="margin:6px 0;border-color:#ddd">
         <div class="time-override-row">
           <div class="time-override-label">
-            演講開始 Speeches
-            <span id="auto_speechStart" class="time-auto"></span>
+            開幕 Opening
+            <span id="auto_openingMins" class="time-auto"></span>
           </div>
-          <input type="text" id="to_speechStart" maxlength="5" placeholder="HH:MM"
-                 oninput="updateTimeOverride('speechStart', this.value)">
-          <button class="btn-time-reset" onclick="resetTimeOverride('speechStart')" title="還原自動">⟳</button>
+          <input type="number" id="to_openingMins" min="0" max="60" style="width:60px"
+                 placeholder="自動" oninput="updateDurationOverride('openingMins', this.value)"> <span class="time-unit">分鐘</span>
+          <button class="btn-time-reset" onclick="resetDurationOverride('openingMins')" title="還原自動">⟳</button>
+        </div>
+        <div class="time-override-row">
+          <div class="time-override-label">
+            演講 Speeches
+            <span id="auto_speechMins" class="time-auto"></span>
+          </div>
         </div>
         <div class="time-override-row">
           <div class="time-override-label">
             拍照 Group Photo
-            <span id="auto_photoStart" class="time-auto"></span>
+            <span id="auto_photoMins" class="time-auto"></span>
           </div>
-          <input type="text" id="to_photoStart" maxlength="5" placeholder="HH:MM"
-                 oninput="updateTimeOverride('photoStart', this.value)">
-          <button class="btn-time-reset" onclick="resetTimeOverride('photoStart')" title="還原自動">⟳</button>
+          <input type="number" id="to_photoMins" min="0" max="30" style="width:60px"
+                 placeholder="自動" oninput="updateDurationOverride('photoMins', this.value)"> <span class="time-unit">分鐘</span>
+          <button class="btn-time-reset" onclick="resetDurationOverride('photoMins')" title="還原自動">⟳</button>
         </div>
         <div class="time-override-row">
           <div class="time-override-label">
             中場休息 Intermission
             <span id="auto_intermissionMins" class="time-auto"></span>
           </div>
-          <input type="number" id="to_intermissionMins" min="1" style="width:60px"
-                 placeholder="自動" oninput="updateTimeOverride('intermissionMins', this.value)"> 分鐘
-          <button class="btn-time-reset" onclick="resetTimeOverride('intermissionMins')" title="還原自動">⟳</button>
+          <input type="number" id="to_intermissionMins" min="0" style="width:60px"
+                 placeholder="自動" oninput="updateDurationOverride('intermissionMins', this.value)"> <span class="time-unit">分鐘</span>
+          <button class="btn-time-reset" onclick="resetDurationOverride('intermissionMins')" title="還原自動">⟳</button>
         </div>
         <div class="time-override-row">
           <div class="time-override-label">
             即席演講 Table Topics
-            <span id="auto_topicsStart" class="time-auto"></span>
+            <span id="auto_topicsMins" class="time-auto"></span>
           </div>
-          <input type="text" id="to_topicsStart" maxlength="5" placeholder="HH:MM"
-                 oninput="updateTimeOverride('topicsStart', this.value)">
-          <button class="btn-time-reset" onclick="resetTimeOverride('topicsStart')" title="還原自動">⟳</button>
+          <input type="number" id="to_topicsMins" min="0" style="width:60px"
+                 placeholder="自動" oninput="updateDurationOverride('topicsMins', this.value)"> <span class="time-unit">分鐘</span>
+          <button class="btn-time-reset" onclick="resetDurationOverride('topicsMins')" title="還原自動">⟳</button>
         </div>
         <div class="time-override-row">
           <div class="time-override-label">
             講評 Evaluation
-            <span id="auto_evalStart" class="time-auto"></span>
+            <span id="auto_evalMins" class="time-auto"></span>
           </div>
-          <input type="text" id="to_evalStart" maxlength="5" placeholder="HH:MM"
-                 oninput="updateTimeOverride('evalStart', this.value)">
-          <button class="btn-time-reset" onclick="resetTimeOverride('evalStart')" title="還原自動">⟳</button>
         </div>
         <div class="time-override-row">
           <div class="time-override-label">
             結束 Closing
-            <span id="auto_closingStart" class="time-auto"></span>
+            <span id="auto_closingMins" class="time-auto"></span>
           </div>
-          <input type="text" id="to_closingStart" maxlength="5" placeholder="HH:MM"
-                 oninput="updateTimeOverride('closingStart', this.value)">
-          <button class="btn-time-reset" onclick="resetTimeOverride('closingStart')" title="還原自動">⟳</button>
+          <input type="number" id="to_closingMins" min="0" max="30" style="width:60px"
+                 placeholder="自動" oninput="updateDurationOverride('closingMins', this.value)"> <span class="time-unit">分鐘</span>
+          <button class="btn-time-reset" onclick="resetDurationOverride('closingMins')" title="還原自動">⟳</button>
         </div>
         <div class="time-override-row">
           <div class="time-override-label">
             分享 Sharing
-            <span id="auto_sharingStart" class="time-auto"></span>
+            <span id="auto_sharingMins" class="time-auto"></span>
           </div>
-          <input type="text" id="to_sharingStart" maxlength="5" placeholder="HH:MM"
-                 oninput="updateTimeOverride('sharingStart', this.value)">
-          <button class="btn-time-reset" onclick="resetTimeOverride('sharingStart')" title="還原自動">⟳</button>
+          <input type="number" id="to_sharingMins" min="0" max="30" style="width:60px"
+                 placeholder="自動" oninput="updateDurationOverride('sharingMins', this.value)"> <span class="time-unit">分鐘</span>
+          <button class="btn-time-reset" onclick="resetDurationOverride('sharingMins')" title="還原自動">⟳</button>
         </div>
       </div>
     </details>

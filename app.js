@@ -212,15 +212,17 @@ function refreshInputsForLang() {
 }
 
 const timeOverrides = {
-  endTime:         '',
-  openingStart:    '',
-  speechStart:     '',
-  photoStart:      '',
-  intermissionMins:'',
-  topicsStart:     '',
-  evalStart:       '',
-  closingStart:    '',
-  sharingStart:    '',
+  endTime:      '',
+  openingStart: '',
+};
+
+const durationOverrides = {
+  openingMins:      '',
+  photoMins:        '',
+  intermissionMins: '',
+  topicsMins:       '',
+  closingMins:      '',
+  sharingMins:      '',
 };
 
 const durationSettings = {
@@ -452,36 +454,45 @@ function addMins(timeStr, delta) {
 }
 
 function calcTimes(spList) {
-  const ov = timeOverrides;
-  const valid = s => /^\d{1,2}:\d{2}$/.test((s || '').trim());
-  const get   = (key, auto) => valid(ov[key]) ? ov[key].trim() : auto;
+  const validTime = s => /^\d{1,2}:\d{2}$/.test((s || '').trim());
+  const getTime   = (key, auto) => validTime(timeOverrides[key]) ? timeOverrides[key].trim() : auto;
+  const validDur  = s => { const n = parseInt(s, 10); return !isNaN(n) && n >= 0; };
+  const getDur    = (key, auto) => validDur(durationOverrides[key]) ? parseInt(durationOverrides[key], 10) : auto;
 
-  const openingStart = get('openingStart', '19:10');
-  const endTime      = get('endTime',      '21:00');
-  const speechStart  = get('speechStart',  addMins(openingStart, 10));
+  const openingStart = getTime('openingStart', '19:10');
+  const endTime      = getTime('endTime',      '21:00');
 
-  // variety session (optional, before prepared speeches)
+  const openingMins = getDur('openingMins', 10);
   const varietyMins = varietySession.enabled ? varietySession.duration : 0;
-  const preparedSpeechStart = addMins(speechStart, varietyMins);
-
   // speech block: sum of max durations + 4 min transition + TME hosting
-  const speechMins = spList.reduce((s, sp) => s + parseDurationMax(sp.duration), 0) + 4 + durationSettings.tmeMins;
-  const photoStart = get('photoStart', addMins(preparedSpeechStart, speechMins));
-
+  const speechMins  = spList.reduce((s, sp) => s + parseDurationMax(sp.duration), 0) + 4 + durationSettings.tmeMins;
+  const photoMins   = getDur('photoMins',   5);
   // eval: 3' per evaluator + timer(1) + ah(1) + LE(5) + GE(5) + GE hosting
-  const evalMins = evaluators.length * 3 + 12 + durationSettings.geMins;
+  const evalMins    = evaluators.length * 3 + 12 + durationSettings.geMins;
+  const closingMins = getDur('closingMins', 6);
+  const sharingMins = getDur('sharingMins', 5);
 
-  const ovIM = parseInt(timeOverrides.intermissionMins, 10);
-  const hasManualIM = !isNaN(ovIM) && String(timeOverrides.intermissionMins).trim() !== '';
+  const ovIM = parseInt(durationOverrides.intermissionMins, 10);
+  const hasManualIM = !isNaN(ovIM) && String(durationOverrides.intermissionMins).trim() !== '';
+  const ovTM = parseInt(durationOverrides.topicsMins, 10);
+  const hasManualTM = !isNaN(ovTM) && String(durationOverrides.topicsMins).trim() !== '';
 
-  const minIM   = hasManualIM ? ovIM : 5;
-  const fixedMins = 10 + varietyMins + speechMins + 4 + evalMins + 6 + 10 + minIM;
+  const baseIM = hasManualIM ? ovIM : 5;
+  const baseTM = hasManualTM ? ovTM : 10;
+
+  const fixedMins = openingMins + varietyMins + speechMins + photoMins + baseIM + baseTM + evalMins + closingMins + sharingMins;
   let   slack     = timeToMins(endTime) - timeToMins(openingStart) - fixedMins;
 
   let topicsMins, intermissionMins;
-  if (hasManualIM) {
+  if (hasManualIM && hasManualTM) {
+    topicsMins       = ovTM;
     intermissionMins = ovIM;
-    topicsMins = 10 + Math.min(10, Math.max(0, slack));
+  } else if (hasManualIM) {
+    intermissionMins = ovIM;
+    topicsMins       = baseTM + Math.min(10, Math.max(0, slack));
+  } else if (hasManualTM) {
+    topicsMins       = ovTM;
+    intermissionMins = baseIM + Math.min(10, Math.max(0, slack));
   } else {
     const topicsExtra       = Math.min(10, Math.max(0, slack));
     slack -= topicsExtra;
@@ -490,13 +501,22 @@ function calcTimes(spList) {
     intermissionMins =  5 + intermissionExtra;
   }
 
-  const topicsStart  = get('topicsStart',  addMins(photoStart,  5 + intermissionMins));
-  const evalStart    = get('evalStart',    addMins(topicsStart, topicsMins));
-  const closingStart = get('closingStart', addMins(evalStart,   evalMins));
-  // closing: TME(3') + awards(3') = 6 min
-  const sharingStart = get('sharingStart', addMins(closingStart, 6));
+  // Calculate start times sequentially
+  const speechStart         = addMins(openingStart,         openingMins);
+  const preparedSpeechStart = addMins(speechStart,          varietyMins);
+  const photoStart          = addMins(preparedSpeechStart,  speechMins);
+  const topicsStart         = addMins(photoStart,           photoMins + intermissionMins);
+  const evalStart           = addMins(topicsStart,          topicsMins);
+  const closingStart        = addMins(evalStart,            evalMins);
+  const sharingStart        = addMins(closingStart,         closingMins);
 
-  return { openingStart, endTime, speechStart, varietyMins, preparedSpeechStart, speechMins, photoStart, topicsStart, evalStart, evalMins, closingStart, sharingStart, intermissionMins, topicsMins };
+  return {
+    openingStart, endTime,
+    openingMins, speechStart, varietyMins, preparedSpeechStart, speechMins,
+    photoStart, photoMins, topicsStart, topicsMins,
+    evalStart, evalMins, closingStart, closingMins, sharingStart, sharingMins,
+    intermissionMins,
+  };
 }
 
 function updateTimeOverride(key, value) {
@@ -511,17 +531,25 @@ function resetTimeOverride(key) {
   updatePreview();
 }
 
+function updateDurationOverride(key, value) {
+  durationOverrides[key] = value;
+  updatePreview();
+}
+
+function resetDurationOverride(key) {
+  durationOverrides[key] = '';
+  const el = document.getElementById(`to_${key}`);
+  if (el) el.value = '';
+  updatePreview();
+}
+
 function refreshAutoHints() {
   const times = calcTimes(speeches);
+
+  // HH:MM fields
   [
     ['endTime',      times.endTime],
     ['openingStart', times.openingStart],
-    ['speechStart',  times.speechStart],
-    ['photoStart',   times.photoStart],
-    ['topicsStart',  times.topicsStart],
-    ['evalStart',    times.evalStart],
-    ['closingStart', times.closingStart],
-    ['sharingStart', times.sharingStart],
   ].forEach(([key, val]) => {
     const el = document.getElementById(`auto_${key}`);
     if (el) el.textContent = `自動: ${val}`;
@@ -529,10 +557,26 @@ function refreshAutoHints() {
     if (input) input.classList.toggle('is-overridden', !!timeOverrides[key].trim());
   });
 
-  const imEl = document.getElementById('auto_intermissionMins');
-  if (imEl) imEl.textContent = `自動: ${times.intermissionMins} 分鐘`;
-  const imInput = document.getElementById('to_intermissionMins');
-  if (imInput) imInput.classList.toggle('is-overridden', !!String(timeOverrides.intermissionMins).trim());
+  // Duration fields (overrideable)
+  [
+    ['openingMins',      times.openingMins],
+    ['photoMins',        times.photoMins],
+    ['intermissionMins', times.intermissionMins],
+    ['topicsMins',       times.topicsMins],
+    ['closingMins',      times.closingMins],
+    ['sharingMins',      times.sharingMins],
+  ].forEach(([key, val]) => {
+    const el = document.getElementById(`auto_${key}`);
+    if (el) el.textContent = `自動: ${val} 分鐘`;
+    const input = document.getElementById(`to_${key}`);
+    if (input) input.classList.toggle('is-overridden', String(durationOverrides[key]).trim() !== '');
+  });
+
+  // Read-only info (speeches, eval)
+  const spEl = document.getElementById('auto_speechMins');
+  if (spEl) spEl.textContent = `${times.speechMins} 分鐘`;
+  const evEl = document.getElementById('auto_evalMins');
+  if (evEl) evEl.textContent = `${times.evalMins} 分鐘`;
 }
 
 // ================================================================
@@ -926,8 +970,9 @@ let allClubs        = [];
 function collectSaveData() {
   return {
     ...collectData(),
-    timeOverrides:    { ...timeOverrides },
-    durationSettings: { ...durationSettings },
+    timeOverrides:     { ...timeOverrides },
+    durationOverrides: { ...durationOverrides },
+    durationSettings:  { ...durationSettings },
     lang,
     themeImgUrl:      images.themeImg || null,
     varietySession:   { ...varietySession },
@@ -951,8 +996,21 @@ function applyAgendaData(d) {
   evaluators = d.evaluators || [];
 
   if (d.timeOverrides) {
-    Object.assign(timeOverrides, d.timeOverrides);
+    timeOverrides.endTime      = d.timeOverrides.endTime      || '';
+    timeOverrides.openingStart = d.timeOverrides.openingStart || '';
+    // migrate intermissionMins from old format
+    if (d.timeOverrides.intermissionMins !== undefined && String(d.timeOverrides.intermissionMins).trim() !== '') {
+      durationOverrides.intermissionMins = String(d.timeOverrides.intermissionMins);
+    }
     Object.entries(timeOverrides).forEach(([key, val]) => {
+      const el = document.getElementById(`to_${key}`);
+      if (el) el.value = val || '';
+    });
+  }
+
+  if (d.durationOverrides) {
+    Object.assign(durationOverrides, d.durationOverrides);
+    Object.entries(durationOverrides).forEach(([key, val]) => {
       const el = document.getElementById(`to_${key}`);
       if (el) el.value = val || '';
     });
@@ -1434,7 +1492,16 @@ function applyDefaultState() {
     { title: '', speaker: '', duration: "5'-7'", pathwayCode: '', pathwayLevel: '', pathwayProject: '' },
   ];
   evaluators = ['', '', ''];
-  Object.keys(timeOverrides).forEach(k => { timeOverrides[k] = ''; });
+  Object.keys(timeOverrides).forEach(k => {
+    timeOverrides[k] = '';
+    const el = document.getElementById(`to_${k}`);
+    if (el) el.value = '';
+  });
+  Object.keys(durationOverrides).forEach(k => {
+    durationOverrides[k] = '';
+    const el = document.getElementById(`to_${k}`);
+    if (el) el.value = '';
+  });
   Object.keys(images).forEach(k => { if (k !== 'logo' && k !== 'fbQr' && k !== 'lineQr') images[k] = null; });
   const themeStatusEl = document.getElementById('themeImgStatus');
   if (themeStatusEl) themeStatusEl.textContent = '';

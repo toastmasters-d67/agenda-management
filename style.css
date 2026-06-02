@@ -234,6 +234,7 @@ details[open] summary::before { content: "▼ "; }
   transition: color 0.15s, border-color 0.15s;
 }
 .btn-time-reset:hover { color: #772432; border-color: #772432; }
+.time-unit { font-size: 11px; color: #666; flex-shrink: 0; }
 
 /* Form actions */
 .form-actions {
