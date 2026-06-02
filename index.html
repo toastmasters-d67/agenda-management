@@ -130,14 +130,23 @@
         </div>
         <div class="time-override-row">
           <div class="time-override-label">
-            開始時間 Start Time
-            <span id="auto_openingStart" class="time-auto"></span>
+            報到開始 Reception Start
+            <span id="auto_receptionStart" class="time-auto"></span>
           </div>
-          <input type="text" id="to_openingStart" maxlength="5" placeholder="HH:MM"
-                 oninput="updateTimeOverride('openingStart', this.value)">
-          <button class="btn-time-reset" onclick="resetTimeOverride('openingStart')" title="還原自動">⟳</button>
+          <input type="text" id="to_receptionStart" maxlength="5" placeholder="18:50"
+                 oninput="updateTimeOverride('receptionStart', this.value)">
+          <button class="btn-time-reset" onclick="resetTimeOverride('receptionStart')" title="還原自動">⟳</button>
         </div>
         <hr style="margin:6px 0;border-color:#ddd">
+        <div class="time-override-row">
+          <div class="time-override-label">
+            報到 Reception
+            <span id="auto_receptionMins" class="time-auto"></span>
+          </div>
+          <input type="number" id="to_receptionMins" min="0" max="60" style="width:60px"
+                 placeholder="自動" oninput="updateDurationOverride('receptionMins', this.value)"> <span class="time-unit">分鐘</span>
+          <button class="btn-time-reset" onclick="resetDurationOverride('receptionMins')" title="還原自動">⟳</button>
+        </div>
         <div class="time-override-row">
           <div class="time-override-label">
             開幕 Opening

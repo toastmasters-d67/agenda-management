@@ -212,11 +212,12 @@ function refreshInputsForLang() {
 }
 
 const timeOverrides = {
-  endTime:      '',
-  openingStart: '',
+  endTime:        '',
+  receptionStart: '',
 };
 
 const durationOverrides = {
+  receptionMins:    '',
   openingMins:      '',
   photoMins:        '',
   intermissionMins: '',
@@ -459,10 +460,12 @@ function calcTimes(spList) {
   const validDur  = s => { const n = parseInt(s, 10); return !isNaN(n) && n >= 0; };
   const getDur    = (key, auto) => validDur(durationOverrides[key]) ? parseInt(durationOverrides[key], 10) : auto;
 
-  const openingStart = getTime('openingStart', '19:10');
-  const endTime      = getTime('endTime',      '21:00');
+  const receptionStart = getTime('receptionStart', '18:50');
+  const endTime        = getTime('endTime',        '21:00');
 
-  const openingMins = getDur('openingMins', 10);
+  const receptionMins = getDur('receptionMins', 20);
+  const openingStart  = addMins(receptionStart, receptionMins);
+  const openingMins   = getDur('openingMins', 10);
   const varietyMins = varietySession.enabled ? varietySession.duration : 0;
   // speech block: sum of max durations + 4 min transition + TME hosting
   const speechMins  = spList.reduce((s, sp) => s + parseDurationMax(sp.duration), 0) + 4 + durationSettings.tmeMins;
@@ -511,7 +514,7 @@ function calcTimes(spList) {
   const sharingStart        = addMins(closingStart,         closingMins);
 
   return {
-    openingStart, endTime,
+    receptionStart, receptionMins, openingStart, endTime,
     openingMins, speechStart, varietyMins, preparedSpeechStart, speechMins,
     photoStart, photoMins, topicsStart, topicsMins,
     evalStart, evalMins, closingStart, closingMins, sharingStart, sharingMins,
@@ -548,8 +551,8 @@ function refreshAutoHints() {
 
   // HH:MM fields
   [
-    ['endTime',      times.endTime],
-    ['openingStart', times.openingStart],
+    ['endTime',        times.endTime],
+    ['receptionStart', times.receptionStart],
   ].forEach(([key, val]) => {
     const el = document.getElementById(`auto_${key}`);
     if (el) el.textContent = `自動: ${val}`;
@@ -559,6 +562,7 @@ function refreshAutoHints() {
 
   // Duration fields (overrideable)
   [
+    ['receptionMins',    times.receptionMins],
     ['openingMins',      times.openingMins],
     ['photoMins',        times.photoMins],
     ['intermissionMins', times.intermissionMins],
@@ -705,8 +709,8 @@ function generateAgendaHTML(data) {
   // Reception — right panel cell starts here with rowspan
   tbody += `
   <tr>
-    <td class="time-cell">18:50</td>
-    <td class="dur-cell">20'</td>
+    <td class="time-cell">${times.receptionStart}</td>
+    <td class="dur-cell">${times.receptionMins}'</td>
     <td class="agenda-cell">${t('reception')}</td>
     <td class="taker-cell">${esc(displayMember(data.receptionHost))}</td>
     <td class="rp-cell" rowspan="${totalRows}">${rightPanelHtml}</td>
@@ -716,7 +720,7 @@ function generateAgendaHTML(data) {
   tbody += `
   <tr>
     <td class="time-cell" rowspan="5">${times.openingStart}</td>
-    <td class="dur-cell" rowspan="5">10'</td>
+    <td class="dur-cell" rowspan="5">${times.openingMins}'</td>
     <td class="agenda-cell">${t('callingOrder')}</td>
     <td class="taker-cell">${esc(displayMember(data.callingToOrder))}</td>
   </tr>
@@ -771,7 +775,7 @@ function generateAgendaHTML(data) {
   tbody += `
   <tr>
     <td class="time-cell">${times.photoStart}</td>
-    <td class="dur-cell">5'</td>
+    <td class="dur-cell">${times.photoMins}'</td>
     <td class="agenda-cell">${t('groupPhoto')}</td>
     <td class="taker-cell">${t('allParticipants')}</td>
   </tr>`;
@@ -839,12 +843,12 @@ function generateAgendaHTML(data) {
   tbody += `
   <tr>
     <td class="time-cell" rowspan="2">${times.closingStart}</td>
-    <td class="dur-cell">3'</td>
+    <td class="dur-cell">${Math.ceil(times.closingMins / 2)}'</td>
     <td class="agenda-cell">${t('tmeClosing')}</td>
     <td class="taker-cell">${esc(displayMember(data.tme))}</td>
   </tr>
   <tr>
-    <td class="dur-cell">3'</td>
+    <td class="dur-cell">${Math.floor(times.closingMins / 2)}'</td>
     <td class="agenda-cell">${t('awards')}</td>
     <td class="taker-cell">${esc(displayMember(data.awardsPresenter))}</td>
   </tr>`;
@@ -853,7 +857,7 @@ function generateAgendaHTML(data) {
   tbody += `
   <tr>
     <td class="time-cell">${times.sharingStart}</td>
-    <td class="dur-cell">5'</td>
+    <td class="dur-cell">${times.sharingMins}'</td>
     <td class="agenda-cell">${t('sharing')}</td>
     <td class="taker-cell">${esc(displayMember(data.sharingFeedback))}</td>
   </tr>`;
@@ -996,9 +1000,10 @@ function applyAgendaData(d) {
   evaluators = d.evaluators || [];
 
   if (d.timeOverrides) {
-    timeOverrides.endTime      = d.timeOverrides.endTime      || '';
-    timeOverrides.openingStart = d.timeOverrides.openingStart || '';
-    // migrate intermissionMins from old format
+    timeOverrides.endTime        = d.timeOverrides.endTime        || '';
+    // migrate openingStart → receptionStart
+    timeOverrides.receptionStart = d.timeOverrides.receptionStart || d.timeOverrides.openingStart || '';
+    // migrate intermissionMins from old timeOverrides format
     if (d.timeOverrides.intermissionMins !== undefined && String(d.timeOverrides.intermissionMins).trim() !== '') {
       durationOverrides.intermissionMins = String(d.timeOverrides.intermissionMins);
     }
