@@ -696,8 +696,9 @@ details[open] summary::before { content: "▼ "; }
 
 /* Column widths — must sum to 178mm (194 - 8*2 padding) */
 .agenda-table col.col-time   { width: 10mm; }
+.agenda-table col.col-secdur { width: 7mm; }
 .agenda-table col.col-dur    { width: 8mm; }
-.agenda-table col.col-agenda { width: 68mm; }
+.agenda-table col.col-agenda { width: 61mm; }
 .agenda-table col.col-taker  { width: 44mm; }
 .agenda-table col.col-rp     { width: 48mm; }
 
@@ -729,6 +730,10 @@ details[open] summary::before { content: "▼ "; }
 }
 .agenda-table td.dur-cell {
   text-align: center; font-size: 8pt; vertical-align: middle;
+}
+/* Section total duration — spans all rows of a multi-row section */
+.agenda-table td.secdur-cell {
+  text-align: center; font-size: 8pt; font-weight: bold; vertical-align: middle;
 }
 .agenda-table td.agenda-cell {
   white-space: pre-wrap; line-height: 1.4; font-size: 8pt;

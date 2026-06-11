@@ -710,7 +710,7 @@ function generateAgendaHTML(data) {
   tbody += `
   <tr>
     <td class="time-cell">${times.receptionStart}</td>
-    <td class="dur-cell">${times.receptionMins}'</td>
+    <td class="dur-cell" colspan="2">${times.receptionMins}'</td>
     <td class="agenda-cell">${t('reception')}</td>
     <td class="taker-cell">${esc(displayMember(data.receptionHost))}</td>
     <td class="rp-cell" rowspan="${totalRows}">${rightPanelHtml}</td>
@@ -720,7 +720,7 @@ function generateAgendaHTML(data) {
   tbody += `
   <tr>
     <td class="time-cell" rowspan="5">${times.openingStart}</td>
-    <td class="dur-cell" rowspan="5">${times.openingMins}'</td>
+    <td class="dur-cell" rowspan="5" colspan="2">${times.openingMins}'</td>
     <td class="agenda-cell">${t('callingOrder')}</td>
     <td class="taker-cell">${esc(displayMember(data.callingToOrder))}</td>
   </tr>
@@ -746,7 +746,7 @@ function generateAgendaHTML(data) {
     tbody += `
   <tr class="row-section">
     <td class="time-cell">${times.speechStart}</td>
-    <td class="dur-cell">${times.varietyMins}'</td>
+    <td class="dur-cell" colspan="2">${times.varietyMins}'</td>
     <td class="agenda-cell"><strong>${t('varietySession')}</strong></td>
     <td class="taker-cell">${esc(displayMember(varietySession.host))}</td>
   </tr>`;
@@ -757,8 +757,8 @@ function generateAgendaHTML(data) {
   tbody += `
   <tr class="row-section">
     <td class="time-cell" rowspan="${speechBlockSpan}">${times.preparedSpeechStart}</td>
-    <td class="dur-cell">${times.speechMins}'</td>
-    <td class="agenda-cell"><strong>${t('preparedSpeech')}</strong></td>
+    <td class="secdur-cell" rowspan="${speechBlockSpan}">${times.speechMins}'</td>
+    <td class="agenda-cell" colspan="2"><strong>${t('preparedSpeech')}</strong></td>
     <td class="taker-cell">${esc(displayMember(data.tme))}</td>
   </tr>`;
 
@@ -775,7 +775,7 @@ function generateAgendaHTML(data) {
   tbody += `
   <tr>
     <td class="time-cell">${times.photoStart}</td>
-    <td class="dur-cell">${times.photoMins}'</td>
+    <td class="dur-cell" colspan="2">${times.photoMins}'</td>
     <td class="agenda-cell">${t('groupPhoto')}</td>
     <td class="taker-cell">${t('allParticipants')}</td>
   </tr>`;
@@ -783,28 +783,28 @@ function generateAgendaHTML(data) {
   // Intermission
   tbody += `
   <tr class="row-intermission">
-    <td colspan="4">${t('intermission', times.intermissionMins)}</td>
+    <td colspan="5">${t('intermission', times.intermissionMins)}</td>
   </tr>`;
 
   // Table Topics
   tbody += `
   <tr class="row-section">
     <td class="time-cell">${times.topicsStart}</td>
-    <td class="dur-cell">${times.topicsMins}'</td>
+    <td class="dur-cell" colspan="2">${times.topicsMins}'</td>
     <td class="agenda-cell"><strong>${t('tableTopics')}</strong></td>
     <td class="taker-cell">${esc(displayMember(data.tableTopicsMaster))}</td>
   </tr>`;
 
   // Spacer
-  tbody += `<tr class="row-spacer"><td colspan="4"></td></tr>`;
+  tbody += `<tr class="row-spacer"><td colspan="5"></td></tr>`;
 
   // Evaluation block — rowspan = 1 (header) + M (evaluators) + 4 (timer, ah, LE, GE)
   const evalRowSpan = evalCount + 5;
   tbody += `
   <tr class="row-section">
     <td class="time-cell" rowspan="${evalRowSpan}">${times.evalStart}</td>
-    <td class="dur-cell">${times.evalMins}'</td>
-    <td class="agenda-cell"><strong>${t('evaluation')}</strong></td>
+    <td class="secdur-cell" rowspan="${evalRowSpan}">${times.evalMins}'</td>
+    <td class="agenda-cell" colspan="2"><strong>${t('evaluation')}</strong></td>
     <td class="taker-cell">${esc(displayMember(data.generalEvaluator))}</td>
   </tr>`;
 
@@ -843,12 +843,12 @@ function generateAgendaHTML(data) {
   tbody += `
   <tr>
     <td class="time-cell" rowspan="2">${times.closingStart}</td>
-    <td class="dur-cell">${Math.ceil(times.closingMins / 2)}'</td>
+    <td class="dur-cell" colspan="2">${Math.ceil(times.closingMins / 2)}'</td>
     <td class="agenda-cell">${t('tmeClosing')}</td>
     <td class="taker-cell">${esc(displayMember(data.tme))}</td>
   </tr>
   <tr>
-    <td class="dur-cell">${Math.floor(times.closingMins / 2)}'</td>
+    <td class="dur-cell" colspan="2">${Math.floor(times.closingMins / 2)}'</td>
     <td class="agenda-cell">${t('awards')}</td>
     <td class="taker-cell">${esc(displayMember(data.awardsPresenter))}</td>
   </tr>`;
@@ -857,7 +857,7 @@ function generateAgendaHTML(data) {
   tbody += `
   <tr>
     <td class="time-cell">${times.sharingStart}</td>
-    <td class="dur-cell">${times.sharingMins}'</td>
+    <td class="dur-cell" colspan="2">${times.sharingMins}'</td>
     <td class="agenda-cell">${t('sharing')}</td>
     <td class="taker-cell">${esc(displayMember(data.sharingFeedback))}</td>
   </tr>`;
@@ -879,6 +879,7 @@ ${headerHtml}
 <table class="agenda-table">
   <colgroup>
     <col class="col-time">
+    <col class="col-secdur">
     <col class="col-dur">
     <col class="col-agenda">
     <col class="col-taker">
@@ -887,7 +888,7 @@ ${headerHtml}
   <thead>
     <tr>
       <th>${t('thTime')}</th>
-      <th></th>
+      <th colspan="2"></th>
       <th>${t('thAgenda')}</th>
       <th>${t('thTaker')}</th>
       <th>${t('thPathways')}</th>

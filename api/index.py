@@ -772,8 +772,13 @@ if not os.getenv("VERCEL"):
     import pathlib
     from fastapi.staticfiles import StaticFiles
     from fastapi.responses import FileResponse as _FileResponse
+    from fastapi.responses import RedirectResponse as _RedirectResponse
 
     _root = pathlib.Path(__file__).parent.parent
+
+    # mirror the vercel.json "/" -> "/login" redirect for local dev
+    @app.get("/")
+    def page_root(): return _RedirectResponse("/login", status_code=302)
 
     @app.get("/login")
     def page_login(): return _FileResponse(_root / "login.html")
