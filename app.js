@@ -704,6 +704,15 @@ function generateAgendaHTML(data) {
   const rightPanelHtml = buildRightPanel();
   const headerHtml = buildHeader(data);
 
+  // Dynamic duration column width: size it to the longest single-column
+  // duration string (e.g. "12'-15'") so double-digit minutes don't overflow.
+  // The col-dur + col-agenda pool is fixed at 69mm, so widen one / shrink the other.
+  const DUR_POOL = 69; // mm shared by col-dur + col-agenda
+  const durStrings = data.speeches.map(sp => sp.duration || "5'-7'").concat(["3'~5'"]);
+  const maxDurLen = durStrings.reduce((m, s) => Math.max(m, String(s).length), 0);
+  const durWidth = Math.min(16, Math.max(8, Math.round(maxDurLen * 1.5 + 3)));
+  const agendaWidth = DUR_POOL - durWidth;
+
   let tbody = '';
 
   // Reception — right panel cell starts here with rowspan
@@ -880,8 +889,8 @@ ${headerHtml}
   <colgroup>
     <col class="col-time">
     <col class="col-secdur">
-    <col class="col-dur">
-    <col class="col-agenda">
+    <col class="col-dur" style="width:${durWidth}mm">
+    <col class="col-agenda" style="width:${agendaWidth}mm">
     <col class="col-taker">
     <col class="col-rp">
   </colgroup>
