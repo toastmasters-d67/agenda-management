@@ -6,7 +6,7 @@ import { setAuth, clearAuth, applyRoleUI, isSystemAdmin, canWrite, getClubId } f
 import { MemberAC } from '@/lib/memberAutocomplete';
 import { MAX_EVAL_EVALUATORS } from '@/lib/agendaTemplates';
 import { parseRolesSheet, resolveMemberName, isPersonField, META_IDS } from '@/lib/rolesSheet';
-import { loadPathways, pathwayOptionsHtml, levelOptionsHtml, projectSelect } from '@/lib/pathways';
+import { loadPathways, CUSTOM_VALUE, pathwaySelect, levelSelect, projectSelect } from '@/lib/pathways';
 import Sidebar from '@/components/Sidebar';
 import './roles.css';
 
@@ -567,6 +567,9 @@ function renderMatrix() {
       const cells = meetings.map((m) => `<td class="rm-cell">
         <select class="rm-input rm-select" id="cell_${m.id}_${rid}" data-mid="${m.id}" data-rid="${rid}"
                 ${readOnly ? 'disabled' : ''} onchange="window.__rolesOnPathwayInput(this)"></select>
+        <input type="text" class="rm-input rm-custom" id="custom_${m.id}_${rid}" data-mid="${m.id}" data-rid="${rid}"
+               style="display:none" placeholder="自訂…" ${readOnly ? 'disabled' : ''}
+               oninput="window.__rolesOnPathwayCustom(this)">
       </td>`).join('');
       return `<tr class="rm-sub-row">
         <th class="rm-role">
@@ -611,45 +614,61 @@ function renderMatrix() {
 }
 
 /**
- * Options for one Pathways sub-row cell, from the same meeting's draft — the
- * project list follows whatever path/level that column currently shows. A
- * value that isn't in the catalog stays as its own "（原值）" option.
+ * One Pathways sub-row cell, from the same meeting's draft — the project list
+ * follows whatever path/level that column currently shows. A value outside the
+ * catalog (typed by hand, `4-1` from the sheet) selects 「其他／自訂」and sits
+ * in the text box under the select, still editable.
  */
 function fillPathwaySelect(m, role) {
-  const el = document.getElementById(`cell_${m.id}_${roleId(role)}`);
-  if (!el) return;
+  const rid = roleId(role);
+  const el  = document.getElementById(`cell_${m.id}_${rid}`);
+  const box = document.getElementById(`custom_${m.id}_${rid}`);
+  if (!el || !box) return;
   const n = role.idx + 1;
-  const raw = m.draft[roleId(role)] ?? '';
-  if (role.sub === 'pwcode') {
-    el.innerHTML = pathwayOptionsHtml(raw);
-    el.value = raw;
-  } else if (role.sub === 'pwlevel') {
-    el.innerHTML = levelOptionsHtml(raw);
-    el.value = raw;
-  } else {
-    const { html, value } = projectSelect(m.draft[`speech${n}_pwcode`], m.draft[`speech${n}_pwlevel`], raw);
-    el.innerHTML = html;
-    el.value = value;
-  }
+  const raw = m.draft[rid] ?? '';
+  const { html, value, custom } =
+    role.sub === 'pwcode'  ? pathwaySelect(raw) :
+    role.sub === 'pwlevel' ? levelSelect(raw) :
+    projectSelect(m.draft[`speech${n}_pwcode`], m.draft[`speech${n}_pwlevel`], raw);
+  el.innerHTML = html;
+  el.value = value;
   el.title = el.selectedOptions[0]?.textContent || '';
+  box.style.display = custom ? '' : 'none';
+  if (document.activeElement !== box) box.value = custom ? raw : '';
 }
 
-function onPathwayInput(el) {
-  onCellInput(el);
-  el.title = el.selectedOptions[0]?.textContent || '';
-  // Changing the path or level re-filters that speech's project list.
+// Changing the path or level re-filters that speech's project list.
+function refilterProject(el) {
   const sf = el.dataset.rid.match(/^speech(\d+)_(pwcode|pwlevel)$/);
   const m = meetings.find((x) => String(x.id) === el.dataset.mid);
   if (sf && m) fillPathwaySelect(m, roleById[`speech${sf[1]}_project`]);
 }
 
+function onPathwayInput(el) {
+  const box = document.getElementById(`custom_${el.dataset.mid}_${el.dataset.rid}`);
+  if (el.value === CUSTOM_VALUE) {
+    onCellInput(el, '');
+    if (box) { box.value = ''; box.style.display = ''; box.focus(); }
+  } else {
+    if (box) box.style.display = 'none';
+    onCellInput(el);
+  }
+  el.title = el.selectedOptions[0]?.textContent || '';
+  refilterProject(el);
+}
+
+function onPathwayCustom(box) {
+  onCellInput(box);
+  refilterProject(box);
+}
+
 /** Called on every keystroke — must never rebuild the table (would drop focus). */
-function onCellInput(el) {
+function onCellInput(el, value = el.value) {
   const m = meetings.find((x) => String(x.id) === el.dataset.mid);
   if (!m) return;
   const rid = el.dataset.rid;
-  m.draft[rid] = el.value;
-  if (el.value === (roleGet(m.data, roleById[rid]) || '')) m.dirty.delete(rid);
+  m.draft[rid] = value;
+  if (value === (roleGet(m.data, roleById[rid]) || '')) m.dirty.delete(rid);
   else m.dirty.add(rid);
   refreshDecorations();
   updateSaveBar();
@@ -1235,6 +1254,7 @@ export default function RolesPage() {
     // Bridge for oninput="..."/onclick="..." strings inside renderMatrix()'s innerHTML.
     window.__rolesOnCellInput = onCellInput;
     window.__rolesOnPathwayInput = onPathwayInput;
+    window.__rolesOnPathwayCustom = onPathwayCustom;
     window.__rolesStartAddMeeting = startAddMeeting;
     window.__rolesCancelAddMeeting = cancelAddMeeting;
     window.__rolesConfirmAddMeeting = confirmAddMeeting;
@@ -1284,6 +1304,7 @@ export default function RolesPage() {
     return () => {
       delete window.__rolesOnCellInput;
       delete window.__rolesOnPathwayInput;
+      delete window.__rolesOnPathwayCustom;
       delete window.__rolesStartAddMeeting;
       delete window.__rolesCancelAddMeeting;
       delete window.__rolesConfirmAddMeeting;

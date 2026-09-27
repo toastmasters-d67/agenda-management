@@ -204,6 +204,7 @@ table.role-matrix th.rm-role {
 /* Pathways sub-rows under each speaker: dropdowns, visually subordinate. */
 select.rm-select { appearance: auto; cursor: pointer; text-overflow: ellipsis; padding: 4px 6px; font-size: 11.5px; color: #334155; }
 select.rm-select:disabled { cursor: default; }
+.rm-input.rm-custom { margin-top: 3px; padding: 4px 6px; font-size: 11.5px; border-color: #e2e8f0; }
 tr.rm-sub-row th.rm-role { padding-left: 22px; }
 tr.rm-sub-row .rm-role-zh { font-weight: 500; font-size: 11px; color: #475569; }
 

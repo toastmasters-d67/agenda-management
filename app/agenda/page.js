@@ -16,13 +16,13 @@ import {
   loadPathways,
   pathwayPairs,
   pathwayList,
-  CUSTOM_PROJECT,
+  CUSTOM_VALUE,
   levelValue,
   levelNumber,
   requiredLevelOf,
   projectName,
-  pathwayOptionsHtml,
-  levelOptionsHtml,
+  pathwaySelect,
+  levelSelect,
   projectSelect,
 } from '@/lib/pathways';
 import './agenda.css';
@@ -423,28 +423,18 @@ function renderSpeechForms() {
           <option value="zh">國語 Mandarin</option>
         </select>
       </div>
+      ${Object.entries(PW_FIELDS).map(([field, f]) => `
       <div class="form-row">
-        <label>學習路徑 Pathway</label>
-        <select class="sp-pathway" oninput="window.__idxSpeechPathway(${i},this.value)">${pathwayOptionsHtml(sp.pathwayCode)}</select>
-      </div>
-      <div class="form-row">
-        <label>等級 Level</label>
-        <select class="sp-level" oninput="window.__idxSpeechLevel(${i},this.value)"></select>
-      </div>
-      <div class="form-row">
-        <label>專案名稱 / 備註 Project</label>
-        <select class="sp-project" oninput="window.__idxSpeechProject(${i},this.value)"></select>
-        <input type="text" class="sp-project-custom" style="display:none;margin-top:4px"
-               oninput="window.__idxUpdateSpeech(${i},'pathwayProject',this.value)" placeholder="自訂專案名稱或備註">
-      </div>
+        <label>${f.label}</label>
+        <select class="${f.cls}" oninput="window.__idxSpeechPwSelect(${i},'${field}',this.value)"></select>
+        <input type="text" class="${f.cls}-custom" style="display:none;margin-top:4px"
+               oninput="window.__idxSpeechPwCustom(${i},'${field}',this.value)" placeholder="${f.placeholder}">
+      </div>`).join('')}
     </div>
   `).join('');
 
   speeches.forEach((sp, i) => {
-    const pw = document.querySelector(`#speech-${i} .sp-pathway`);
-    if (pw) pw.value = sp.pathwayCode || '';
-    fillLevelField(i);
-    fillProjectField(i);
+    Object.keys(PW_FIELDS).forEach((field) => fillPwField(i, field));
     const lg = document.querySelector(`#speech-${i} .sp-lang`);
     if (lg) lg.value = sp.speechLang || 'en';
   });
@@ -454,65 +444,70 @@ function renderSpeechForms() {
   updatePreview();
 }
 
-// Level select. A level that isn't one of L1–L5 (e.g. `4-1` from the roles
-// sheet) stays selected as its own option, so opening an agenda never
-// rewrites it.
-function fillLevelField(i) {
-  const sel = document.querySelector(`#speech-${i} .sp-level`);
-  if (!sel) return;
-  const raw = speeches[i].pathwayLevel || '';
-  sel.innerHTML = levelOptionsHtml(raw);
-  sel.value = raw;
-}
+// The three Pathways fields: each a catalog <select> plus a text box for
+// anything else ("其他／自訂"). A stored value the catalog doesn't know — typed
+// by hand, `4-1` from the roles sheet — opens straight into the text box, so
+// it stays editable and is never rewritten by just opening the agenda.
+// Projects are stored by English name and printed in the agenda's language.
+const PW_FIELDS = {
+  pathwayCode: {
+    label: '學習路徑 Pathway', cls: 'sp-pathway', placeholder: '自訂路徑代碼或名稱',
+    build: (sp) => pathwaySelect(sp.pathwayCode),
+  },
+  pathwayLevel: {
+    label: '等級 Level', cls: 'sp-level', placeholder: '自訂等級，例如 L3P2',
+    build: (sp) => levelSelect(sp.pathwayLevel),
+  },
+  pathwayProject: {
+    label: '專案名稱 / 備註 Project', cls: 'sp-project', placeholder: '自訂專案名稱或備註',
+    build: (sp) => projectSelect(sp.pathwayCode, sp.pathwayLevel, sp.pathwayProject),
+  },
+};
 
-// Project select, filtered by the speech's path + level. The stored value is
-// the official English name; a value outside the catalog is a free-text note
-// and shows in the custom box instead.
-function fillProjectField(i) {
-  const sel = document.querySelector(`#speech-${i} .sp-project`);
-  const box = document.querySelector(`#speech-${i} .sp-project-custom`);
+function fillPwField(i, field) {
+  const { cls, build } = PW_FIELDS[field];
+  const sel = document.querySelector(`#speech-${i} .${cls}`);
+  const box = document.querySelector(`#speech-${i} .${cls}-custom`);
   if (!sel || !box) return;
-  const sp = speeches[i];
-  const { html, value, custom } = projectSelect(sp.pathwayCode, sp.pathwayLevel, sp.pathwayProject, { allowCustom: true });
+  const { html, value, custom } = build(speeches[i]);
   sel.innerHTML = html;
   sel.value = value;
   box.style.display = custom ? '' : 'none';
-  box.value = custom ? sp.pathwayProject : '';
+  if (document.activeElement !== box) box.value = custom ? speeches[i][field] : '';
 }
 
-function setSpeechPathway(i, code) {
-  speeches[i].pathwayCode = code;
-  fillProjectField(i);
+// Path and level filter the project list, so a change to either refills it.
+function afterPwChange(i, field) {
+  if (field !== 'pathwayProject') fillPwField(i, 'pathwayProject');
   updatePreview();
 }
 
-function setSpeechLevel(i, level) {
-  speeches[i].pathwayLevel = level;
-  fillProjectField(i);
-  updatePreview();
-}
-
-function setSpeechProject(i, value) {
+function setSpeechPwSelect(i, field, value) {
   const sp = speeches[i];
-  const box = document.querySelector(`#speech-${i} .sp-project-custom`);
-  if (value === CUSTOM_PROJECT) {
-    sp.pathwayProject = '';
+  const box = document.querySelector(`#speech-${i} .${PW_FIELDS[field].cls}-custom`);
+  if (value === CUSTOM_VALUE) {
+    sp[field] = '';
     if (box) { box.value = ''; box.style.display = ''; box.focus(); }
-    updatePreview();
+    afterPwChange(i, field);
     return;
   }
   if (box) box.style.display = 'none';
-  sp.pathwayProject = value;
+  sp[field] = value;
   // Picking a required project with no level yet fills the level in for you.
-  if (value && !levelNumber(sp.pathwayLevel)) {
+  if (field === 'pathwayProject' && value && !levelNumber(sp.pathwayLevel)) {
     const l = requiredLevelOf(sp.pathwayCode, value);
     if (l) {
       sp.pathwayLevel = levelValue(l);
-      fillLevelField(i);
-      fillProjectField(i);
+      fillPwField(i, 'pathwayLevel');
+      fillPwField(i, 'pathwayProject');
     }
   }
-  updatePreview();
+  afterPwChange(i, field);
+}
+
+function setSpeechPwCustom(i, field, value) {
+  speeches[i][field] = value;
+  afterPwChange(i, field);
 }
 
 function renderEvaluatorForms() {
@@ -2002,9 +1997,8 @@ export default function AgendaIndexPage() {
     // renderCalendar/renderAgendaListItems above.
     window.__idxRemoveSpeech = removeSpeech;
     window.__idxUpdateSpeech = updateSpeech;
-    window.__idxSpeechPathway = setSpeechPathway;
-    window.__idxSpeechLevel = setSpeechLevel;
-    window.__idxSpeechProject = setSpeechProject;
+    window.__idxSpeechPwSelect = setSpeechPwSelect;
+    window.__idxSpeechPwCustom = setSpeechPwCustom;
     window.__idxRemoveEvaluator = removeEvaluator;
     window.__idxAddEvaluator = addEvaluator;
     window.__idxEvalInput = (i, value) => { evaluators[i] = value; updatePreview(); };
@@ -2075,9 +2069,8 @@ export default function AgendaIndexPage() {
       window.removeEventListener('resize', applyPreviewScale);
       delete window.__idxRemoveSpeech;
       delete window.__idxUpdateSpeech;
-      delete window.__idxSpeechPathway;
-      delete window.__idxSpeechLevel;
-      delete window.__idxSpeechProject;
+      delete window.__idxSpeechPwSelect;
+      delete window.__idxSpeechPwCustom;
       delete window.__idxRemoveEvaluator;
       delete window.__idxAddEvaluator;
       delete window.__idxEvalInput;

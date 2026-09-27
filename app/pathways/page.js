@@ -276,7 +276,7 @@ const handlers = {
   },
   deletePath() {
     const p = currentPath();
-    if (!confirm(`確定刪除路徑「${p.code} ${p.zh || p.en}」？\n既有議程上已選的代碼會保留原值，但不再出現在選單中。`)) return;
+    if (!confirm(`確定刪除路徑「${p.code} ${p.zh || p.en}」？\n既有議程上已選的代碼會保留，改以「其他／自訂」文字顯示。`)) return;
     draft.paths.splice(draft.paths.indexOf(p), 1);
     selected = draft.paths[0]?.code ?? null;
     render();
