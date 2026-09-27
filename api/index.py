@@ -7,6 +7,7 @@ import bcrypt
 import jwt
 import psycopg2
 import psycopg2.errors
+import psycopg2.extras
 import psycopg2.pool
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -1104,52 +1105,45 @@ def put_pathways(req: PathwayCatalogRequest, user: dict = Depends(require_system
                 if old_zh and old_zh != p["zh"]:
                     renames[old_zh] = p["en"]
 
-            # ---- projects: delete gone, park renamed names (swaps would trip
-            # the UNIQUE), then write final names and insert new ones.
+            # Every write below is one statement per table (execute_values),
+            # not one per row: the API and the DB can be far apart (Vercel's
+            # default region vs. Neon in Singapore), and ~240 round trips ran a
+            # save past the function time limit.
+            batch = lambda sql, rows, **kw: psycopg2.extras.execute_values(cur, sql, rows, page_size=10000, **kw)
+
+            # ---- projects: delete gone, park kept names (renames/swaps would
+            # trip the UNIQUE mid-way), then write final names and insert new ones.
             keep = [p["id"] for p in projects if p["id"] is not None]
             cur.execute("DELETE FROM pathway_projects WHERE NOT (id = ANY(%s))", (keep or [0],))
             cur.execute("UPDATE pathway_projects SET name_en = '#parked#' || id WHERE id = ANY(%s)", (keep or [0],))
-            ids = {}
-            for order, p in enumerate(projects):
-                if p["id"] is None:
-                    cur.execute(
-                        "INSERT INTO pathway_projects (name_en, name_zh, sort_order) VALUES (%s, %s, %s)"
-                        " RETURNING id",
-                        (p["en"], p["zh"], order),
-                    )
-                    ids[p["en"]] = cur.fetchone()[0]
-                else:
-                    cur.execute(
-                        "UPDATE pathway_projects SET name_en=%s, name_zh=%s, sort_order=%s, updated_at=NOW()"
-                        " WHERE id=%s",
-                        (p["en"], p["zh"], order, p["id"]),
-                    )
-                    ids[p["en"]] = p["id"]
+            ids = {p["en"]: p["id"] for p in projects if p["id"] is not None}
+            kept = [(p["id"], p["en"], p["zh"], order) for order, p in enumerate(projects) if p["id"] is not None]
+            added = [(p["en"], p["zh"], order) for order, p in enumerate(projects) if p["id"] is None]
+            if kept:
+                batch("UPDATE pathway_projects AS p SET name_en = v.en, name_zh = v.zh, sort_order = v.o, updated_at = NOW()"
+                      " FROM (VALUES %s) AS v(id, en, zh, o) WHERE p.id = v.id",
+                      kept, template="(%s::int, %s::text, %s::text, %s::int)")
+            if added:
+                rows = batch("INSERT INTO pathway_projects (name_en, name_zh, sort_order) VALUES %s RETURNING id, name_en",
+                             added, fetch=True)
+                ids.update({en: pid for pid, en in rows})
 
             # ---- paths and their level lists: replaced wholesale
             cur.execute("DELETE FROM pathway_required")
             cur.execute("DELETE FROM pathway_electives")
             cur.execute("DELETE FROM pathways WHERE NOT (code = ANY(%s))", (list(codes) or [""],))
-            for order, p in enumerate(paths):
-                cur.execute(
-                    "INSERT INTO pathways (code, name_en, name_zh, legacy, sort_order) VALUES (%s, %s, %s, %s, %s)"
-                    " ON CONFLICT (code) DO UPDATE SET name_en=EXCLUDED.name_en, name_zh=EXCLUDED.name_zh,"
-                    " legacy=EXCLUDED.legacy, sort_order=EXCLUDED.sort_order, updated_at=NOW()",
-                    (p["code"], p["en"], p["zh"], p["legacy"], order),
-                )
-                for level, names in p["required"].items():
-                    for j, n in enumerate(names):
-                        cur.execute(
-                            "INSERT INTO pathway_required (pathway_code, level, project_id, sort_order)"
-                            " VALUES (%s, %s, %s, %s)",
-                            (p["code"], level, ids[n], j),
-                        )
-            for level, names in electives.items():
-                for j, n in enumerate(names):
-                    cur.execute(
-                        "INSERT INTO pathway_electives (level, project_id, sort_order) VALUES (%s, %s, %s)",
-                        (level, ids[n], j),
-                    )
+            if paths:
+                batch("INSERT INTO pathways (code, name_en, name_zh, legacy, sort_order) VALUES %s"
+                      " ON CONFLICT (code) DO UPDATE SET name_en=EXCLUDED.name_en, name_zh=EXCLUDED.name_zh,"
+                      " legacy=EXCLUDED.legacy, sort_order=EXCLUDED.sort_order, updated_at=NOW()",
+                      [(p["code"], p["en"], p["zh"], p["legacy"], order) for order, p in enumerate(paths)])
+            required = [(p["code"], level, ids[n], j)
+                        for p in paths for level, names in p["required"].items() for j, n in enumerate(names)]
+            if required:
+                batch("INSERT INTO pathway_required (pathway_code, level, project_id, sort_order) VALUES %s", required)
+            elective_rows = [(level, ids[n], j) for level, names in electives.items() for j, n in enumerate(names)]
+            if elective_rows:
+                batch("INSERT INTO pathway_electives (level, project_id, sort_order) VALUES %s", elective_rows)
 
             # ---- follow renames into saved agendas (all clubs — the catalog is global)
             if renames:
@@ -1159,13 +1153,17 @@ def put_pathways(req: PathwayCatalogRequest, user: dict = Depends(require_system
                       AND EXISTS (SELECT 1 FROM jsonb_array_elements(data->'speeches') s
                                   WHERE s->>'pathwayProject' = ANY(%s))
                 """, (list(renames),))
+                updates = []
                 for agenda_id, data in cur.fetchall():
                     data = parse_jsonb(data)
                     for sp in data["speeches"]:
                         if isinstance(sp, dict) and sp.get("pathwayProject") in renames:
                             sp["pathwayProject"] = renames[sp["pathwayProject"]]
-                    cur.execute("UPDATE agendas SET data=%s::jsonb WHERE id=%s", (json.dumps(data), agenda_id))
-                    renamed_agendas += 1
+                    updates.append((agenda_id, json.dumps(data)))
+                if updates:
+                    batch("UPDATE agendas AS a SET data = v.data::jsonb FROM (VALUES %s) AS v(id, data) WHERE a.id = v.id",
+                          updates, template="(%s::int, %s::text)")
+                renamed_agendas = len(updates)
 
             catalog = _load_pathway_catalog(cur)
 

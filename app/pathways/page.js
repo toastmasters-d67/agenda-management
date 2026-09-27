@@ -22,7 +22,7 @@ import './pathways.css';
 let draft    = null;   // { projects:[{k,id,en,zh}], paths:[{code,en,zh,legacy,isNew,required:{lvl:[k]}}], electives:{lvl:[k]} }
 let baseline = '';     // JSON of the draft as last loaded/saved
 let tab      = 'paths';
-let selected = null;   // code of the path open in the editor
+let selected = null;   // the path open in the editor (a draft object — a new path has no code yet)
 let search   = '';
 let nextKey  = 1;
 let toastTimer = null;
@@ -72,9 +72,10 @@ function toPayload() {
 }
 
 function resetDraft() {
+  const code = selected?.code;
   draft = toDraft(getPathwayCatalog());
   baseline = JSON.stringify(draft);
-  if (!draft.paths.some((p) => p.code === selected)) selected = draft.paths[0]?.code ?? null;
+  selected = draft.paths.find((p) => p.code === code) || draft.paths[0] || null;
 }
 
 const isDirty = () => !!draft && JSON.stringify(draft) !== baseline;
@@ -94,7 +95,7 @@ const projectText = (k) => {
   const p = project(k);
   return p ? `${p.en || '（未命名）'}${p.zh ? `｜${p.zh}` : ''}` : '';
 };
-const currentPath = () => draft.paths.find((p) => p.code === selected) || null;
+const currentPath = () => (draft.paths.includes(selected) ? selected : null);
 
 /** How many lists use a project — shown on the 專案 tab, and asked about before deleting. */
 function usage(k) {
@@ -144,8 +145,8 @@ function renderList(scope, level, keys, note = '') {
 
 function renderPathsTab() {
   const list = draft.paths.map((p, i) => `
-    <li class="pw-path${p.code === selected ? ' active' : ''}" onclick="window.__pwSelect(${i})">
-      <span class="pw-path-code">${esc(p.code || '？')}</span>
+    <li class="pw-path${p === selected ? ' active' : ''}" onclick="window.__pwSelect(${i})">
+      <span class="pw-path-code">${esc(p.code || '新')}</span>
       <span class="pw-path-name">${esc(p.zh || p.en || '（未命名）')}</span>
       ${p.legacy ? '<span class="pw-badge">已停用</span>' : ''}
     </li>`).join('');
@@ -157,7 +158,7 @@ function renderPathsTab() {
       <div class="pw-fields">
         <label>代碼 Code
           <input type="text" maxlength="4" value="${esc(p.code)}" ${p.isNew ? '' : 'disabled title="既有議程以代碼記錄路徑，建立後不可修改"'}
-                 oninput="window.__pwPathField('code',this.value)" onchange="window.__pwRender()">
+                 placeholder="例：PM" oninput="window.__pwPathField('code',this.value)">
         </label>
         <label class="grow">英文名稱 English
           <input type="text" value="${esc(p.en)}" oninput="window.__pwPathField('en',this.value)">
@@ -233,7 +234,7 @@ function focusKeep(fn) {
 
 const handlers = {
   setTab(t) { tab = t; render(); },
-  select(i) { selected = draft.paths[i].code; render(); },
+  select(i) { selected = draft.paths[i]; render(); },
   render() { render(); },
   move(scope, level, i, d) {
     const list = listFor(scope, level);
@@ -245,10 +246,11 @@ const handlers = {
   pathField(field, value) {
     const p = currentPath();
     if (field === 'code') {
-      const code = value.trim().toUpperCase();
-      p.code = code;
-      selected = code;
-      return focusKeep(() => {});
+      p.code = value.trim().toUpperCase();
+      return focusKeep(() => {
+        const label = document.querySelector('.pw-path.active .pw-path-code');
+        if (label) label.textContent = p.code || '新';
+      });
     }
     p[field] = value;
     if (field === 'legacy') return render();
@@ -263,22 +265,21 @@ const handlers = {
     render();
   },
   addPath() {
-    let n = 1;
-    while (draft.paths.some((p) => p.code === `NEW${n}`)) n++;
-    const path = { code: `NEW${n}`.slice(0, 4), en: '', zh: '', legacy: false, isNew: true,
+    const path = { code: '', en: '', zh: '', legacy: false, isNew: true,
                    required: Object.fromEntries(LEVELS.map((l) => [l, []])) };
     // Pre-fill Level 1 from an existing current path — it's the same on every path.
     const model = draft.paths.find((p) => !p.legacy);
     if (model) path.required[1] = [...model.required[1]];
     draft.paths.push(path);
-    selected = path.code;
+    selected = path;
     render();
+    document.querySelector('.pw-fields input')?.focus();
   },
   deletePath() {
     const p = currentPath();
     if (!confirm(`確定刪除路徑「${p.code} ${p.zh || p.en}」？\n既有議程上已選的代碼會保留，改以「其他／自訂」文字顯示。`)) return;
     draft.paths.splice(draft.paths.indexOf(p), 1);
-    selected = draft.paths[0]?.code ?? null;
+    selected = draft.paths[0] || null;
     render();
   },
   projectField(k, field, value) { focusKeep(() => { project(k)[field] = value; }); },
@@ -318,6 +319,7 @@ function validate(payload) {
   }
   const codes = new Set();
   for (const p of payload.paths) {
+    if (!p.code) return `新路徑「${p.zh || p.en || '未命名'}」還沒填代碼`;
     if (!/^[A-Z]{2,4}$/.test(p.code)) return `路徑代碼「${p.code}」須為 2～4 個英文字母`;
     if (codes.has(p.code)) return `路徑代碼重複：${p.code}`;
     codes.add(p.code);
