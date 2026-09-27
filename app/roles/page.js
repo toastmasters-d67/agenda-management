@@ -6,6 +6,7 @@ import { setAuth, clearAuth, applyRoleUI, isSystemAdmin, canWrite, getClubId } f
 import { MemberAC } from '@/lib/memberAutocomplete';
 import { MAX_EVAL_EVALUATORS } from '@/lib/agendaTemplates';
 import { parseRolesSheet, resolveMemberName, isPersonField, META_IDS } from '@/lib/rolesSheet';
+import { loadPathways, pathwayOptionsHtml, levelOptionsHtml, projectSelect } from '@/lib/pathways';
 import Sidebar from '@/components/Sidebar';
 import './roles.css';
 
@@ -126,8 +127,8 @@ function roleSet(data, role, value) {
   if (role.kind === 'speech' || role.kind === 'speechField') {
     if (!Array.isArray(data.speeches)) data.speeches = [];
     while (data.speeches.length <= role.idx) data.speeches.push(blankSpeech());
-    // `speechField` carries the speech's title / pathway, which the matrix has
-    // no row for — only the Google Sheet import writes them (see applyImport).
+    // `speechField` carries the speech's title / pathway: the Pathways fields
+    // are dropdown sub-rows here, the title only arrives via the sheet import.
     data.speeches[role.idx][role.kind === 'speech' ? 'speaker' : role.field] = value;
   } else if (role.kind === 'evaluator') {
     if (!Array.isArray(data.evaluators)) data.evaluators = [];
@@ -444,6 +445,13 @@ function buildRows() {
       for (let i = 0; i < maxSpeech; i++) {
         pushRole({ key: `speech${i + 1}`, kind: 'speech', idx: i,
                    label: `指定演講者 #${i + 1}`, en: `Speaker #${i + 1}` });
+        // The speech's Pathways fields, as dropdown sub-rows under the speaker.
+        // Same ids the sheet importer writes (see importRole).
+        ['pwcode', 'pwlevel', 'project'].forEach((sub) => {
+          const spec = SPEECH_FIELDS[sub];
+          pushRole({ key: `speech${i + 1}_${sub}`, kind: 'speechField', idx: i, field: spec.field,
+                     sub, label: `#${i + 1} ${spec.label}`, en: spec.en });
+        });
       }
     }
     if (group.dynamic === 'evaluator') {
@@ -555,6 +563,19 @@ function renderMatrix() {
       </tr>`;
     }
 
+    if (r.role.kind === 'speechField') {
+      const cells = meetings.map((m) => `<td class="rm-cell">
+        <select class="rm-input rm-select" id="cell_${m.id}_${rid}" data-mid="${m.id}" data-rid="${rid}"
+                ${readOnly ? 'disabled' : ''} onchange="window.__rolesOnPathwayInput(this)"></select>
+      </td>`).join('');
+      return `<tr class="rm-sub-row">
+        <th class="rm-role">
+          <span class="rm-role-zh">${esc(r.role.label)}</span>
+          <span class="rm-role-en">${esc(r.role.en || '')}</span>
+        </th>${cells}${addColCell}
+      </tr>`;
+    }
+
     const cells = meetings.map((m) => {
       const v      = m.draft[rid] ?? '';
       const acLang = m.data.lang === 'zh' ? 'zh' : 'en';
@@ -582,8 +603,44 @@ function renderMatrix() {
       <tbody>${body}</tbody>
     </table>`;
 
+  meetings.forEach((m) => rows.forEach((r) => {
+    if (r.type === 'role' && r.role.kind === 'speechField' && !r.role.locked) fillPathwaySelect(m, r.role);
+  }));
   refreshDecorations();
   updateSaveBar();
+}
+
+/**
+ * Options for one Pathways sub-row cell, from the same meeting's draft — the
+ * project list follows whatever path/level that column currently shows. A
+ * value that isn't in the catalog stays as its own "（原值）" option.
+ */
+function fillPathwaySelect(m, role) {
+  const el = document.getElementById(`cell_${m.id}_${roleId(role)}`);
+  if (!el) return;
+  const n = role.idx + 1;
+  const raw = m.draft[roleId(role)] ?? '';
+  if (role.sub === 'pwcode') {
+    el.innerHTML = pathwayOptionsHtml(raw);
+    el.value = raw;
+  } else if (role.sub === 'pwlevel') {
+    el.innerHTML = levelOptionsHtml(raw);
+    el.value = raw;
+  } else {
+    const { html, value } = projectSelect(m.draft[`speech${n}_pwcode`], m.draft[`speech${n}_pwlevel`], raw);
+    el.innerHTML = html;
+    el.value = value;
+  }
+  el.title = el.selectedOptions[0]?.textContent || '';
+}
+
+function onPathwayInput(el) {
+  onCellInput(el);
+  el.title = el.selectedOptions[0]?.textContent || '';
+  // Changing the path or level re-filters that speech's project list.
+  const sf = el.dataset.rid.match(/^speech(\d+)_(pwcode|pwlevel)$/);
+  const m = meetings.find((x) => String(x.id) === el.dataset.mid);
+  if (sf && m) fillPathwaySelect(m, roleById[`speech${sf[1]}_project`]);
 }
 
 /** Called on every keystroke — must never rebuild the table (would drop focus). */
@@ -619,10 +676,12 @@ function refreshDecorations() {
       if (!el) return;
       // Recomputed rather than replayed from render time: a note can change as
       // the cell is typed into (a variety host switches its session on).
+      el.classList.toggle('rm-edited', m.dirty.has(rid));
+      // Pathways sub-rows describe a speech, they aren't roles to assign.
+      if (r.role.kind === 'speechField') return;
       const note = slotNote(m, r.role);
       if (norm(m.draft[rid])) filled++;
       if (norm(m.draft[rid]) || !note) slots++;
-      el.classList.toggle('rm-edited', m.dirty.has(rid));
       el.title       = note;
       el.placeholder = note ? '＋' : '—';
       el.parentElement?.classList.toggle('rm-inactive', !!note);
@@ -719,12 +778,15 @@ function discardChanges() {
 // The one immediate write is creating agendas for meetings the sheet has and
 // the database does not — a column has to exist before it can be filled.
 
-/** Speech sub-fields carried by the sheet but absent from the matrix rows. */
+/**
+ * Speech sub-fields carried by the sheet. The Pathways ones are also matrix
+ * sub-rows (see buildRows); the title has no row.
+ */
 const SPEECH_FIELDS = {
   title:   { field: 'title',          label: '演講題目' },
-  pwcode:  { field: 'pathwayCode',    label: '學習路徑' },
-  pwlevel: { field: 'pathwayLevel',   label: '路徑等級' },
-  project: { field: 'pathwayProject', label: '專案名稱' },
+  pwcode:  { field: 'pathwayCode',    label: '學習路徑', en: 'Pathway' },
+  pwlevel: { field: 'pathwayLevel',   label: '路徑等級', en: 'Level' },
+  project: { field: 'pathwayProject', label: '專案名稱', en: 'Project' },
 };
 
 let importPlan = null;   // built by buildImportPlan(), consumed by applyImport()
@@ -784,6 +846,7 @@ function updateImportButton() {
 function importRole(id) {
   const sf = id.match(/^speech(\d+)_(title|pwcode|pwlevel|project)$/);
   if (sf) {
+    if (roleById[id]) return roleById[id];   // a Pathways sub-row on screen
     const spec = SPEECH_FIELDS[sf[2]];
     return (roleById[id] = {
       key: id, kind: 'speechField', idx: Number(sf[1]) - 1, field: spec.field,
@@ -1171,6 +1234,7 @@ export default function RolesPage() {
   useEffect(() => {
     // Bridge for oninput="..."/onclick="..." strings inside renderMatrix()'s innerHTML.
     window.__rolesOnCellInput = onCellInput;
+    window.__rolesOnPathwayInput = onPathwayInput;
     window.__rolesStartAddMeeting = startAddMeeting;
     window.__rolesCancelAddMeeting = cancelAddMeeting;
     window.__rolesConfirmAddMeeting = confirmAddMeeting;
@@ -1206,7 +1270,10 @@ export default function RolesPage() {
 
       // Needed by everyone, not just admins — activeTemplateKey() resolves the
       // active club's template from this list even for a single-club user.
-      await loadClubsMeta();
+      // The Pathways catalog feeds the speech sub-rows and the sheet import's
+      // pathway-code check, so it has to be in before the matrix renders.
+      const [, pathwaysOk] = await Promise.all([loadClubsMeta(), loadPathways()]);
+      if (!pathwaysOk) toast('Pathways 目錄載入失敗，學習路徑欄位暫時只能保留原值', true);
 
       if (isSystemAdmin()) {
         if (selectedClubId == null) { showPickClubHint(); return; }
@@ -1216,6 +1283,7 @@ export default function RolesPage() {
 
     return () => {
       delete window.__rolesOnCellInput;
+      delete window.__rolesOnPathwayInput;
       delete window.__rolesStartAddMeeting;
       delete window.__rolesCancelAddMeeting;
       delete window.__rolesConfirmAddMeeting;

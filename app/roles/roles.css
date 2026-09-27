@@ -201,6 +201,12 @@ table.role-matrix th.rm-role {
 .rm-input.rm-edited { background: #fef9e7; border-color: #e6c34a; }
 .rm-cell.rm-inactive .rm-input { opacity: 0.55; }
 
+/* Pathways sub-rows under each speaker: dropdowns, visually subordinate. */
+select.rm-select { appearance: auto; cursor: pointer; text-overflow: ellipsis; padding: 4px 6px; font-size: 11.5px; color: #334155; }
+select.rm-select:disabled { cursor: default; }
+tr.rm-sub-row th.rm-role { padding-left: 22px; }
+tr.rm-sub-row .rm-role-zh { font-weight: 500; font-size: 11px; color: #475569; }
+
 /* Roles the active club's template doesn't use — shown (not removed) so the
    matrix always reflects the full shared schema, but locked, greyed, and
    excluded from the assignment tally. Distinct from .rm-inactive (a real slot

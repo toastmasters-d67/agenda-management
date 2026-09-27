@@ -966,6 +966,212 @@ def fetch_roles_sheet(club_id: int, user: dict = Depends(require_club_admin_or_a
     return {"csv": body.decode("utf-8-sig", errors="replace"), "sourceUrl": csv_url}
 
 
+# ------------------------------------------------------------------ pathways
+# The Pathways catalog behind the agenda editor's and role matrix's dropdowns
+# (tables from migration 0013). Everyone signed in reads it; only a system
+# admin changes it, and always as a whole — the 「Pathways 路徑管理」page edits
+# a draft of the full catalog and PUTs it back, so a save can never leave a
+# path pointing at a project that another half-finished save removed.
+
+_PATHWAY_CODE_RE = re.compile(r"^[A-Z]{2,4}$")
+_PATHWAY_LEVELS = ("1", "2", "3", "4", "5")
+
+
+class PathwayProjectItem(BaseModel):
+    id: Optional[int] = None    # absent = new project
+    en: str
+    zh: str = ""
+
+
+class PathwayItem(BaseModel):
+    code: str
+    en: str
+    zh: str = ""
+    legacy: bool = False
+    required: Dict[str, List[str]] = {}   # level → project English names, in order
+
+
+class PathwayCatalogRequest(BaseModel):
+    projects: List[PathwayProjectItem]
+    paths: List[PathwayItem]
+    electives: Dict[str, List[str]] = {}  # level → project English names, in order
+
+
+def _load_pathway_catalog(cur) -> dict:
+    cur.execute("SELECT id, name_en, name_zh FROM pathway_projects ORDER BY sort_order, id")
+    projects = [{"id": r[0], "en": r[1], "zh": r[2]} for r in cur.fetchall()]
+
+    cur.execute("SELECT code, name_en, name_zh, legacy FROM pathways ORDER BY sort_order, code")
+    paths = [{"code": r[0], "en": r[1], "zh": r[2], "legacy": r[3], "required": {}}
+             for r in cur.fetchall()]
+    by_code = {p["code"]: p for p in paths}
+
+    cur.execute("""
+        SELECT r.pathway_code, r.level, p.name_en
+        FROM pathway_required r JOIN pathway_projects p ON p.id = r.project_id
+        ORDER BY r.pathway_code, r.level, r.sort_order
+    """)
+    for code, level, name in cur.fetchall():
+        by_code[code]["required"].setdefault(str(level), []).append(name)
+
+    cur.execute("""
+        SELECT e.level, p.name_en
+        FROM pathway_electives e JOIN pathway_projects p ON p.id = e.project_id
+        ORDER BY e.level, e.sort_order
+    """)
+    electives: Dict[str, List[str]] = {}
+    for level, name in cur.fetchall():
+        electives.setdefault(str(level), []).append(name)
+
+    return {"projects": projects, "paths": paths, "electives": electives}
+
+
+def _clean_name(s: str) -> str:
+    return re.sub(r"\s+", " ", s or "").strip()
+
+
+@app.get("/api/pathways")
+def get_pathways(user: dict = Depends(get_current_user)):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            return _load_pathway_catalog(cur)
+
+
+@app.put("/api/pathways")
+def put_pathways(req: PathwayCatalogRequest, user: dict = Depends(require_system_admin)):
+    # ---- validate the whole payload before touching anything
+    projects = []
+    seen = set()
+    for p in req.projects:
+        en, zh = _clean_name(p.en), _clean_name(p.zh)
+        if not en:
+            raise HTTPException(status_code=400, detail="專案的英文名稱不可空白")
+        if en.lower() in seen:
+            raise HTTPException(status_code=400, detail=f"專案名稱重複：{en}")
+        seen.add(en.lower())
+        projects.append({"id": p.id, "en": en, "zh": zh})
+    known = {p["en"] for p in projects}
+
+    def level_lists(raw: Dict[str, List[str]], where: str) -> Dict[int, List[str]]:
+        out = {}
+        for level, names in raw.items():
+            if level not in _PATHWAY_LEVELS:
+                raise HTTPException(status_code=400, detail=f"{where}：等級必須是 1～5")
+            clean = []
+            for n in names:
+                n = _clean_name(n)
+                if n not in known:
+                    raise HTTPException(status_code=400, detail=f"{where}：找不到專案「{n}」")
+                if n not in clean:
+                    clean.append(n)
+            out[int(level)] = clean
+        return out
+
+    paths = []
+    codes = set()
+    for p in req.paths:
+        code = _clean_name(p.code).upper()
+        if not _PATHWAY_CODE_RE.match(code):
+            raise HTTPException(status_code=400, detail=f"路徑代碼「{p.code}」須為 2～4 個英文字母")
+        if code in codes:
+            raise HTTPException(status_code=400, detail=f"路徑代碼重複：{code}")
+        codes.add(code)
+        en = _clean_name(p.en)
+        if not en:
+            raise HTTPException(status_code=400, detail=f"{code} 的英文名稱不可空白")
+        paths.append({"code": code, "en": en, "zh": _clean_name(p.zh), "legacy": p.legacy,
+                      "required": level_lists(p.required, code)})
+    electives = level_lists(req.electives, "選修清單")
+
+    renamed_agendas = 0
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, name_en, name_zh FROM pathway_projects FOR UPDATE")
+            existing = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
+            for p in projects:
+                if p["id"] is not None and p["id"] not in existing:
+                    raise HTTPException(status_code=409, detail="目錄已被其他人修改，請重新載入後再編輯")
+
+            # Old stored value → new English name, for every renamed project,
+            # so agendas that pointed at the old name keep resolving.
+            renames = {}
+            for p in projects:
+                if p["id"] is None:
+                    continue
+                old_en, old_zh = existing[p["id"]]
+                if old_en != p["en"]:
+                    renames[old_en] = p["en"]
+                if old_zh and old_zh != p["zh"]:
+                    renames[old_zh] = p["en"]
+
+            # ---- projects: delete gone, park renamed names (swaps would trip
+            # the UNIQUE), then write final names and insert new ones.
+            keep = [p["id"] for p in projects if p["id"] is not None]
+            cur.execute("DELETE FROM pathway_projects WHERE NOT (id = ANY(%s))", (keep or [0],))
+            cur.execute("UPDATE pathway_projects SET name_en = '#parked#' || id WHERE id = ANY(%s)", (keep or [0],))
+            ids = {}
+            for order, p in enumerate(projects):
+                if p["id"] is None:
+                    cur.execute(
+                        "INSERT INTO pathway_projects (name_en, name_zh, sort_order) VALUES (%s, %s, %s)"
+                        " RETURNING id",
+                        (p["en"], p["zh"], order),
+                    )
+                    ids[p["en"]] = cur.fetchone()[0]
+                else:
+                    cur.execute(
+                        "UPDATE pathway_projects SET name_en=%s, name_zh=%s, sort_order=%s, updated_at=NOW()"
+                        " WHERE id=%s",
+                        (p["en"], p["zh"], order, p["id"]),
+                    )
+                    ids[p["en"]] = p["id"]
+
+            # ---- paths and their level lists: replaced wholesale
+            cur.execute("DELETE FROM pathway_required")
+            cur.execute("DELETE FROM pathway_electives")
+            cur.execute("DELETE FROM pathways WHERE NOT (code = ANY(%s))", (list(codes) or [""],))
+            for order, p in enumerate(paths):
+                cur.execute(
+                    "INSERT INTO pathways (code, name_en, name_zh, legacy, sort_order) VALUES (%s, %s, %s, %s, %s)"
+                    " ON CONFLICT (code) DO UPDATE SET name_en=EXCLUDED.name_en, name_zh=EXCLUDED.name_zh,"
+                    " legacy=EXCLUDED.legacy, sort_order=EXCLUDED.sort_order, updated_at=NOW()",
+                    (p["code"], p["en"], p["zh"], p["legacy"], order),
+                )
+                for level, names in p["required"].items():
+                    for j, n in enumerate(names):
+                        cur.execute(
+                            "INSERT INTO pathway_required (pathway_code, level, project_id, sort_order)"
+                            " VALUES (%s, %s, %s, %s)",
+                            (p["code"], level, ids[n], j),
+                        )
+            for level, names in electives.items():
+                for j, n in enumerate(names):
+                    cur.execute(
+                        "INSERT INTO pathway_electives (level, project_id, sort_order) VALUES (%s, %s, %s)",
+                        (level, ids[n], j),
+                    )
+
+            # ---- follow renames into saved agendas (all clubs — the catalog is global)
+            if renames:
+                cur.execute("""
+                    SELECT id, data FROM agendas
+                    WHERE jsonb_typeof(data->'speeches') = 'array'
+                      AND EXISTS (SELECT 1 FROM jsonb_array_elements(data->'speeches') s
+                                  WHERE s->>'pathwayProject' = ANY(%s))
+                """, (list(renames),))
+                for agenda_id, data in cur.fetchall():
+                    data = parse_jsonb(data)
+                    for sp in data["speeches"]:
+                        if isinstance(sp, dict) and sp.get("pathwayProject") in renames:
+                            sp["pathwayProject"] = renames[sp["pathwayProject"]]
+                    cur.execute("UPDATE agendas SET data=%s::jsonb WHERE id=%s", (json.dumps(data), agenda_id))
+                    renamed_agendas += 1
+
+            catalog = _load_pathway_catalog(cur)
+
+    return {**catalog, "renamedAgendas": renamed_agendas}
+
+
 # ------------------------------------------------------------------ social posts
 # Draft storage for the 社群發文 feature: one row per post, holding the shared
 # body plus a per-platform variant and the image URLs. Publishing to Facebook /

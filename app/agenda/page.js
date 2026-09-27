@@ -12,6 +12,19 @@ import {
   templatePlaceholders,
   applyTmplVisibility,
 } from '@/lib/agendaTemplates';
+import {
+  loadPathways,
+  pathwayPairs,
+  pathwayList,
+  CUSTOM_PROJECT,
+  levelValue,
+  levelNumber,
+  requiredLevelOf,
+  projectName,
+  pathwayOptionsHtml,
+  levelOptionsHtml,
+  projectSelect,
+} from '@/lib/pathways';
 import './agenda.css';
 
 // ================================================================
@@ -29,38 +42,6 @@ import './agenda.css';
 // data-ac-lang attribute, so the two implementations aren't drop-in
 // compatible. lib/memberAutocomplete.js is used by the /roles page only.
 // ================================================================
-
-const PATHWAYS = [
-  ['DL', 'Dynamic Leadership'],
-  ['EH', 'Engaging Humor'],
-  ['MS', 'Motivational Strategies'],
-  ['PI', 'Persuasive Influence'],
-  ['PM', 'Presentation Mastery'],
-  ['VC', 'Visionary Communication'],
-  ['EC', 'Effective Coaching'],
-  ['IP', 'Innovative Planning'],
-  ['SR', 'Strategic Relationships'],
-  ['TC', 'Team Collaboration'],
-  ['LD', 'Leadership Development'],
-];
-
-const PATHWAYS_ZH = [
-  ['DL', '動態領導'],
-  ['EH', '風趣表達'],
-  ['MS', '激勵策略'],
-  ['PI', '說服影響'],
-  ['PM', '演講精粹'],
-  ['VC', '願景溝通'],
-  ['EC', '高效教練'],
-  ['IP', '創新規劃'],
-  ['SR', '策略人脈'],
-  ['TC', '團隊合作'],
-  ['LD', '領導力發展'],
-];
-
-const PATHWAY_OPTIONS = PATHWAYS.map(([code, name]) =>
-  `<option value="${code}">${code} — ${name}</option>`
-).join('');
 
 // ================================================================
 // STATE
@@ -444,18 +425,17 @@ function renderSpeechForms() {
       </div>
       <div class="form-row">
         <label>學習路徑 Pathway</label>
-        <select class="sp-pathway" oninput="window.__idxUpdateSpeech(${i},'pathwayCode',this.value)">
-          <option value="">— 不指定 —</option>
-          ${PATHWAY_OPTIONS}
-        </select>
+        <select class="sp-pathway" oninput="window.__idxSpeechPathway(${i},this.value)">${pathwayOptionsHtml(sp.pathwayCode)}</select>
       </div>
       <div class="form-row">
-        <label>等級 Level (e.g. L1P3)</label>
-        <input type="text" value="${sp.pathwayLevel}" oninput="window.__idxUpdateSpeech(${i},'pathwayLevel',this.value)" placeholder="L1P3">
+        <label>等級 Level</label>
+        <select class="sp-level" oninput="window.__idxSpeechLevel(${i},this.value)"></select>
       </div>
       <div class="form-row">
-        <label>專案名稱 / 備註</label>
-        <input type="text" value="${sp.pathwayProject}" oninput="window.__idxUpdateSpeech(${i},'pathwayProject',this.value)" placeholder="Introduction to...">
+        <label>專案名稱 / 備註 Project</label>
+        <select class="sp-project" oninput="window.__idxSpeechProject(${i},this.value)"></select>
+        <input type="text" class="sp-project-custom" style="display:none;margin-top:4px"
+               oninput="window.__idxUpdateSpeech(${i},'pathwayProject',this.value)" placeholder="自訂專案名稱或備註">
       </div>
     </div>
   `).join('');
@@ -463,12 +443,75 @@ function renderSpeechForms() {
   speeches.forEach((sp, i) => {
     const pw = document.querySelector(`#speech-${i} .sp-pathway`);
     if (pw) pw.value = sp.pathwayCode || '';
+    fillLevelField(i);
+    fillProjectField(i);
     const lg = document.querySelector(`#speech-${i} .sp-lang`);
     if (lg) lg.value = sp.speechLang || 'en';
   });
 
   renderEvaluatorForms();
 
+  updatePreview();
+}
+
+// Level select. A level that isn't one of L1–L5 (e.g. `4-1` from the roles
+// sheet) stays selected as its own option, so opening an agenda never
+// rewrites it.
+function fillLevelField(i) {
+  const sel = document.querySelector(`#speech-${i} .sp-level`);
+  if (!sel) return;
+  const raw = speeches[i].pathwayLevel || '';
+  sel.innerHTML = levelOptionsHtml(raw);
+  sel.value = raw;
+}
+
+// Project select, filtered by the speech's path + level. The stored value is
+// the official English name; a value outside the catalog is a free-text note
+// and shows in the custom box instead.
+function fillProjectField(i) {
+  const sel = document.querySelector(`#speech-${i} .sp-project`);
+  const box = document.querySelector(`#speech-${i} .sp-project-custom`);
+  if (!sel || !box) return;
+  const sp = speeches[i];
+  const { html, value, custom } = projectSelect(sp.pathwayCode, sp.pathwayLevel, sp.pathwayProject, { allowCustom: true });
+  sel.innerHTML = html;
+  sel.value = value;
+  box.style.display = custom ? '' : 'none';
+  box.value = custom ? sp.pathwayProject : '';
+}
+
+function setSpeechPathway(i, code) {
+  speeches[i].pathwayCode = code;
+  fillProjectField(i);
+  updatePreview();
+}
+
+function setSpeechLevel(i, level) {
+  speeches[i].pathwayLevel = level;
+  fillProjectField(i);
+  updatePreview();
+}
+
+function setSpeechProject(i, value) {
+  const sp = speeches[i];
+  const box = document.querySelector(`#speech-${i} .sp-project-custom`);
+  if (value === CUSTOM_PROJECT) {
+    sp.pathwayProject = '';
+    if (box) { box.value = ''; box.style.display = ''; box.focus(); }
+    updatePreview();
+    return;
+  }
+  if (box) box.style.display = 'none';
+  sp.pathwayProject = value;
+  // Picking a required project with no level yet fills the level in for you.
+  if (value && !levelNumber(sp.pathwayLevel)) {
+    const l = requiredLevelOf(sp.pathwayCode, value);
+    if (l) {
+      sp.pathwayLevel = levelValue(l);
+      fillLevelField(i);
+      fillProjectField(i);
+    }
+  }
   updatePreview();
 }
 
@@ -787,7 +830,7 @@ function buildSpeechAgendaLine(sp) {
   const parts = [];
   if (sp.pathwayCode) parts.push(sp.pathwayCode);
   if (sp.pathwayLevel) parts.push(sp.pathwayLevel);
-  if (sp.pathwayProject) parts.push(sp.pathwayProject);
+  if (sp.pathwayProject) parts.push(projectName(sp.pathwayProject, lang));
   if (parts.length) line += `\n [${parts.join(' - ')}]`;
   return line;
 }
@@ -992,7 +1035,7 @@ function buildRenderCtx() {
   return {
     t, esc, calcTimes, displayMember, buildSpeechAgendaLine,
     formatDate, varietySession, signals, durationLabels,
-    PATHWAYS, PATHWAYS_ZH, images, lang, nextMeetingRoles: nextRolesCache,
+    PATHWAYS: pathwayPairs('en'), PATHWAYS_ZH: pathwayPairs('zh'), pathwayList: pathwayList(), images, lang, nextMeetingRoles: nextRolesCache,
   };
 }
 
@@ -1959,6 +2002,9 @@ export default function AgendaIndexPage() {
     // renderCalendar/renderAgendaListItems above.
     window.__idxRemoveSpeech = removeSpeech;
     window.__idxUpdateSpeech = updateSpeech;
+    window.__idxSpeechPathway = setSpeechPathway;
+    window.__idxSpeechLevel = setSpeechLevel;
+    window.__idxSpeechProject = setSpeechProject;
     window.__idxRemoveEvaluator = removeEvaluator;
     window.__idxAddEvaluator = addEvaluator;
     window.__idxEvalInput = (i, value) => { evaluators[i] = value; updatePreview(); };
@@ -1987,7 +2033,11 @@ export default function AgendaIndexPage() {
         const ok = await checkAuth();
         if (!ok) return;
         applyRoleUI();
-        await loadAgendaClubs(); // all roles: needed to resolve club branding/template
+        // Clubs: needed by all roles to resolve club branding/template.
+        // Pathways: the speech dropdowns' catalog — must be in before the
+        // agenda below renders its speech forms.
+        const [, pathwaysOk] = await Promise.all([loadAgendaClubs(), loadPathways()]);
+        if (!pathwaysOk) alert('Pathways 目錄載入失敗，學習路徑選單暫時只能保留原值。');
         if (isSystemAdmin()) _updateClubPickerHint();
         fetchMemberDatalist();
 
@@ -2025,6 +2075,9 @@ export default function AgendaIndexPage() {
       window.removeEventListener('resize', applyPreviewScale);
       delete window.__idxRemoveSpeech;
       delete window.__idxUpdateSpeech;
+      delete window.__idxSpeechPathway;
+      delete window.__idxSpeechLevel;
+      delete window.__idxSpeechProject;
       delete window.__idxRemoveEvaluator;
       delete window.__idxAddEvaluator;
       delete window.__idxEvalInput;

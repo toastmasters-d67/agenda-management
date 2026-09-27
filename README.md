@@ -286,8 +286,9 @@ const META_FIELDS = [
 |------|------|------|
 | `會議時間` | 欄（`meetingDate`） | 認得 `2026/07/03`、`2026-7-3`、`2026.07.03`；認不出來的整欄略過 |
 | `會議編號`／`會議主題`／`主題題目` | `META_FIELDS` | 欄標題欄位，不算角色 |
-| `單元號N`（`PM 4-1`） | `speeches[N].pathwayCode` + `pathwayLevel` | 一格拆成兩個欄位；前兩碼要在 PATHWAYS 清單裡才當作路徑代碼 |
-| `標題N`／`單元N` | `speeches[N].title`／`pathwayProject` | 矩陣沒有這幾列，以隱藏欄位寫入（預覽會告知數量） |
+| `單元號N`（`PM 4-1`） | `speeches[N].pathwayCode` + `pathwayLevel` | 一格拆成兩個欄位；前兩碼要在 PATHWAYS 清單裡才當作路徑代碼。落在演講者底下的「學習路徑／路徑等級」下拉列；`4-1` 這種非 `L1`–`L5` 的等級以「（原值）」保留 |
+| `單元N` | `speeches[N].pathwayProject` | 落在「專案名稱」下拉列；中英文專案名都認得，不在目錄裡的文字以「（原值）」保留 |
+| `標題N` | `speeches[N].title` | 矩陣沒有這一列，以隱藏欄位寫入（預覽會告知數量） |
 | `特別單元`／`無法參加的成員` | — | 不是角色欄位，不匯入；預覽會列出原因 |
 
 人名比對：試算表寫的是 `Leah Kao 高莉雅`，而從下拉選單填的格子存的是 MemberAC 的正規形式 `Name, LEVEL`。對得上名冊就換成正規形式（這樣 `displayMember()` 才能雙語呈現），對不上就**原文保留**——來賓、他會會員本來就不在名冊裡。`NA`／`TBD`／`-` 這類佔位字一律視為空白。
@@ -629,6 +630,25 @@ IG 的取得方式是**從粉專身上取**（`instagram_business_account`），
 
 左側草稿清單，右側編輯區：標題／狀態（草稿・待發布・已發布）／綁定例會 → AI 產生文案 → 主文案 → 各平台分頁（可各自關閉、即時字數、規則警告、一鍵複製）→ 圖片（手動上傳或 AI 生圖）。綁定例會之後，AI 會讀那場議程的日期、主題、講者、題目、單元當素材，不會自己編造沒給的資訊。
 
+## Pathways 路徑管理（`/pathways`）
+
+議程編輯器與角色安排頁的「學習路徑／等級／專案名稱」下拉選單，資料都來自 DB（migration `0013`），由系統管理員在 `/pathways` 維護，Toastmasters 調整 Pathways 時不用改程式。
+
+| 資料表 | 內容 |
+|------|------|
+| `pathways` | 路徑代碼（主鍵）、中英名稱、是否已停用（legacy）、排序 |
+| `pathway_projects` | 專案中英名稱、排序 |
+| `pathway_required` | 每條路徑各級的必修專案（第 1 級、指導計畫、回顧路徑都明列，程式不預設任何規則） |
+| `pathway_electives` | 各級選修清單，所有路徑共用；某專案若是該路徑的必修，就不會出現在該路徑的選修選單 |
+
+- **全站共用**：目錄不分分會，只有 `system_admin` 能改。前端 `lib/pathways.js` 在頁面初始化時 `loadPathways()` 取一次，之後同步讀取。
+- **整份存檔**：編輯頁把整份目錄當草稿，`PUT /api/pathways` 在一個 transaction 裡整份取代，不會存到一半。
+- **議程存英文名稱**：`speeches[].pathwayProject` 存的是專案**英文名稱**（不是 id，因為這個欄位也放自由備註），印出時依議程語言顯示中文或英文。在管理頁改了既有專案的名稱，存檔時會把所有議程裡的舊名稱（含舊中文名）一併改成新英文名稱。
+- **路徑代碼建立後不可改**：議程以代碼記錄路徑；要換代碼請新增路徑再刪除舊的，已存的舊代碼會以「（原值）」保留。
+- 選單遇到目錄裡沒有的值（Sheet 匯入的 `4-1`、自由備註、已刪除的路徑）一律以「（原值）」保留，開啟議程不會改寫資料。
+
+---
+
 ## 權限系統（RBAC）
 
 系統共有三種角色：
@@ -891,6 +911,7 @@ DATABASE_URL=postgresql://user:pass@ep-xxx-pooler.../neondb?sslmode=require
 | `/social` | — | 社群發文，AI 產生文案／生圖、各平台版本與規則檢查 | `club_admin`（寫入） |
 | `/member` | `member.html` | 會員管理，新增、編輯、批量匯入、審核、移除會員；system_admin 另可設定角色與所屬分會 | `club_admin`（寫入） |
 | `/club` | `club.html` | 分會管理，新增、編輯、刪除分會 | `system_admin`（寫入） |
+| `/pathways` | — | Pathways 路徑管理：路徑、各級必修、專案中英名稱、選修清單 | `system_admin` |
 | `/change-password` | `change-password.html` | 修改密碼；admin 建立帳號後首次登入強制跳轉 | 任何登入用戶 |
 
 `auth.js` 會自動偵測環境：
@@ -943,6 +964,8 @@ DATABASE_URL=postgresql://user:pass@ep-xxx-pooler.../neondb?sslmode=require
 | POST   | `/api/clubs` | 新增分會（可帶品牌欄位 + `template_key`） | `system_admin` |
 | PUT    | `/api/clubs/{id}` | 更新分會名稱與品牌 / 版型 | `system_admin` |
 | DELETE | `/api/clubs/{id}` | 刪除分會 | `system_admin` |
+| GET    | `/api/pathways` | Pathways 目錄（路徑、各級必修、專案、選修清單） | 已登入 |
+| PUT    | `/api/pathways` | 整份取代 Pathways 目錄；專案改名時同步更新既有議程 | `system_admin` |
 | GET    | `/api/social-posts` | 貼文草稿列表（依分會） | 已登入 |
 | POST   | `/api/social-posts` | 新增貼文草稿 | `club_admin` |
 | GET/PUT/DELETE | `/api/social-posts/{id}` | 讀取／更新／刪除單則貼文 | 讀已登入，寫 `club_admin` |
