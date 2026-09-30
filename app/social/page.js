@@ -426,14 +426,16 @@ function renderImages() {
   }
 
   strip.innerHTML = current.images.map((img, i) => `
-    <div class="img-thumb">
+    <div class="img-thumb img-open" onclick="window.__socialPreview(${i})"
+         title="點開看原圖">
       ${mediaKind(img) === 'video'
         // preload=metadata so the tile shows a real frame without pulling the
         // whole file; these are meeting clips, not thumbnails.
         ? `<video src="${esc(img.url)}" muted playsinline preload="metadata"></video>
            <span class="img-badge">影片</span>`
         : `<img src="${esc(img.url)}" alt="${esc(img.name || '')}">`}
-      ${canWrite() ? `<button class="img-del" onclick="window.__socialRemoveImage(${i})" title="移除">✕</button>` : ''}
+      ${canWrite() ? `<button class="img-del" title="移除"
+           onclick="event.stopPropagation(); window.__socialRemoveImage(${i})">✕</button>` : ''}
     </div>`).join('') + mine.map((j) => `
     <div class="img-thumb pending" title="${esc(j.prompt)}">
       <div class="spinner"></div>
@@ -455,6 +457,42 @@ function tickElapsed() {
     elapsedTimer = null;
   }
 }
+
+// ================================================================
+// MEDIA PREVIEW
+// ================================================================
+// A 96px tile is enough to tell two pictures apart and not enough to judge
+// one. Generated images in particular are only worth keeping or regenerating
+// once you have actually looked at them, so the strip opens.
+
+let previewEsc = null;
+
+function openPreview(i) {
+  const item = current?.images?.[i];
+  if (!item) return;
+  const box = document.getElementById('previewBody');
+  const isVideo = mediaKind(item) === 'video';
+  box.innerHTML = isVideo
+    ? `<video src="${esc(item.url)}" controls autoplay playsinline></video>`
+    : `<img src="${esc(item.url)}" alt="${esc(item.name || '')}">`;
+  document.getElementById('previewName').textContent =
+    item.name || (isVideo ? '影片' : '圖片');
+  document.getElementById('previewModal').style.display = 'flex';
+
+  previewEsc = (e) => { if (e.key === 'Escape') closePreview(); };
+  document.addEventListener('keydown', previewEsc);
+}
+
+function closePreview() {
+  document.getElementById('previewModal').style.display = 'none';
+  // Stop playback rather than leaving a video running behind the overlay.
+  document.getElementById('previewBody').innerHTML = '';
+  if (previewEsc) {
+    document.removeEventListener('keydown', previewEsc);
+    previewEsc = null;
+  }
+}
+
 
 /** Links to whatever has already gone out, so a retry is an informed choice. */
 function renderPublished() {
@@ -1130,16 +1168,60 @@ const PROVIDER_LABELS = {
   openai:    { name: 'OpenAI (ChatGPT)',   use: '產生文案、產生圖片', url: 'https://platform.openai.com/api-keys' },
 };
 
+let clubCreds = [];      // [{ provider, hint }] — the club's shared accounts
+
 async function openCredModal() {
   document.getElementById('credModal').style.display = 'flex';
   const body = document.getElementById('credBody');
   body.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
+  const cid = activeClubId();
   try {
-    creds = await apiJson('/me/ai-credentials');
+    const [mine, club] = await Promise.all([
+      apiJson('/me/ai-credentials'),
+      // Only officers may see or set the shared account; for everyone else the
+      // section simply does not exist.
+      canWrite() && cid
+        ? apiJson(`/clubs/${cid}/ai-credentials`).catch(() => [])
+        : Promise.resolve([]),
+    ]);
+    creds = mine;
+    clubCreds = club;
     renderCreds();
   } catch {
     body.innerHTML = '<div class="list-empty">載入失敗</div>';
   }
+}
+
+/** What this provider falls back to when you have no key of your own. */
+function credFallbackBadge(c) {
+  if (c.clubHint) return `<span class="cred-fallback">未連接，目前用分會帳號 ${esc(c.clubHint)}</span>`;
+  if (c.serverFallback) return '<span class="cred-fallback">未連接，目前用伺服器帳號</span>';
+  return '<span class="cred-unset">未連接</span>';
+}
+
+function credRow(c, { scope }) {
+  const meta = PROVIDER_LABELS[c.provider] || { name: c.provider, use: '', url: '' };
+  const set  = !!c.hint;
+  const id   = `${scope}_${c.provider}`;
+  const save = scope === 'club' ? '__socialSaveClubCred' : '__socialSaveCred';
+  const drop = scope === 'club' ? '__socialDropClubCred' : '__socialDropCred';
+  return `<div class="cred-row">
+    <div class="cred-head">
+      <span class="cred-name">${esc(meta.name)}</span>
+      <span class="cred-use">${esc(meta.use)}</span>
+      ${set ? `<span class="cred-set">已連接 ${esc(c.hint)}</span>`
+            : (scope === 'club' ? '<span class="cred-unset">未設定</span>'
+                                : credFallbackBadge(c))}
+    </div>
+    <div class="cred-actions">
+      <input type="password" id="cred_${id}" class="cred-input"
+             placeholder="${set ? '貼上新的金鑰以覆蓋' : '貼上 API 金鑰'}" autocomplete="off">
+      <button class="btn-mini" onclick="window.${save}('${c.provider}', this)">儲存</button>
+      ${set ? `<button class="btn-mini danger" onclick="window.${drop}('${c.provider}', this)">移除</button>` : ''}
+    </div>
+    ${scope === 'me' && meta.url
+      ? `<a class="cred-link" href="${meta.url}" target="_blank" rel="noreferrer">到 ${esc(meta.name)} 取得金鑰 ↗</a>` : ''}
+  </div>`;
 }
 
 const closeCredModal = () => { document.getElementById('credModal').style.display = 'none'; };
@@ -1147,35 +1229,60 @@ const closeCredModal = () => { document.getElementById('credModal').style.displa
 function renderCreds() {
   const body = document.getElementById('credBody');
   body.innerHTML = `
-    <p class="cred-intro">金鑰只屬於你自己，會加密後存放，存好之後<strong>不會再顯示出來</strong>，
-       畫面上只看得到末四碼。所有 AI 產生都是走你自己的帳號計費。<br>
+    <p class="cred-intro">金鑰加密後存放，存好之後<strong>不會再顯示出來</strong>，畫面上只看得到末四碼。<br>
+       取用順序是<strong>你自己的 → 分會共用的 → 伺服器的</strong>。
+       填了自己的就走自己的帳號計費，沒填就用分會那組。<br>
        <strong>產生文案</strong>兩家都可以，在產生視窗裡選。<strong>AI 生圖只有 OpenAI 能做</strong>
-       ——Anthropic 的 API 不輸出圖片——而且生圖沒有伺服器帳號可退，一定要連自己的。</p>
-    ${creds.map((c) => {
-      const meta = PROVIDER_LABELS[c.provider] || { name: c.provider, use: '', url: '' };
-      const set  = !!c.hint;
-      return `<div class="cred-row">
-        <div class="cred-head">
-          <span class="cred-name">${esc(meta.name)}</span>
-          <span class="cred-use">${esc(meta.use)}</span>
-          ${set ? `<span class="cred-set">已連接 ${esc(c.hint)}</span>`
-                : (c.serverFallback
-                    ? '<span class="cred-fallback">未連接，目前用伺服器帳號</span>'
-                    : '<span class="cred-unset">未連接</span>')}
-        </div>
-        <div class="cred-actions">
-          <input type="password" id="cred_${c.provider}" class="cred-input"
-                 placeholder="${set ? '貼上新的金鑰以覆蓋' : '貼上 API 金鑰'}" autocomplete="off">
-          <button class="btn-mini" onclick="window.__socialSaveCred('${c.provider}', this)">儲存</button>
-          ${set ? `<button class="btn-mini danger" onclick="window.__socialDropCred('${c.provider}', this)">移除</button>` : ''}
-        </div>
-        ${meta.url ? `<a class="cred-link" href="${meta.url}" target="_blank" rel="noreferrer">到 ${esc(meta.name)} 取得金鑰 ↗</a>` : ''}
-      </div>`;
-    }).join('')}`;
+       ——Anthropic 的 API 不輸出圖片。</p>
+
+    <div class="cred-section">我的帳號</div>
+    ${creds.map((c) => credRow(c, { scope: 'me' })).join('')}
+
+    ${clubCreds.length ? `
+      <div class="cred-section">分會共用帳號</div>
+      <p class="cred-intro">整個分會共用這一組，任何幹部產生內容都算在它頭上。
+         設一組之後，新幹部第一天就能用，不必自己去辦 API 帳號——
+         但也表示<strong>費用是分會在付</strong>。只有幹部看得到這一區。</p>
+      ${clubCreds.map((c) => credRow(c, { scope: 'club' })).join('')}
+    ` : ''}`;
+}
+
+async function saveClubCred(provider, btn) {
+  const el = document.getElementById(`cred_club_${provider}`);
+  const key = (el?.value || '').trim();
+  if (!key) { toast('請先貼上金鑰', true); return; }
+  const restore = busyButton(btn, '儲存中…');
+  try {
+    await apiJson(`/clubs/${activeClubId()}/ai-credentials/${provider}`,
+                  { method: 'PUT', body: { api_key: key } });
+    await openCredModal();
+    await loadCreds();
+    toast('已儲存分會共用金鑰');
+  } catch (e) {
+    toast(e.message || '儲存失敗', true);
+  } finally {
+    restore();
+  }
+}
+
+async function dropClubCred(provider, btn) {
+  if (!confirm('移除之後，沒有自己金鑰的幹部就無法使用這個服務，確定嗎？')) return;
+  const restore = busyButton(btn, '移除中…');
+  try {
+    await apiJson(`/clubs/${activeClubId()}/ai-credentials/${provider}`,
+                  { method: 'DELETE' });
+    await openCredModal();
+    await loadCreds();
+    toast('已移除');
+  } catch (e) {
+    toast(e.message || '移除失敗', true);
+  } finally {
+    restore();
+  }
 }
 
 async function saveCred(provider, btn) {
-  const el = document.getElementById(`cred_${provider}`);
+  const el = document.getElementById(`cred_me_${provider}`);
   const key = (el?.value || '').trim();
   if (!key) { toast('請先貼上金鑰', true); return; }
   const restore = busyButton(btn, '儲存中…');
@@ -1249,11 +1356,14 @@ export default function SocialPage() {
     window.__socialCopy        = copyActive;
     window.__socialUpload      = uploadImages;
     window.__socialRemoveImage = removeImage;
+    window.__socialPreview     = openPreview;
     window.__socialDelete      = deletePost;
     window.__socialOpenGen     = openGenModal;
     window.__socialOpenImg     = openImgModal;
     window.__socialOpenPublish = openPublishModal;
     window.__socialSaveCred    = saveCred;
+    window.__socialSaveClubCred = saveClubCred;
+    window.__socialDropClubCred = dropClubCred;
     window.__socialDropCred    = dropCred;
     setSaveDisabled = setSaveDisabledState;
     setSaveLabel    = setSaveLabelState;
@@ -1393,6 +1503,17 @@ export default function SocialPage() {
       </div>
 
       {/* AI image */}
+      <div id="previewModal" className="modal-overlay preview-overlay" style={{ display: 'none' }}
+           onClick={(e) => { if (e.target === e.currentTarget) closePreview(); }}>
+        <div className="preview-box">
+          <div className="preview-head">
+            <span id="previewName"></span>
+            <button className="modal-close" onClick={closePreview}>✕</button>
+          </div>
+          <div className="preview-body" id="previewBody"></div>
+        </div>
+      </div>
+
       <div id="tmplModal" className="modal-overlay" style={{ display: 'none' }}
            onClick={(e) => { if (e.target === e.currentTarget) closeTmplModal(); }}>
         <div className="modal-box modal-box-wide">

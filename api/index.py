@@ -1622,14 +1622,15 @@ def generate_social_copy(req: SocialGenerateRequest,
     # falls back to the server-wide key, so a club that has connected nothing
     # still works out of the box; OpenAI has no such fallback by design — there
     # is no server OpenAI account to spend.
-    api_key = _load_api_key(user["username"], provider)
+    api_key = _load_api_key(user["username"], provider, _social_scope(user, req.club_id))
     if not api_key and provider == "anthropic":
         api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
         label = "Anthropic" if provider == "anthropic" else "OpenAI"
         raise HTTPException(
             status_code=400,
-            detail=f"你還沒有連接 {label} 帳號，請先在「AI 帳號」設定金鑰",
+            detail=f"沒有可用的 {label} 帳號。請在「AI 帳號」填自己的金鑰，"
+                   "或由分會幹部設定一組分會共用的。",
         )
 
     platforms = [p for p in req.platforms if p in SOCIAL_PLATFORMS] or list(SOCIAL_PLATFORMS)
@@ -1760,13 +1761,41 @@ def _key_hint(api_key: str) -> str:
     return f"…{tail}"
 
 
-def _load_api_key(username: str, provider: str) -> Optional[str]:
+# A club's shared AI key lives in club_secrets under this name. That table is
+# already a name/value store for the Meta credentials and encrypts with the
+# same Fernet master key, so a shared AI account costs no migration.
+def _club_ai_name(provider: str) -> str:
+    return f"ai_{provider}"
+
+
+def _load_api_key(username: str, provider: str,
+                  club_id: Optional[int] = None) -> Optional[str]:
+    """
+    Whose account pays, in order: yours, then the club's, then the server's.
+
+    Personal first is the point of allowing both. An officer who connects a
+    key has said they want their own account billed, and a club key appearing
+    later must not quietly take that over. The club key is the floor, so a new
+    officer can write a post on their first day without registering with
+    Anthropic — which for a committee that turns over every 1 July is the
+    difference between a tool people use and one they re-provision each year.
+    """
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT key_cipher FROM user_ai_credentials"
                         " WHERE username=%s AND provider=%s", (username, provider))
             row = cur.fetchone()
-    return _open(row[0]) if row else None
+    if row:
+        return _open(row[0])
+    if club_id is not None:
+        return _get_club_secret(club_id, _club_ai_name(provider))
+    return None
+
+
+def _club_ai_hints(club_id: Optional[int]) -> dict:
+    if club_id is None:
+        return {}
+    return {p: _club_secret_hint(club_id, _club_ai_name(p)) for p in AI_PROVIDERS}
 
 
 class AiCredentialRequest(BaseModel):
@@ -1790,9 +1819,13 @@ def list_ai_credentials(user: dict = Depends(get_current_user)):
     # being told it cannot tell "not connected but works" from "not connected
     # and will fail" — which are the same label and very different outcomes.
     fallback = {"anthropic": bool(os.getenv("ANTHROPIC_API_KEY")), "openai": False}
+    club = _club_ai_hints(user.get("club_id"))
     return [
         {**have.get(p, {"provider": p, "hint": "", "updatedAt": ""}),
-         "serverFallback": fallback.get(p, False)}
+         "serverFallback": fallback.get(p, False),
+         # What this person falls back to with no key of their own. Without it
+         # the UI shows one "未連接" for three very different outcomes.
+         "clubHint": club.get(p, "")}
         for p in AI_PROVIDERS
     ]
 
@@ -1826,6 +1859,40 @@ def delete_ai_credential(provider: str, user: dict = Depends(get_current_user)):
         with conn.cursor() as cur:
             cur.execute("DELETE FROM user_ai_credentials WHERE username=%s AND provider=%s",
                         (user["username"], provider))
+    return {"ok": True}
+
+
+@app.get("/api/clubs/{club_id}/ai-credentials")
+def list_club_ai_credentials(club_id: int,
+                             user: dict = Depends(require_club_admin_or_above)):
+    """The club's shared AI accounts — masked hints only, never the keys."""
+    _social_scope(user, club_id)
+    return [{"provider": p, "hint": _club_secret_hint(club_id, _club_ai_name(p))}
+            for p in AI_PROVIDERS]
+
+
+@app.put("/api/clubs/{club_id}/ai-credentials/{provider}")
+def set_club_ai_credential(club_id: int, provider: str, req: AiCredentialRequest,
+                           user: dict = Depends(require_club_admin_or_above)):
+    if provider not in AI_PROVIDERS:
+        raise HTTPException(status_code=400, detail="不支援這個 AI 服務")
+    key = req.api_key.strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="請貼上 API 金鑰")
+    # Everyone in the club spends this one, so it is the club's call to set it,
+    # not any member's.
+    hint = _set_club_secret(club_id, _club_ai_name(provider), key)
+    return {"provider": provider, "hint": hint}
+
+
+@app.delete("/api/clubs/{club_id}/ai-credentials/{provider}")
+def drop_club_ai_credential(club_id: int, provider: str,
+                            user: dict = Depends(require_club_admin_or_above)):
+    _social_scope(user, club_id)
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM club_secrets WHERE club_id=%s AND name=%s",
+                        (club_id, _club_ai_name(provider)))
     return {"ok": True}
 
 
@@ -1881,10 +1948,12 @@ def _generate_image(username: str, club_id: Optional[int], params: dict) -> dict
     quality = params.get("quality") if params.get("quality") in IMAGE_QUALITIES \
         else IMAGE_QUALITIES[0]
 
-    api_key = _load_api_key(username, "openai")
+    api_key = _load_api_key(username, "openai", club_id)
     if not api_key:
-        raise HTTPException(status_code=400,
-                            detail="你還沒有連接 OpenAI 帳號，請先在「AI 帳號」設定金鑰")
+        raise HTTPException(
+            status_code=400,
+            detail="沒有可用的 OpenAI 帳號。請在「AI 帳號」填自己的金鑰，"
+                   "或由分會幹部設定一組分會共用的。")
     try:
         from openai import OpenAI
     except ImportError:
