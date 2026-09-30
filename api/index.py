@@ -1400,9 +1400,8 @@ def _meeting_fields(cur, agenda_id: int, user: dict) -> dict:
         "fee":        pick(row[4], st.get("membershipFee")),
         "theme":      pick(d.get("meetingTheme")),
         "meetingNo":  pick(str(d.get("meetingNo") or "")),
-        # Every meeting already has a square theme illustration; the promo
-        # template uses it rather than asking for a second picture.
-        "themeImg":   pick(d.get("themeImgUrl")),
+        # themeImgUrl is deliberately NOT here: it belongs to the agenda sheet,
+        # and a post's artwork is chosen for the post.
         "logo":       pick(row[6]),
         "agenda":     d,
     }

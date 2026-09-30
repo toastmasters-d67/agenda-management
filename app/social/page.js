@@ -1002,20 +1002,19 @@ async function openTmplModal() {
   const tsel = document.getElementById('tmplPick');
   tsel.innerHTML = list.map((t) => `<option value="${t.key}">${esc(t.label)}</option>`).join('');
 
-  // The meeting already has a theme illustration; that is the default, so the
-  // common case is open-and-confirm rather than hunt-for-a-picture. The post's
-  // own stills are offered as alternatives; videos cannot be artwork.
+  // Artwork comes from this post — an upload, an AI image, or a slide
+  // exported from PowerPoint. The agenda's theme image is not offered: it
+  // belongs to the agenda sheet.
   const bsel = document.getElementById('tmplBg');
   const photos = (current.images || [])
     .map((m, i) => ({ m, i }))
     .filter(({ m }) => mediaKind(m) === 'image');
   bsel.innerHTML = [
-    tmplFields.themeImg ? '<option value="theme">例會主題圖（預設）</option>' : '',
     ...photos.map(({ m, i }) =>
       `<option value="${i}">${esc(m.name || `圖片 ${i + 1}`)}</option>`),
     '<option value="">不放插圖</option>',
   ].join('');
-  bsel.value = tmplFields.themeImg ? 'theme' : '';
+  bsel.value = photos.length ? String(photos[0].i) : '';
   tmplBg = null;
   await onTmplBgChange(bsel);
 }
@@ -1027,10 +1026,7 @@ const closeTmplModal = () => {
 
 async function onTmplBgChange(sel) {
   const v = sel.value;
-  let url = '';
-  if (v === 'theme') url = tmplFields?.themeImg || '';
-  else if (v !== '') url = current.images[parseInt(v, 10)]?.url || '';
-
+  const url = v === '' ? '' : (current.images[parseInt(v, 10)]?.url || '');
   tmplBg = null;
   if (url) {
     try {
@@ -1052,6 +1048,7 @@ async function refreshTmplPreview() {
     template,
     values: templateValues(current.kind, tmplFields),
     background: tmplBg,
+    hideTitle: !!document.getElementById('tmplHideTitle')?.checked,
   });
 }
 
@@ -1367,10 +1364,14 @@ export default function SocialPage() {
                 <label className="modal-field-label">插圖</label>
                 <select id="tmplBg" className="ed-select ed-select-wide"
                         onChange={(e) => onTmplBgChange(e.target)}></select>
+                <label className="tmpl-check">
+                  <input type="checkbox" id="tmplHideTitle"
+                         onChange={refreshTmplPreview} />
+                  插圖裡已經有主題標題，不要再寫一次
+                </label>
                 <p className="modal-field-hint">
-                  預設用這場例會的主題圖，也可以換成貼文裡的其他圖片，
+                  插圖用這則貼文裡的圖片——上傳的照片、AI 生圖，
                   或用 PowerPoint／Canva 設計好再匯出成 PNG 上傳。
-                  <strong>主題標題已經畫在插圖裡時，版面不會再重複寫一次。</strong>
                   日期、地址、入場費一律由系統疊成<strong>真實文字</strong>——
                   影像模型畫中文會壞，不能交給它。
                 </p>
