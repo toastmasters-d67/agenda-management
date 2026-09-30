@@ -562,7 +562,7 @@ hashtag 沒有特殊處理——就是文案的一部分，**算在字數裡**�
 - **Claude**：`claude-opus-5` + adaptive thinking + structured outputs。`effort` 設 `medium` 而非預設的 `high`——這是掛在瀏覽器請求後面的短篇創作，深一層推理帶來的延遲比它換到的品質更貴。
 - **ChatGPT**：`chat.completions` + `response_format: json_schema`（`strict`）。
 
-**模型由使用者在產生視窗裡選**，兩家各三個（`COPY_MODELS`），清單第一個是最便宜的，也是預設——沒有人會在不知情的情況下用旗艦價寫一則例會通知。`thinking` 旗標記的是呼叫差異不是偏好：Opus 5.5 與 Sonnet 5.5 吃 adaptive thinking 與 effort，Haiku 4.5 兩個都拒收，送了就是 400。
+**模型由使用者在產生視窗裡選**，兩家各三個（`COPY_MODELS`），清單依價格由低到高排，方便比價；預設是哪一個則由 `default` 旗標決定，不靠排序——顯示順序與預設值回答的是不同問題，綁在一起就會有一個被另一個悄悄改掉。目前 Claude 預設 Opus 5.5、ChatGPT 預設 GPT-6 Luna、生圖預設 GPT-Image 1 mini。`thinking` 旗標記的是呼叫差異不是偏好：Opus 5.5 與 Sonnet 5.5 吃 adaptive thinking 與 effort，Haiku 4.5 兩個都拒收，送了就是 400。
 
 兩邊都用 structured output，所以一次就吐出主文案與各平台版本，不用解析散文。生圖用 OpenAI `gpt-image-1`，產生後直接進 R2 只回公開 URL——**IG 與 Threads 只能發布平台抓得到的公開圖片**，所以這一步 Phase 1 也用得上。
 

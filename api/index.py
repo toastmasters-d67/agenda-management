@@ -1491,10 +1491,13 @@ def _copy_via_anthropic(api_key: str, system: str, user_text: str, schema: dict,
 # Model ids move faster than this file does, so the choice is an env var with a
 # widely-available default. A wrong id surfaces as OpenAI's own error rather
 # than as something invented here.
-# Which models a club may pick, cheapest first — the first entry of each list
-# is the default, so nobody spends flagship rates on a meeting notice without
-# choosing to. Prices are per million tokens and are a guide for the UI, not
-# something this code bills against; check the provider for the live rate.
+# Which models a club may pick, listed cheapest first so the choice can be
+# scanned by price. The preselected one is marked `default` rather than being
+# whichever happens to sort first — display order and the default answer
+# different questions, and tying them together means one cannot change without
+# silently changing the other. Prices are per million tokens and are a guide
+# for the UI, not something this code bills against; check the provider for
+# the live rate.
 #
 # `thinking` records a per-model call difference rather than a preference:
 # Claude Opus 5.5 and Sonnet 5.5 take adaptive thinking and an effort level,
@@ -1508,11 +1511,11 @@ COPY_MODELS = {
         {"id": "claude-sonnet-5-5", "label": "Sonnet 5.5", "note": "均衡",
          "price": "US$2 / $10", "thinking": True},
         {"id": "claude-opus-5-5",   "label": "Opus 5.5",   "note": "最強",
-         "price": "US$4 / $20", "thinking": True},
+         "price": "US$4 / $20", "thinking": True, "default": True},
     ],
     "openai": [
         {"id": "gpt-6-luna",  "label": "GPT-6 Luna",  "note": "最省",
-         "price": "US$0.10 / $0.50"},
+         "price": "US$0.10 / $0.50", "default": True},
         {"id": "gpt-6.1-sol", "label": "GPT-6.1 Sol", "note": "均衡",
          "price": "US$2 / $10"},
         {"id": "gpt-6-astra", "label": "GPT-6 Astra", "note": "最強",
@@ -1523,7 +1526,7 @@ COPY_MODELS = {
 # Image generation is OpenAI-only — Anthropic's API has no image output.
 IMAGE_MODELS = [
     {"id": "gpt-image-1-mini",       "label": "GPT-Image 1 mini", "note": "最省",
-     "price": "輸出 US$8 /百萬 token"},
+     "price": "輸出 US$8 /百萬 token", "default": True},
     {"id": "gpt-image-2.5-flare",    "label": "GPT-Image 2.5 Flare", "note": "快",
      "price": "輸出 US$30 /百萬 token"},
     {"id": "gpt-image-2.5-sunburst", "label": "GPT-Image 2.5 Sunburst", "note": "最強",
@@ -1536,12 +1539,16 @@ IMAGE_MODELS = [
 IMAGE_QUALITIES = ("low", "medium", "high", "auto")
 
 
+def _default_model(models: list) -> dict:
+    return next((m for m in models if m.get("default")), models[0])
+
+
 def _copy_model(provider: str, wanted: str) -> dict:
     allowed = COPY_MODELS.get(provider) or COPY_MODELS["anthropic"]
     for m in allowed:
         if m["id"] == wanted:
             return m
-    return allowed[0]          # cheapest
+    return _default_model(allowed)
 
 
 def _copy_via_openai(api_key: str, system: str, user_text: str, schema: dict,
@@ -1870,7 +1877,7 @@ def _generate_image(username: str, club_id: Optional[int], params: dict) -> dict
         raise HTTPException(status_code=400, detail="不支援這個圖片尺寸")
 
     model = next((m["id"] for m in IMAGE_MODELS if m["id"] == params.get("model")),
-                 IMAGE_MODELS[0]["id"])
+                 _default_model(IMAGE_MODELS)["id"])
     quality = params.get("quality") if params.get("quality") in IMAGE_QUALITIES \
         else IMAGE_QUALITIES[0]
 

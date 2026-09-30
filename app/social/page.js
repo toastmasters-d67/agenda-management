@@ -102,9 +102,15 @@ async function loadAiModels() {
   }
 }
 
-const modelOptions = (list, chosen) => (list || []).map((m, i) =>
-  `<option value="${esc(m.id)}" ${m.id === chosen || (!chosen && i === 0) ? 'selected' : ''}>`
-  + `${esc(m.label)}（${esc(m.note)}・${esc(m.price)}）</option>`).join('');
+// Listed cheapest first, but the preselected one is whichever the server
+// marked `default` — the two are separate decisions.
+const modelOptions = (list, chosen) => {
+  const arr = list || [];
+  const fallback = (arr.find((m) => m.default) || arr[0] || {}).id;
+  return arr.map((m) =>
+    `<option value="${esc(m.id)}" ${m.id === (chosen || fallback) ? 'selected' : ''}>`
+    + `${esc(m.label)}（${esc(m.note)}・${esc(m.price)}）</option>`).join('');
+};
 
 /** Connection status only — the API never returns the keys themselves. */
 async function loadCreds() {
@@ -1361,8 +1367,8 @@ export default function SocialPage() {
             <label className="modal-field-label">模型</label>
             <select id="genModel" className="ed-select ed-select-wide"></select>
             <div className="modal-field-hint">
-              預設是最省的那個，社群文案通常夠用。價格是每百萬 token 的輸入／輸出，
-              一則貼文大約幾千 token。
+              價格是每百萬 token 的輸入／輸出，一則貼文大約幾千 token。
+              換一個更省的通常也寫得動，值不值得省要看你對文案品質的要求。
             </div>
             <label className="modal-field-label">補充指示（選填）</label>
             <textarea id="genBrief" className="modal-textarea" rows="4"
