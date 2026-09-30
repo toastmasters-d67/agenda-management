@@ -1190,6 +1190,30 @@ _PLATFORM_BRIEF = {
 
 _STATUSES = ("draft", "ready", "posted")
 
+# What each kind is for, in the copywriter's own terms. The differences are not
+# cosmetic: a promo asks the reader to turn up, a recap tells someone who did
+# not what they missed, and the tense, the call to action and which facts
+# matter all follow from that.
+_KIND_BRIEF = {
+    "promo": (
+        "例會宣傳。目的是邀請人來參加下一場例會，讀者多半還不是會員。"
+        "務必自然地寫進日期、時間、地址與入場費——這四件事缺一則讀者無法赴約，"
+        "但不要寫成條列的活動公告，要讓它們融進邀請的語氣裡。"
+        "結尾給一個明確、低壓力的行動（歡迎直接來、可以先私訊詢問）。"
+    ),
+    "recap": (
+        "例會回顧。目的是記錄剛結束的那場例會，讀者是會員與關注分會的人。"
+        "用過去式寫當天實際發生的事——誰上台、講了什麼、現場的氣氛與收穫。"
+        "不需要重複地址與費用；若資料裡有下一場的時間，結尾可以順帶一提。"
+        "重點是真實的細節，不是把議程重講一遍。"
+    ),
+    "other": (
+        "一般貼文，可能是特殊活動、重要事項佈達或分會公告。"
+        "以使用者的補充指示為主要依據，例會資料只在相關時引用。"
+        "先把要傳達的事情講清楚，再談語氣。"
+    ),
+}
+
 
 def _social_scope(user: dict, club_id: Optional[int]) -> Optional[int]:
     """Resolve which club a request may act on, mirroring the agendas rules."""
@@ -1208,16 +1232,22 @@ def _social_row(r):
         "createdAt": r[8].isoformat() if r[8] else "",
         "updatedAt": r[9].isoformat() if r[9] else "",
         "published": r[10] or {},
+        "kind": r[11] or "other",
     }
 
 
 _SOCIAL_COLS = ("id, club_id, agenda_id, title, status, body, variants, images,"
-                " created_at, updated_at, published")
+                " created_at, updated_at, published, kind")
+
+# What the post is for. Drives the copywriter's brief, which facts are
+# required, and which image template applies.
+_POST_KINDS = ("promo", "recap", "other")
 
 
 class SocialPostRequest(BaseModel):
     club_id:   Optional[int] = None
     agenda_id: Optional[int] = None
+    kind:      str = "other"
     title:     str = ""
     status:    str = "draft"
     body:      str = ""
@@ -1231,6 +1261,7 @@ class SocialGenerateRequest(BaseModel):
     brief:     str = ""              # free-text steer from the user
     platforms: List[str] = []
     provider:  str = "anthropic"     # whose account writes it — see COPY_WRITERS
+    kind:      str = "other"         # see _KIND_BRIEF
 
 
 @app.get("/api/social-posts")
@@ -1260,10 +1291,10 @@ def create_social_post(req: SocialPostRequest,
         with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO social_posts"
-                " (club_id, agenda_id, title, status, body, variants, images)"
-                " VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb) RETURNING id",
-                (cid, req.agenda_id, req.title[:200], req.status, req.body,
-                 json.dumps(req.variants), json.dumps(req.images)),
+                " (club_id, agenda_id, kind, title, status, body, variants, images)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb) RETURNING id",
+                (cid, req.agenda_id, _kind_of(req), req.title[:200], req.status,
+                 req.body, json.dumps(req.variants), json.dumps(req.images)),
             )
             new_id = cur.fetchone()[0]
     return {"id": new_id}
@@ -1295,9 +1326,10 @@ def update_social_post(post_id: int, req: SocialPostRequest,
         with conn.cursor() as cur:
             _load_social_post(cur, post_id, user)   # 404 / 403 before writing
             cur.execute(
-                "UPDATE social_posts SET agenda_id=%s, title=%s, status=%s, body=%s,"
-                " variants=%s::jsonb, images=%s::jsonb, updated_at=NOW() WHERE id=%s",
-                (req.agenda_id, req.title[:200], req.status, req.body,
+                "UPDATE social_posts SET agenda_id=%s, kind=%s, title=%s, status=%s,"
+                " body=%s, variants=%s::jsonb, images=%s::jsonb, updated_at=NOW()"
+                " WHERE id=%s",
+                (req.agenda_id, _kind_of(req), req.title[:200], req.status, req.body,
                  json.dumps(req.variants), json.dumps(req.images), post_id),
             )
     return {"ok": True}
@@ -1312,10 +1344,31 @@ def delete_social_post(post_id: int, user: dict = Depends(require_club_admin_or_
     return {"ok": True}
 
 
-def _meeting_brief(cur, agenda_id: int, user: dict) -> str:
-    """Flatten one agenda into the few lines a copywriter actually needs."""
-    cur.execute("SELECT a.data, a.club_id, c.name FROM agendas a"
-                " LEFT JOIN clubs c ON c.id = a.club_id WHERE a.id=%s", (agenda_id,))
+def _kind_of(req) -> str:
+    k = getattr(req, "kind", None) or "other"
+    return k if k in _POST_KINDS else "other"
+
+
+_LABEL_RE = re.compile(r"^\s*(venue|地點|地址|場地)\s*[:：]\s*", re.I)
+
+
+def _strip_label(v: str) -> str:
+    return _LABEL_RE.sub("", v or "").strip()
+
+
+def _meeting_fields(cur, agenda_id: int, user: dict) -> dict:
+    """
+    The handful of facts a post is written around, from wherever they live.
+
+    Date, time and venue are per meeting and live on the agenda; the door fee
+    is a club-level fact. Two of these were previously unreachable: the agenda
+    stores the address under `venueInfo`, and `venue` — which this read — is
+    never set, so the address silently never reached the copywriter; and the
+    club's fee was not fetched at all.
+    """
+    cur.execute("SELECT a.data, a.club_id, c.name, c.name_zh, c.fee, c.settings"
+                " FROM agendas a LEFT JOIN clubs c ON c.id = a.club_id"
+                " WHERE a.id=%s", (agenda_id,))
     row = cur.fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="找不到這場議程")
@@ -1323,11 +1376,50 @@ def _meeting_brief(cur, agenda_id: int, user: dict) -> str:
         raise HTTPException(status_code=403, detail="無權存取其他分會的資料")
 
     d = parse_jsonb(row[0])
-    lines = [f"分會：{row[2] or ''}"]
-    for key, label in (("meetingDate", "日期"), ("meetingNo", "場次"),
-                       ("meetingTheme", "主題"), ("venue", "地點")):
-        if d.get(key):
-            lines.append(f"{label}：{d[key]}")
+    st = parse_jsonb(row[5])
+
+    def pick(*vals):
+        for v in vals:
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        return ""
+
+    return {
+        "clubName":   pick(row[3], row[2]),
+        "date":       pick(d.get("meetingDate")),
+        "time":       pick(d.get("timeRange"), st.get("timeRange")),
+        # The agenda's own line wins: it is the one someone checked for this
+        # meeting. The club setting is the standing address behind it. The
+        # stored text often carries its own "Venue:" label, which reads fine in
+        # an agenda and wrong once a template draws it as an address.
+        "venue":      _strip_label(pick(d.get("venueInfo"), d.get("venue"),
+                                        st.get("venue"))),
+        "transit":    pick(st.get("transit")),
+        "fee":        pick(row[4], st.get("membershipFee")),
+        "theme":      pick(d.get("meetingTheme")),
+        "meetingNo":  pick(str(d.get("meetingNo") or "")),
+        "agenda":     d,
+    }
+
+
+# Which facts a kind cannot be written without. A promo missing any of them is
+# an invitation nobody can act on, so it is refused rather than half-written.
+_KIND_REQUIRED = {
+    "promo": (("date", "日期"), ("venue", "地址"), ("fee", "入場費")),
+}
+
+
+def _meeting_brief(cur, agenda_id: int, user: dict) -> str:
+    """Flatten one agenda into the few lines a copywriter actually needs."""
+    f = _meeting_fields(cur, agenda_id, user)
+    d = f["agenda"]
+
+    lines = [f"分會：{f['clubName']}"]
+    for key, label in (("date", "日期"), ("time", "時間"), ("meetingNo", "場次"),
+                       ("theme", "主題"), ("venue", "地點"),
+                       ("transit", "交通"), ("fee", "入場費")):
+        if f.get(key):
+            lines.append(f"{label}：{f[key]}")
 
     for i, sp in enumerate(d.get("speeches") or [], start=1):
         if not isinstance(sp, dict):
@@ -1428,6 +1520,23 @@ def _parse_copy_json(text: str) -> dict:
 COPY_WRITERS = {"anthropic": _copy_via_anthropic, "openai": _copy_via_openai}
 
 
+@app.get("/api/meeting-fields")
+def get_meeting_fields(agenda_id: int = Query(...),
+                       user: dict = Depends(get_current_user)):
+    """
+    The facts a post is built around — for the image templates, which compose
+    them as real text rather than asking an image model to draw them.
+
+    Same source as the copywriter's brief, so the picture and the caption can
+    never disagree about when or where the meeting is.
+    """
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            f = _meeting_fields(cur, agenda_id, user)
+    f.pop("agenda", None)          # the raw agenda is not the caller's business
+    return f
+
+
 @app.post("/api/social-posts/generate")
 def generate_social_copy(req: SocialGenerateRequest,
                          user: dict = Depends(require_club_admin_or_above)):
@@ -1450,18 +1559,33 @@ def generate_social_copy(req: SocialGenerateRequest,
     platforms = [p for p in req.platforms if p in SOCIAL_PLATFORMS] or list(SOCIAL_PLATFORMS)
     _social_scope(user, req.club_id)   # permission check only
 
+    kind = req.kind if req.kind in _POST_KINDS else "other"
+
     context = ""
     if req.agenda_id:
         with get_db() as conn:
             with conn.cursor() as cur:
+                fields = _meeting_fields(cur, req.agenda_id, user)
                 context = _meeting_brief(cur, req.agenda_id, user)
+        # A promo without the date, address or fee is an invitation nobody can
+        # act on. Refusing here names the missing field and where to fill it;
+        # generating anyway produces copy that looks finished and is not.
+        missing = [label for key, label in _KIND_REQUIRED.get(kind, ())
+                   if not fields.get(key)]
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail="例會宣傳缺少「" + "、".join(missing) + "」。"
+                       "日期與地址在該場議程裡填，入場費在分會設定裡填。",
+            )
 
     if not context and not req.brief.strip():
         raise HTTPException(status_code=400, detail="請先選擇一場例會，或寫幾句想發的內容")
 
     rules = "\n".join(f"- {_PLATFORM_BRIEF[p]}" for p in platforms)
     system = (
-        "你是台灣一個 Toastmasters 國際演講會分會的社群小編，負責撰寫招募與例會宣傳貼文。\n"
+        "你是台灣一個 Toastmasters 國際演講會分會的社群小編。\n"
+        f"這一則的用途：{_KIND_BRIEF[kind]}\n"
         "寫作要求：\n"
         "- 一律使用繁體中文（台灣用語），可自然夾雜英文專有名詞。\n"
         "- 語氣真誠、有溫度，像社團成員在分享，不要像廣告文案或新聞稿。\n"

@@ -1,10 +1,13 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { apiJson } from '@/lib/api';
+import { apiJson, apiFetch } from '@/lib/api';
 import { setAuth, clearAuth, applyRoleUI, isSystemAdmin, canWrite, getClubId } from '@/lib/auth';
 import { SOCIAL_PLATFORMS, PLATFORM_KEYS, platformSpec, platformWarnings,
          mediaKind, mediaLabel } from '@/lib/socialPlatforms';
+import { POST_KINDS, KIND_KEYS, KIND_REQUIRED, kindSpec, kindLabel,
+         templatesFor, templateValues, drawTemplate, canvasToBlob }
+  from '@/lib/postTemplates';
 import Sidebar from '@/components/Sidebar';
 import './social.css';
 
@@ -43,7 +46,7 @@ let setSaveLabel    = null;
 const activeClubId = () => (isSystemAdmin() ? selectedClubId : getClubId());
 
 const blankPost = () => ({
-  id: null, clubId: activeClubId(), agendaId: null,
+  id: null, clubId: activeClubId(), agendaId: null, kind: 'other',
   title: '', status: 'draft', body: '',
   variants: Object.fromEntries(PLATFORM_KEYS.map((k) => [k, { text: '', enabled: true }])),
   images: [],
@@ -57,6 +60,7 @@ function normalisePost(p) {
     variants[k] = { text: v.text || '', enabled: v.enabled !== false };
   });
   return { ...p, variants,
+           kind: KIND_KEYS.includes(p.kind) ? p.kind : 'other',
            images: Array.isArray(p.images) ? p.images : [],
            published: p.published || {} };
 }
@@ -193,7 +197,7 @@ function renderList() {
         <span class="post-row-title">${esc(p.title || '（未命名）')}</span>
         <span class="status-chip status-${esc(p.status)}">${esc(STATUS_LABELS[p.status] || p.status)}</span>
       </div>
-      <div class="post-row-sub">${esc(when)}${p.images?.length ? ` · ${mediaLabel(p.images)}` : ''}</div>
+      <div class="post-row-sub"><span class="post-kind k-${esc(p.kind || 'other')}">${esc(kindLabel(p.kind))}</span>${esc(when)}${p.images?.length ? ` · ${mediaLabel(p.images)}` : ''}</div>
     </button>`;
   }).join('');
 }
@@ -248,6 +252,9 @@ function renderEditor() {
   const statusOpts = Object.entries(STATUS_LABELS).map(([k, v]) =>
     `<option value="${k}" ${current.status === k ? 'selected' : ''}>${esc(v)}</option>`).join('');
 
+  const kindOpts = POST_KINDS.map((k) =>
+    `<option value="${k.key}" ${current.kind === k.key ? 'selected' : ''}>${esc(k.label)}</option>`).join('');
+
   const tabs = SOCIAL_PLATFORMS.map((p) => {
     const v = current.variants[p.key];
     return `<button class="pf-tab${p.key === activeTab ? ' active' : ''}${v.enabled ? '' : ' off'}"
@@ -260,6 +267,13 @@ function renderEditor() {
              value="${esc(current.title)}" ${ro} oninput="window.__socialField('title', this.value)">
       <select id="fStatus" class="ed-select" ${ro} onchange="window.__socialField('status', this.value)">${statusOpts}</select>
     </div>
+
+    <div class="ed-row">
+      <label class="ed-label">貼文用途</label>
+      <select id="fKind" class="ed-select ed-select-wide" ${ro}
+              onchange="window.__socialKind(this.value)">${kindOpts}</select>
+    </div>
+    <div class="ed-kind-hint">${esc(kindSpec(current.kind).hint)}</div>
 
     <div class="ed-row">
       <label class="ed-label">綁定例會</label>
@@ -299,7 +313,9 @@ function renderEditor() {
           <input type="file" accept="image/*,video/*" multiple onchange="window.__socialUpload(this)">
         </label>
         <button class="btn-mini" onclick="window.__socialOpenImg()">AI 生圖</button>
-        <span class="ai-bar-hint">AI 生圖使用你自己的 OpenAI 帳號。</span>
+        ${templatesFor(current.kind).length
+          ? '<button class="btn-mini" onclick="window.__socialOpenTmpl()">套用版型</button>' : ''}
+        <span class="ai-bar-hint">AI 生圖使用你自己的 OpenAI 帳號。版型會把日期、地址、入場費疊成真實文字。</span>
       </div>` : ''}
     </div>
 
@@ -537,6 +553,7 @@ async function savePost() {
   const body = {
     club_id: current.clubId ?? activeClubId(),
     agenda_id: current.agendaId,
+    kind: current.kind || 'other',
     title: current.title,
     status: current.status,
     body: current.body,
@@ -674,6 +691,7 @@ async function runGenerate() {
       body: {
         club_id: activeClubId(),
         agenda_id: current.agendaId,
+        kind: current.kind || 'other',
         brief,
         platforms,
         provider,
@@ -919,6 +937,145 @@ async function runPublish() {
 }
 
 // ================================================================
+// IMAGE TEMPLATES
+// ================================================================
+// Compose the meeting's facts over a background, in the browser. The facts
+// come from /meeting-fields — the same source the copywriter reads — so the
+// picture and the caption cannot disagree about when or where the meeting is.
+
+let tmplFields = null;      // the bound meeting's facts
+let tmplBg     = null;      // HTMLImageElement, or null for the gradient
+
+/**
+ * Load an R2 image as a blob URL.
+ *
+ * Not `img.src = publicUrl`: a cross-origin image taints the canvas and
+ * `toBlob` then throws. Fetching through the authenticated proxy and handing
+ * the canvas a same-origin blob: URL keeps it clean.
+ */
+async function loadBackground(url) {
+  const res = await apiFetch(`/image-proxy?url=${encodeURIComponent(url)}`);
+  if (!res.ok) throw new Error('讀取背景圖失敗');
+  const objectUrl = URL.createObjectURL(await res.blob());
+  try {
+    return await new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error('背景圖無法解碼'));
+      img.src = objectUrl;
+    });
+  } finally {
+    // The pixels are in the element by now; the URL itself can go.
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+  }
+}
+
+async function openTmplModal() {
+  if (!current) return;
+  const list = templatesFor(current.kind);
+  if (!list.length) {
+    toast('只有「例會宣傳」和「例會回顧」有版型', true);
+    return;
+  }
+  if (!current.agendaId) {
+    toast('請先綁定例會——版型的日期、地址、費用都從那場議程來', true);
+    return;
+  }
+
+  document.getElementById('tmplModal').style.display = 'flex';
+  const note = document.getElementById('tmplNote');
+  note.textContent = '讀取例會資料中…';
+  try {
+    tmplFields = await apiJson(`/meeting-fields?agenda_id=${current.agendaId}`);
+  } catch (e) {
+    note.textContent = e.message || '讀取例會資料失敗';
+    return;
+  }
+
+  // Say which fact is missing before drawing a picture with a hole in it.
+  const missing = (KIND_REQUIRED[current.kind] || [])
+    .filter(([k]) => !tmplFields[k]).map(([, label]) => label);
+  note.innerHTML = missing.length
+    ? `⚠️ 這場例會還缺「${esc(missing.join('、'))}」，版型上會留白。日期與地址在議程裡填，入場費在分會設定裡填。`
+    : `會帶入：${esc([tmplFields.date, tmplFields.time, tmplFields.venue?.split('\n')[0], tmplFields.fee].filter(Boolean).join('　·　'))}`;
+
+  const tsel = document.getElementById('tmplPick');
+  tsel.innerHTML = list.map((t) => `<option value="${t.key}">${esc(t.label)}</option>`).join('');
+
+  // Backgrounds: whatever pictures this post already has. Videos cannot be a
+  // still background, so they are not offered.
+  const bsel = document.getElementById('tmplBg');
+  const photos = (current.images || [])
+    .map((m, i) => ({ m, i }))
+    .filter(({ m }) => mediaKind(m) === 'image');
+  bsel.innerHTML = '<option value="">不用背景（漸層底）</option>' + photos
+    .map(({ m, i }) => `<option value="${i}">${esc(m.name || `圖片 ${i + 1}`)}</option>`).join('');
+  tmplBg = null;
+  await refreshTmplPreview();
+}
+
+const closeTmplModal = () => {
+  document.getElementById('tmplModal').style.display = 'none';
+  tmplBg = null;
+};
+
+async function onTmplBgChange(sel) {
+  const idx = sel.value === '' ? -1 : parseInt(sel.value, 10);
+  tmplBg = null;
+  if (idx >= 0) {
+    const item = current.images[idx];
+    try {
+      tmplBg = await loadBackground(item.url);
+    } catch (e) {
+      toast(e.message || '背景圖讀取失敗', true);
+    }
+  }
+  await refreshTmplPreview();
+}
+
+async function refreshTmplPreview() {
+  const canvas = document.getElementById('tmplCanvas');
+  if (!canvas || !tmplFields) return;
+  const key = document.getElementById('tmplPick').value;
+  const template = templatesFor(current.kind).find((t) => t.key === key);
+  if (!template) return;
+  drawTemplate(canvas, {
+    template,
+    values: templateValues(current.kind, tmplFields),
+    background: tmplBg,
+  });
+}
+
+async function runApplyTemplate() {
+  const canvas = document.getElementById('tmplCanvas');
+  if (!canvas || !current) return;
+  const restore = busyButton(document.getElementById('tmplConfirmBtn'), '產生中…');
+  try {
+    const blob = await canvasToBlob(canvas);
+    const { uploadUrl, publicUrl } = await apiJson('/upload/presign', {
+      method: 'POST',
+      body: { filename: `template-${Date.now()}.png`, content_type: 'image/png',
+              club_id: activeClubId() },
+    });
+    const put = await fetch(uploadUrl, {
+      method: 'PUT', headers: { 'Content-Type': 'image/png' }, body: blob,
+    });
+    if (!put.ok) throw new Error('上傳至雲端失敗');
+    current.images.push({ url: publicUrl, name: '版型圖', type: 'image' });
+    renderImages();
+    refreshPaneMeta();
+    updateSaveBar();
+    closeTmplModal();
+    toast('版型圖已加入這則貼文，記得儲存');
+  } catch (e) {
+    toast(e.message || '版型圖產生失敗', true);
+  } finally {
+    restore();
+  }
+}
+
+
+// ================================================================
 // AI ACCOUNTS
 // ================================================================
 const PROVIDER_LABELS = {
@@ -1036,6 +1193,8 @@ export default function SocialPage() {
   const [saveLabel, setSaveLabelState] = useState('儲存');
 
   useEffect(() => {
+    window.__socialKind        = (v) => { if (!current) return; current.kind = v; renderEditor(); updateSaveBar(); };
+    window.__socialOpenTmpl    = openTmplModal;
     window.__socialOpen        = openPost;
     window.__socialNew         = newPost;
     window.__socialField       = setField;
@@ -1182,6 +1341,42 @@ export default function SocialPage() {
       </div>
 
       {/* AI image */}
+      <div id="tmplModal" className="modal-overlay" style={{ display: 'none' }}
+           onClick={(e) => { if (e.target === e.currentTarget) closeTmplModal(); }}>
+        <div className="modal-box modal-box-wide">
+          <div className="modal-header">
+            <h3>套用版型</h3>
+            <button className="modal-close" onClick={closeTmplModal}>✕</button>
+          </div>
+          <div className="modal-body">
+            <div className="modal-note" id="tmplNote"></div>
+            <div className="tmpl-grid">
+              <div>
+                <label className="modal-field-label">版面</label>
+                <select id="tmplPick" className="ed-select ed-select-wide"
+                        onChange={refreshTmplPreview}></select>
+                <label className="modal-field-label">背景圖</label>
+                <select id="tmplBg" className="ed-select ed-select-wide"
+                        onChange={(e) => onTmplBgChange(e.target)}></select>
+                <p className="modal-field-hint">
+                  背景可以是 AI 生圖、活動照片，或用 PowerPoint 設計好再匯出成 PNG 上傳。
+                  日期、地址、入場費一律由系統疊成<strong>真實文字</strong>——
+                  影像模型畫中文會壞，不能交給它。
+                </p>
+              </div>
+              <div className="tmpl-preview">
+                <canvas id="tmplCanvas"></canvas>
+              </div>
+            </div>
+          </div>
+          <div className="modal-actions">
+            <button className="modal-btn modal-btn-cancel" onClick={closeTmplModal}>取消</button>
+            <button className="modal-btn modal-btn-confirm" id="tmplConfirmBtn"
+                    onClick={runApplyTemplate}>加入這則貼文</button>
+          </div>
+        </div>
+      </div>
+
       <div id="imgModal" className="modal-overlay" style={{ display: 'none' }}
            onClick={(e) => { if (e.target === e.currentTarget) closeImgModal(); }}>
         <div className="modal-box">
