@@ -1104,13 +1104,24 @@ const closeTmplModal = () => {
 async function onTmplBgChange(sel) {
   const v = sel.value;
   const url = v === '' ? '' : (current.images[parseInt(v, 10)]?.url || '');
+  const state = document.getElementById('tmplBgState');
   tmplBg = null;
   if (url) {
+    if (state) state.textContent = '插圖載入中…';
     try {
       tmplBg = await loadBackground(url);
     } catch (e) {
+      // In the modal, not a toast: a toast for this scrolls away while you are
+      // still looking at the preview, and a blank picture is the one failure
+      // that is easy to approve by accident.
       toast(e.message || '插圖讀取失敗', true);
     }
+  }
+  if (state) {
+    state.textContent = url
+      ? (tmplBg ? '✅ 插圖已載入' : '⚠️ 插圖讀取失敗，這張會沒有圖像')
+      : '這張不會有圖像，只有文字。';
+    state.className = 'tmpl-bg-state' + (url && !tmplBg ? ' bad' : '');
   }
   await refreshTmplPreview();
 }
@@ -1531,6 +1542,7 @@ export default function SocialPage() {
                 <label className="modal-field-label">插圖</label>
                 <select id="tmplBg" className="ed-select ed-select-wide"
                         onChange={(e) => onTmplBgChange(e.target)}></select>
+                <div className="tmpl-bg-state" id="tmplBgState"></div>
                 <label className="tmpl-check">
                   <input type="checkbox" id="tmplHideTitle"
                          onChange={refreshTmplPreview} />
