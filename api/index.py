@@ -1366,7 +1366,8 @@ def _meeting_fields(cur, agenda_id: int, user: dict) -> dict:
     never set, so the address silently never reached the copywriter; and the
     club's fee was not fetched at all.
     """
-    cur.execute("SELECT a.data, a.club_id, c.name, c.name_zh, c.fee, c.settings"
+    cur.execute("SELECT a.data, a.club_id, c.name, c.name_zh, c.fee, c.settings,"
+                " c.logo_url, c.name_en"
                 " FROM agendas a LEFT JOIN clubs c ON c.id = a.club_id"
                 " WHERE a.id=%s", (agenda_id,))
     row = cur.fetchone()
@@ -1386,6 +1387,7 @@ def _meeting_fields(cur, agenda_id: int, user: dict) -> dict:
 
     return {
         "clubName":   pick(row[3], row[2]),
+        "clubNameEn": pick(row[7], row[2]),
         "date":       pick(d.get("meetingDate")),
         "time":       pick(d.get("timeRange"), st.get("timeRange")),
         # The agenda's own line wins: it is the one someone checked for this
@@ -1398,6 +1400,10 @@ def _meeting_fields(cur, agenda_id: int, user: dict) -> dict:
         "fee":        pick(row[4], st.get("membershipFee")),
         "theme":      pick(d.get("meetingTheme")),
         "meetingNo":  pick(str(d.get("meetingNo") or "")),
+        # Every meeting already has a square theme illustration; the promo
+        # template uses it rather than asking for a second picture.
+        "themeImg":   pick(d.get("themeImgUrl")),
+        "logo":       pick(row[6]),
         "agenda":     d,
     }
 
