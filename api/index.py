@@ -1582,7 +1582,18 @@ def list_ai_credentials(user: dict = Depends(get_current_user)):
             rows = cur.fetchall()
     have = {r[0]: {"provider": r[0], "hint": r[1],
                    "updatedAt": r[2].isoformat() if r[2] else ""} for r in rows}
-    return [have.get(p, {"provider": p, "hint": "", "updatedAt": ""}) for p in AI_PROVIDERS]
+
+    # Whether a provider still works with no key of your own. Anthropic has a
+    # server-wide key to fall back on; OpenAI does not, by design — there is no
+    # server OpenAI account to spend. The browser cannot see either, and without
+    # being told it cannot tell "not connected but works" from "not connected
+    # and will fail" — which are the same label and very different outcomes.
+    fallback = {"anthropic": bool(os.getenv("ANTHROPIC_API_KEY")), "openai": False}
+    return [
+        {**have.get(p, {"provider": p, "hint": "", "updatedAt": ""}),
+         "serverFallback": fallback.get(p, False)}
+        for p in AI_PROVIDERS
+    ]
 
 
 @app.put("/api/me/ai-credentials/{provider}")

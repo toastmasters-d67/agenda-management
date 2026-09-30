@@ -95,6 +95,12 @@ async function loadCreds() {
 }
 
 const credConnected = (provider) => !!creds.find((c) => c.provider === provider && c.hint);
+const credOf        = (provider) => creds.find((c) => c.provider === provider) || {};
+/** Works right now — your own key, or a server key standing behind it. */
+const credUsable    = (provider) => {
+  const c = credOf(provider);
+  return !!(c.hint || c.serverFallback);
+};
 
 /** Which platforms the active club has authorised. Absent = not connected. */
 async function loadSocialAccounts() {
@@ -592,11 +598,22 @@ function openGenModal() {
   // gives a specific "go connect it" error, which reads better than a silently
   // missing option.
   const sel = document.getElementById('genProvider');
-  sel.innerHTML = COPY_PROVIDERS.map((p) =>
-    `<option value="${p.key}">${esc(p.label)}${credConnected(p.key) ? '' : '（未連接）'}</option>`
-  ).join('');
-  const connected = COPY_PROVIDERS.find((p) => credConnected(p.key));
-  sel.value = (connected || COPY_PROVIDERS[0]).key;
+  sel.innerHTML = COPY_PROVIDERS.map((p) => {
+    const c = credOf(p.key);
+    const note = c.hint ? '' : (c.serverFallback ? '（伺服器帳號）' : '（未連接）');
+    return `<option value="${p.key}">${esc(p.label)}${note}</option>`;
+  }).join('');
+  // Default to one that will actually produce something. Picking an unusable
+  // provider is still allowed — the error names it, which reads better than a
+  // silently missing option.
+  const usable = COPY_PROVIDERS.find((p) => credUsable(p.key));
+  sel.value = (usable || COPY_PROVIDERS[0]).key;
+  const hint = document.getElementById('genProviderHint');
+  if (hint) {
+    hint.textContent = COPY_PROVIDERS.every((p) => credUsable(p.key))
+      ? '兩邊都可用，文風不同，可以都試試看。'
+      : '標「未連接」的需要先到「AI 帳號」填自己的金鑰才會動。';
+  }
   PLATFORM_KEYS.forEach((k) => {
     const el = document.getElementById(`genP_${k}`);
     if (el) el.checked = current.variants[k].enabled;
@@ -684,6 +701,14 @@ async function runGenerate() {
 // ================================================================
 function openImgModal() {
   if (!current) return;
+  // Unlike copy, this has no second provider and no server account behind it:
+  // Anthropic's API does not output images, and there is no server OpenAI key.
+  // Saying so before the form beats letting the job fail after it is filled in.
+  if (!credConnected('openai')) {
+    toast('AI 生圖只能用 OpenAI，請先到「AI 帳號」填自己的金鑰', true);
+    openCredModal();
+    return;
+  }
   document.getElementById('imgPrompt').value = '';
   document.getElementById('imgModal').style.display = 'flex';
 }
@@ -897,8 +922,10 @@ async function runPublish() {
 // AI ACCOUNTS
 // ================================================================
 const PROVIDER_LABELS = {
+  // OpenAI does both; the old label said only 產生圖片, which read as "not an
+  // option for copy" and kept people from connecting it for the half it shares.
   anthropic: { name: 'Anthropic (Claude)', use: '產生文案', url: 'https://console.anthropic.com/settings/keys' },
-  openai:    { name: 'OpenAI (ChatGPT)',   use: '產生圖片', url: 'https://platform.openai.com/api-keys' },
+  openai:    { name: 'OpenAI (ChatGPT)',   use: '產生文案、產生圖片', url: 'https://platform.openai.com/api-keys' },
 };
 
 async function openCredModal() {
@@ -919,7 +946,9 @@ function renderCreds() {
   const body = document.getElementById('credBody');
   body.innerHTML = `
     <p class="cred-intro">金鑰只屬於你自己，會加密後存放，存好之後<strong>不會再顯示出來</strong>，
-       畫面上只看得到末四碼。所有 AI 產生都是走你自己的帳號計費。</p>
+       畫面上只看得到末四碼。所有 AI 產生都是走你自己的帳號計費。<br>
+       <strong>產生文案</strong>兩家都可以，在產生視窗裡選。<strong>AI 生圖只有 OpenAI 能做</strong>
+       ——Anthropic 的 API 不輸出圖片——而且生圖沒有伺服器帳號可退，一定要連自己的。</p>
     ${creds.map((c) => {
       const meta = PROVIDER_LABELS[c.provider] || { name: c.provider, use: '', url: '' };
       const set  = !!c.hint;
@@ -928,7 +957,9 @@ function renderCreds() {
           <span class="cred-name">${esc(meta.name)}</span>
           <span class="cred-use">${esc(meta.use)}</span>
           ${set ? `<span class="cred-set">已連接 ${esc(c.hint)}</span>`
-                : '<span class="cred-unset">未連接</span>'}
+                : (c.serverFallback
+                    ? '<span class="cred-fallback">未連接，目前用伺服器帳號</span>'
+                    : '<span class="cred-unset">未連接</span>')}
         </div>
         <div class="cred-actions">
           <input type="password" id="cred_${c.provider}" class="cred-input"
@@ -1127,6 +1158,7 @@ export default function SocialPage() {
             <div className="modal-note" id="genAgendaNote"></div>
             <label className="modal-field-label">用哪個 AI 帳號</label>
             <select id="genProvider" className="ed-select ed-select-wide"></select>
+            <div className="modal-field-hint" id="genProviderHint"></div>
             <label className="modal-field-label">補充指示（選填）</label>
             <textarea id="genBrief" className="modal-textarea" rows="4"
                       placeholder="例如：這次想強調歡迎新朋友來參觀，語氣輕鬆一點"></textarea>
