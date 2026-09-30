@@ -89,6 +89,23 @@ async function checkSocialAuth() {
   }
 }
 
+// The catalogue of pickable models, from the server so the browser cannot
+// offer something the API would reject. Cheapest first; [0] is the default.
+let aiModels = { copy: { anthropic: [], openai: [] }, image: [], imageQualities: [] };
+
+async function loadAiModels() {
+  try {
+    aiModels = await apiJson('/ai-models');
+  } catch {
+    /* leave the empty catalogue — the selects render empty and the server
+       still falls back to its own cheapest default. */
+  }
+}
+
+const modelOptions = (list, chosen) => (list || []).map((m, i) =>
+  `<option value="${esc(m.id)}" ${m.id === chosen || (!chosen && i === 0) ? 'selected' : ''}>`
+  + `${esc(m.label)}（${esc(m.note)}・${esc(m.price)}）</option>`).join('');
+
 /** Connection status only — the API never returns the keys themselves. */
 async function loadCreds() {
   try {
@@ -631,6 +648,7 @@ function openGenModal() {
       ? '兩邊都可用，文風不同，可以都試試看。'
       : '標「未連接」的需要先到「AI 帳號」填自己的金鑰才會動。';
   }
+  syncGenModels();
   PLATFORM_KEYS.forEach((k) => {
     const el = document.getElementById(`genP_${k}`);
     if (el) el.checked = current.variants[k].enabled;
@@ -641,6 +659,14 @@ function openGenModal() {
     ? `會參考：${a.meetingDate || ''}${a.meetingTheme ? ` · ${a.meetingTheme}` : ''}`
     : '尚未綁定例會 — 只會依你寫的補充指示產生。';
   modal.style.display = 'flex';
+}
+
+/** The model list follows the provider — they are different catalogues. */
+function syncGenModels() {
+  const sel = document.getElementById('genModel');
+  if (!sel) return;
+  const provider = document.getElementById('genProvider').value;
+  sel.innerHTML = modelOptions(aiModels.copy?.[provider]);
 }
 
 function closeGenModal() {
@@ -679,6 +705,7 @@ async function runGenerate() {
   const platforms = PLATFORM_KEYS.filter((k) => document.getElementById(`genP_${k}`)?.checked);
   if (!platforms.length) { toast('請至少選一個平台', true); return; }
   const provider = document.getElementById('genProvider').value;
+  const model = document.getElementById('genModel')?.value || '';
   const brief = document.getElementById('genBrief').value;
 
   // This one call can run for the better part of a minute, so the modal turns
@@ -695,6 +722,7 @@ async function runGenerate() {
         brief,
         platforms,
         provider,
+        model,
       },
     });
     if (!current.title && out.title) current.title = out.title;
@@ -728,6 +756,8 @@ function openImgModal() {
     return;
   }
   document.getElementById('imgPrompt').value = '';
+  const msel = document.getElementById('imgModel');
+  if (msel && !msel.options.length) msel.innerHTML = modelOptions(aiModels.image);
   document.getElementById('imgModal').style.display = 'flex';
 }
 
@@ -744,13 +774,16 @@ async function runGenerateImage() {
   const prompt = document.getElementById('imgPrompt').value.trim();
   if (!prompt) { toast('請先描述想要的圖片', true); return; }
   const size = document.getElementById('imgSize').value;
+  const model = document.getElementById('imgModel')?.value || '';
+  const quality = document.getElementById('imgQuality')?.value || '';
 
   const restore = busyButton(document.getElementById('imgConfirmBtn'), '送出中…');
   let job;
   try {
     job = await apiJson('/ai-jobs', {
       method: 'POST',
-      body: { kind: 'image', club_id: activeClubId(), params: { prompt, size } },
+      body: { kind: 'image', club_id: activeClubId(),
+              params: { prompt, size, model, quality } },
     });
   } catch (e) {
     toast(e.message || '無法建立生圖工作', true);
@@ -1234,7 +1267,7 @@ export default function SocialPage() {
     (async function init() {
       const ok = await checkSocialAuth();
       if (!ok) return;
-      await Promise.all([loadClubs(), loadCreds()]);
+      await Promise.all([loadClubs(), loadCreds(), loadAiModels()]);
       await Promise.all([loadPosts(), loadAgendas(), loadSocialAccounts()]);
       renderEditor();
     })();
@@ -1322,8 +1355,15 @@ export default function SocialPage() {
             <div id="genForm">
             <div className="modal-note" id="genAgendaNote"></div>
             <label className="modal-field-label">用哪個 AI 帳號</label>
-            <select id="genProvider" className="ed-select ed-select-wide"></select>
+            <select id="genProvider" className="ed-select ed-select-wide"
+                    onChange={syncGenModels}></select>
             <div className="modal-field-hint" id="genProviderHint"></div>
+            <label className="modal-field-label">模型</label>
+            <select id="genModel" className="ed-select ed-select-wide"></select>
+            <div className="modal-field-hint">
+              預設是最省的那個，社群文案通常夠用。價格是每百萬 token 的輸入／輸出，
+              一則貼文大約幾千 token。
+            </div>
             <label className="modal-field-label">補充指示（選填）</label>
             <textarea id="genBrief" className="modal-textarea" rows="4"
                       placeholder="例如：這次想強調歡迎新朋友來參觀，語氣輕鬆一點"></textarea>
@@ -1400,13 +1440,26 @@ export default function SocialPage() {
             <label className="modal-field-label">想要什麼樣的圖片</label>
             <textarea id="imgPrompt" className="modal-textarea" rows="4"
                       placeholder="例如：一群人在明亮的會議室裡鼓掌，暖色調，扁平插畫風格，不要有文字"></textarea>
+            <label className="modal-field-label">模型</label>
+            <select id="imgModel" className="ed-select ed-select-wide"></select>
+            <label className="modal-field-label">品質</label>
+            <select id="imgQuality" className="ed-select ed-select-wide" defaultValue="low">
+              <option value="low">低（最省，社群插圖通常夠用）</option>
+              <option value="medium">中</option>
+              <option value="high">高（最貴，約低品質的 15 倍）</option>
+              <option value="auto">自動（由模型決定，費用不可預期）</option>
+            </select>
             <label className="modal-field-label">尺寸</label>
             <select id="imgSize" className="ed-select ed-select-wide" defaultValue="1024x1024">
               <option value="1024x1024">正方形 1024×1024（IG 首選）</option>
               <option value="1024x1536">直式 1024×1536</option>
               <option value="1536x1024">橫式 1536×1024</option>
             </select>
-            <p className="modal-field-hint">使用你自己的 OpenAI 帳號計費。圖片會存進雲端並加入這則貼文。</p>
+            <p className="modal-field-hint">
+              使用你自己的 OpenAI 帳號計費。圖片會存進雲端並加入這則貼文。
+              品質與尺寸都會影響單價——低品質正方形每張約 US$0.01，
+              高品質直式約 US$0.25。
+            </p>
           </div>
           <div className="modal-actions">
             <button className="modal-btn modal-btn-cancel" onClick={closeImgModal}>取消</button>

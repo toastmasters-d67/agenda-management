@@ -1261,6 +1261,7 @@ class SocialGenerateRequest(BaseModel):
     brief:     str = ""              # free-text steer from the user
     platforms: List[str] = []
     provider:  str = "anthropic"     # whose account writes it — see COPY_WRITERS
+    model:     str = ""              # one of COPY_MODELS[provider]; blank = cheapest
     kind:      str = "other"         # see _KIND_BRIEF
 
 
@@ -1448,30 +1449,34 @@ def _meeting_brief(cur, agenda_id: int, user: dict) -> str:
 # functions (rather than branching inside one) is what stops the Anthropic and
 # OpenAI call shapes from bleeding into each other as either SDK moves on.
 
-def _copy_via_anthropic(api_key: str, system: str, user_text: str, schema: dict) -> dict:
+def _copy_via_anthropic(api_key: str, system: str, user_text: str, schema: dict,
+                       model: dict) -> dict:
     try:
         import anthropic
     except ImportError:
         raise HTTPException(status_code=503, detail="伺服器缺少 anthropic 套件，請聯絡管理員")
 
     client = anthropic.Anthropic(api_key=api_key)
+    kwargs = {
+        "model": model["id"],
+        "max_tokens": 16000,
+        "system": system,
+        "messages": [{"role": "user", "content": user_text}],
+        "output_config": {"format": {"type": "json_schema", "schema": schema}},
+    }
+    if model.get("thinking"):
+        kwargs["thinking"] = {"type": "adaptive"}
+        # `medium` rather than the default `high`: this is a short creative
+        # write-up behind a browser request, and the extra latency of a deeper
+        # pass costs more here than it buys.
+        kwargs["output_config"]["effort"] = "medium"
     try:
-        response = client.messages.create(
-            model="claude-opus-5",
-            max_tokens=16000,
-            system=system,
-            messages=[{"role": "user", "content": user_text}],
-            thinking={"type": "adaptive"},
-            # `medium` rather than the default `high`: this is a short creative
-            # write-up behind a browser request, and the extra latency of a
-            # deeper pass costs more here than it buys.
-            output_config={"effort": "medium",
-                           "format": {"type": "json_schema", "schema": schema}},
-        )
+        response = client.messages.create(**kwargs)
     except anthropic.RateLimitError:
         raise HTTPException(status_code=429, detail="Claude 忙碌中，請稍後再試")
     except anthropic.APIStatusError as e:
-        raise HTTPException(status_code=502, detail=f"Claude 回應異常（{e.status_code}）")
+        raise HTTPException(status_code=502,
+                            detail=f"Claude 回應異常（{model['id']}，{e.status_code}）")
     except anthropic.APIConnectionError:
         raise HTTPException(status_code=502, detail="無法連線至 Claude，請稍後再試")
 
@@ -1486,10 +1491,61 @@ def _copy_via_anthropic(api_key: str, system: str, user_text: str, schema: dict)
 # Model ids move faster than this file does, so the choice is an env var with a
 # widely-available default. A wrong id surfaces as OpenAI's own error rather
 # than as something invented here.
-OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4o")
+# Which models a club may pick, cheapest first — the first entry of each list
+# is the default, so nobody spends flagship rates on a meeting notice without
+# choosing to. Prices are per million tokens and are a guide for the UI, not
+# something this code bills against; check the provider for the live rate.
+#
+# `thinking` records a per-model call difference rather than a preference:
+# Claude Opus 5.5 and Sonnet 5.5 take adaptive thinking and an effort level,
+# while Haiku 4.5 rejects both — sending them to it is a 400. Keeping the flag
+# beside the id is what stops picking a model from producing an invalid
+# request.
+COPY_MODELS = {
+    "anthropic": [
+        {"id": "claude-haiku-4-5",  "label": "Haiku 4.5",  "note": "最省",
+         "price": "US$1 / $5", "thinking": False},
+        {"id": "claude-sonnet-5-5", "label": "Sonnet 5.5", "note": "均衡",
+         "price": "US$2 / $10", "thinking": True},
+        {"id": "claude-opus-5-5",   "label": "Opus 5.5",   "note": "最強",
+         "price": "US$4 / $20", "thinking": True},
+    ],
+    "openai": [
+        {"id": "gpt-6-luna",  "label": "GPT-6 Luna",  "note": "最省",
+         "price": "US$0.10 / $0.50"},
+        {"id": "gpt-6.1-sol", "label": "GPT-6.1 Sol", "note": "均衡",
+         "price": "US$2 / $10"},
+        {"id": "gpt-6-astra", "label": "GPT-6 Astra", "note": "最強",
+         "price": "US$10 / $50"},
+    ],
+}
+
+# Image generation is OpenAI-only — Anthropic's API has no image output.
+IMAGE_MODELS = [
+    {"id": "gpt-image-1-mini",       "label": "GPT-Image 1 mini", "note": "最省",
+     "price": "輸出 US$8 /百萬 token"},
+    {"id": "gpt-image-2.5-flare",    "label": "GPT-Image 2.5 Flare", "note": "快",
+     "price": "輸出 US$30 /百萬 token"},
+    {"id": "gpt-image-2.5-sunburst", "label": "GPT-Image 2.5 Sunburst", "note": "最強",
+     "price": "輸出 US$30 /百萬 token"},
+]
+
+# `auto` lets the model choose, which also means it chooses what you pay —
+# roughly a 15x spread on gpt-image-1. The default is the cheapest rung
+# instead, so the bill is a decision rather than a surprise.
+IMAGE_QUALITIES = ("low", "medium", "high", "auto")
 
 
-def _copy_via_openai(api_key: str, system: str, user_text: str, schema: dict) -> dict:
+def _copy_model(provider: str, wanted: str) -> dict:
+    allowed = COPY_MODELS.get(provider) or COPY_MODELS["anthropic"]
+    for m in allowed:
+        if m["id"] == wanted:
+            return m
+    return allowed[0]          # cheapest
+
+
+def _copy_via_openai(api_key: str, system: str, user_text: str, schema: dict,
+                    model: dict) -> dict:
     try:
         from openai import OpenAI
     except ImportError:
@@ -1497,7 +1553,7 @@ def _copy_via_openai(api_key: str, system: str, user_text: str, schema: dict) ->
 
     try:
         response = OpenAI(api_key=api_key).chat.completions.create(
-            model=OPENAI_TEXT_MODEL,
+            model=model["id"],
             messages=[{"role": "system", "content": system},
                       {"role": "user", "content": user_text}],
             response_format={
@@ -1523,6 +1579,14 @@ def _parse_copy_json(text: str) -> dict:
 
 
 COPY_WRITERS = {"anthropic": _copy_via_anthropic, "openai": _copy_via_openai}
+
+
+@app.get("/api/ai-models")
+def list_ai_models(user: dict = Depends(get_current_user)):
+    """The pickable models, so the browser and the server cannot disagree."""
+    return {"copy": COPY_MODELS, "image": IMAGE_MODELS,
+            "imageQualities": list(IMAGE_QUALITIES),
+            "imageSizes": list(_IMAGE_SIZES)}
 
 
 @app.get("/api/meeting-fields")
@@ -1622,7 +1686,8 @@ def generate_social_copy(req: SocialGenerateRequest,
         "additionalProperties": False,
     }
 
-    data = COPY_WRITERS[provider](api_key, system, "\n\n".join(parts), schema)
+    data = COPY_WRITERS[provider](api_key, system, "\n\n".join(parts), schema,
+                                 _copy_model(provider, req.model))
 
     return {
         "title": data.get("title", ""),
@@ -1804,6 +1869,11 @@ def _generate_image(username: str, club_id: Optional[int], params: dict) -> dict
     if size not in _IMAGE_SIZES:
         raise HTTPException(status_code=400, detail="不支援這個圖片尺寸")
 
+    model = next((m["id"] for m in IMAGE_MODELS if m["id"] == params.get("model")),
+                 IMAGE_MODELS[0]["id"])
+    quality = params.get("quality") if params.get("quality") in IMAGE_QUALITIES \
+        else IMAGE_QUALITIES[0]
+
     api_key = _load_api_key(username, "openai")
     if not api_key:
         raise HTTPException(status_code=400,
@@ -1814,15 +1884,20 @@ def _generate_image(username: str, club_id: Optional[int], params: dict) -> dict
         raise HTTPException(status_code=503, detail="伺服器缺少 openai 套件，請聯絡管理員")
 
     try:
-        result = OpenAI(api_key=api_key).images.generate(
-            model="gpt-image-1", prompt=prompt, size=size, n=1,
-        )
+        call = {"model": model, "prompt": prompt, "size": size, "n": 1}
+        # `auto` is the API's own default; sending it explicitly is the same
+        # request, so it is left off rather than risking a model that does not
+        # accept the parameter at all.
+        if quality != "auto":
+            call["quality"] = quality
+        result = OpenAI(api_key=api_key).images.generate(**call)
     except Exception as e:
         # Surface OpenAI's own wording — it is what tells the user their key is
         # wrong, their quota is spent, or their org is not verified for this
         # model (a common first-run blocker on gpt-image-1).
         detail = getattr(e, "message", None) or str(e)
-        raise HTTPException(status_code=502, detail=f"OpenAI 生圖失敗：{detail}"[:400])
+        raise HTTPException(status_code=502,
+                            detail=f"OpenAI 生圖失敗（{model} / {quality}）：{detail}"[:400])
 
     item = (result.data or [None])[0]
     if item is None:
