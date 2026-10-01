@@ -336,9 +336,10 @@ function renderEditor() {
           <input type="file" accept="image/*,video/*" multiple onchange="window.__socialUpload(this)">
         </label>
         <button class="btn-mini" onclick="window.__socialOpenImg()">AI 生圖</button>
-        ${templatesFor(current.kind).length
-          ? '<button class="btn-mini" onclick="window.__socialOpenTmpl()">套用版型</button>' : ''}
-        <span class="ai-bar-hint">AI 生圖使用你自己的 OpenAI 帳號。版型會把日期、地址、入場費疊成真實文字。</span>
+        <button class="btn-mini" onclick="window.__socialOpenTmpl()">套用版型</button>
+        <span class="ai-bar-hint">${templatesFor(current.kind).length
+          ? 'AI 生圖使用你自己的 OpenAI 帳號。版型會把日期、地址、入場費疊成真實文字。'
+          : `AI 生圖使用你自己的 OpenAI 帳號。版型只有「例會宣傳」和「例會回顧」有——目前是「${esc(kindLabel(current.kind))}」。`}</span>
       </div>` : ''}
     </div>
 
@@ -803,8 +804,9 @@ function openImgModal() {
   const msel = document.getElementById('imgModel');
   if (msel && !msel.options.length) msel.innerHTML = modelOptions(aiModels.image);
 
-  // Offer the one-step poster only when there is actually a layout and a
-  // meeting to fill it from.
+  // The one-step poster needs both a layout and a meeting to fill it from.
+  // When either is missing the option is replaced by the reason, not hidden:
+  // an absent control tells you nothing about how to get it back.
   const list = templatesFor(current.kind);
   const can = list.length > 0 && !!current.agendaId;
   const wrap = document.getElementById('imgTmplWrap');
@@ -818,9 +820,11 @@ function openImgModal() {
   }
   const noTmpl = document.getElementById('imgNoTmplNote');
   if (noTmpl) {
-    noTmpl.textContent = list.length && !current.agendaId
-      ? '綁定例會之後，這裡可以選擇直接產生整張海報。'
-      : '';
+    noTmpl.textContent = can ? ''
+      : !list.length
+        ? `貼文用途是「${kindLabel(current.kind)}」，沒有對應的版型。改成「例會宣傳」或「例會回顧」就可以直接產出整張海報。`
+        : '綁定例會之後，可以直接產出整張海報——日期、地址、入場費會疊在圖上。';
+    noTmpl.className = 'modal-field-hint' + (can ? '' : ' hint-why');
   }
   document.getElementById('imgModal').style.display = 'flex';
 }
