@@ -802,6 +802,26 @@ function openImgModal() {
   document.getElementById('imgPrompt').value = '';
   const msel = document.getElementById('imgModel');
   if (msel && !msel.options.length) msel.innerHTML = modelOptions(aiModels.image);
+
+  // Offer the one-step poster only when there is actually a layout and a
+  // meeting to fill it from.
+  const list = templatesFor(current.kind);
+  const can = list.length > 0 && !!current.agendaId;
+  const wrap = document.getElementById('imgTmplWrap');
+  if (wrap) {
+    wrap.style.display = can ? '' : 'none';
+    if (can) {
+      document.getElementById('imgTmplPick').innerHTML =
+        list.map((t) => `<option value="${t.key}">${esc(t.label)}</option>`).join('');
+      document.getElementById('imgAutoTmpl').checked = true;
+    }
+  }
+  const noTmpl = document.getElementById('imgNoTmplNote');
+  if (noTmpl) {
+    noTmpl.textContent = list.length && !current.agendaId
+      ? '綁定例會之後，這裡可以選擇直接產生整張海報。'
+      : '';
+  }
   document.getElementById('imgModal').style.display = 'flex';
 }
 
@@ -822,6 +842,24 @@ async function runGenerateImage() {
   const quality = document.getElementById('imgQuality')?.value || '';
 
   const restore = busyButton(document.getElementById('imgConfirmBtn'), '送出中…');
+
+  // Fetch the meeting's facts before spending anything: a poster that cannot
+  // be filled in should fail now, not after the picture is paid for.
+  let tmpl = null;
+  const auto = document.getElementById('imgAutoTmpl');
+  if (auto && auto.checked && current.agendaId && templatesFor(current.kind).length) {
+    try {
+      tmpl = {
+        kind: current.kind,
+        templateKey: document.getElementById('imgTmplPick').value,
+        fields: await apiJson(`/meeting-fields?agenda_id=${current.agendaId}`),
+      };
+    } catch (e) {
+      toast(e.message || '讀取例會資料失敗，無法套用版型', true);
+      restore();
+      return;
+    }
+  }
   let job;
   try {
     job = await apiJson('/ai-jobs', {
@@ -841,7 +879,7 @@ async function runGenerateImage() {
   // still reports whatever the row ends up saying.
   apiJson(`/ai-jobs/${job.id}/run`, { method: 'POST' }).catch(() => {});
 
-  const entry = { jobId: job.id, owner: current, prompt, startedAt: Date.now() };
+  const entry = { jobId: job.id, owner: current, prompt, tmpl, startedAt: Date.now() };
   pendingImages.push(entry);
   closeImgModal();
   renderImages();
@@ -872,16 +910,28 @@ async function pollImageJob(entry) {
     }
 
     if (job.status === 'done') {
-      finishPending(entry);
       // The post object is the identity here: reloading a post replaces it, so
       // an image must never land on whatever happens to be open now.
       if (current === entry.owner) {
-        current.images.push(job.result);
+        let item = job.result;
+        if (entry.tmpl) {
+          try {
+            item = await composePoster({ ...entry.tmpl, imageUrl: job.result.url });
+          } catch (e) {
+            // The picture is already paid for; keep it rather than lose it
+            // because the wrapper failed.
+            toast(`海報合成失敗，先放原圖：${e.message || ''}`, true);
+          }
+        }
+        finishPending(entry);
+        current.images.push(item);
         renderImages();
         refreshPaneMeta();
         updateSaveBar();
-        toast('圖片已加入，記得儲存');
+        toast(entry.tmpl && item !== job.result
+          ? '海報已加入，記得儲存' : '圖片已加入，記得儲存');
       } else {
+        finishPending(entry);
         toast('圖片已生成，但你已切換貼文，這張沒有被加入', true);
       }
       return;
@@ -1140,21 +1190,44 @@ async function refreshTmplPreview() {
   });
 }
 
+/** Put a composed PNG in R2 and hand back its public URL. */
+async function uploadPng(blob, stem) {
+  const { uploadUrl, publicUrl } = await apiJson('/upload/presign', {
+    method: 'POST',
+    body: { filename: `${stem}-${Date.now()}.png`, content_type: 'image/png',
+            club_id: activeClubId() },
+  });
+  const put = await fetch(uploadUrl, {
+    method: 'PUT', headers: { 'Content-Type': 'image/png' }, body: blob,
+  });
+  if (!put.ok) throw new Error('上傳至雲端失敗');
+  return publicUrl;
+}
+
+/**
+ * Wrap one picture in the meeting's poster and store the result.
+ *
+ * Used both by the template modal and, when asked, straight after an image is
+ * generated — the latter is why a promo can be made without anyone having to
+ * remember the second step. Runs off-screen, so it does not need the modal.
+ */
+async function composePoster({ kind, templateKey, fields, imageUrl }) {
+  const list = templatesFor(kind);
+  const template = list.find((t) => t.key === templateKey) || list[0];
+  if (!template) throw new Error('這個貼文用途沒有版型');
+  const art = await loadBackground(imageUrl);
+  const canvas = document.createElement('canvas');
+  drawTemplate(canvas, { template, values: templateValues(kind, fields), background: art });
+  return { url: await uploadPng(await canvasToBlob(canvas), 'poster'),
+           name: '例會海報', type: 'image' };
+}
+
 async function runApplyTemplate() {
   const canvas = document.getElementById('tmplCanvas');
   if (!canvas || !current) return;
   const restore = busyButton(document.getElementById('tmplConfirmBtn'), '產生中…');
   try {
-    const blob = await canvasToBlob(canvas);
-    const { uploadUrl, publicUrl } = await apiJson('/upload/presign', {
-      method: 'POST',
-      body: { filename: `template-${Date.now()}.png`, content_type: 'image/png',
-              club_id: activeClubId() },
-    });
-    const put = await fetch(uploadUrl, {
-      method: 'PUT', headers: { 'Content-Type': 'image/png' }, body: blob,
-    });
-    if (!put.ok) throw new Error('上傳至雲端失敗');
+    const publicUrl = await uploadPng(await canvasToBlob(canvas), 'template');
     current.images.push({ url: publicUrl, name: '版型圖', type: 'image' });
     renderImages();
     refreshPaneMeta();
@@ -1579,6 +1652,18 @@ export default function SocialPage() {
             <label className="modal-field-label">想要什麼樣的圖片</label>
             <textarea id="imgPrompt" className="modal-textarea" rows="4"
                       placeholder="例如：一群人在明亮的會議室裡鼓掌，暖色調，扁平插畫風格，不要有文字"></textarea>
+            <div id="imgTmplWrap" style={{ display: 'none' }}>
+              <label className="tmpl-check">
+                <input type="checkbox" id="imgAutoTmpl" defaultChecked />
+                產生後直接套成海報（日期、地址、入場費會疊在圖上）
+              </label>
+              <select id="imgTmplPick" className="ed-select ed-select-wide"></select>
+              <p className="modal-field-hint">
+                只會加入合成後的海報，不另外留一張原圖。
+                提示詞請描述<strong>插圖本身</strong>就好——版面、文字由版型負責。
+              </p>
+            </div>
+            <div className="modal-field-hint" id="imgNoTmplNote"></div>
             <label className="modal-field-label">模型</label>
             <select id="imgModel" className="ed-select ed-select-wide"></select>
             <label className="modal-field-label">品質</label>
