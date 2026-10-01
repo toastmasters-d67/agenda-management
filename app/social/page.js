@@ -45,8 +45,13 @@ let setSaveLabel    = null;
 
 const activeClubId = () => (isSystemAdmin() ? selectedClubId : getClubId());
 
+// A new post starts as a promo: it is what a club writes most, and it is the
+// kind whose guard rails (the required date, address and fee, and the poster
+// layout) are worth the most. 'other' remains the default for a row that
+// arrives without a kind — that is a row written before the distinction
+// existed, where 'promo' would be a guess rather than a sensible start.
 const blankPost = () => ({
-  id: null, clubId: activeClubId(), agendaId: null, kind: 'other',
+  id: null, clubId: activeClubId(), agendaId: null, kind: 'promo',
   title: '', status: 'draft', body: '',
   variants: Object.fromEntries(PLATFORM_KEYS.map((k) => [k, { text: '', enabled: true }])),
   images: [],
