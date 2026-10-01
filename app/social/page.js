@@ -6,7 +6,7 @@ import { setAuth, clearAuth, applyRoleUI, isSystemAdmin, canWrite, getClubId } f
 import { SOCIAL_PLATFORMS, PLATFORM_KEYS, platformSpec, platformWarnings,
          mediaKind, mediaLabel } from '@/lib/socialPlatforms';
 import { POST_KINDS, KIND_KEYS, KIND_REQUIRED, kindSpec, kindLabel,
-         templatesFor, templateValues, drawTemplate, canvasToBlob }
+         templatesFor, templateValues, drawTemplate, canvasToBlob, LOGO_URL }
   from '@/lib/postTemplates';
 import Sidebar from '@/components/Sidebar';
 import './social.css';
@@ -333,6 +333,7 @@ function renderEditor() {
 
     <div class="ed-block">
       <label class="ed-label">圖片／影片</label>
+      <div class="ed-media-hint">第一個是輪播封面，也是各平台的發布順序——用 ◀ ▶ 調整。</div>
       <div id="imgStrip" class="img-strip"></div>
       ${canWrite() ? `
       <div class="img-actions">
@@ -440,8 +441,13 @@ function renderImages() {
         ? `<video src="${esc(img.url)}" muted playsinline preload="metadata"></video>
            <span class="img-badge">影片</span>`
         : `<img src="${esc(img.url)}" alt="${esc(img.name || '')}">`}
+      ${i === 0 ? '<span class="img-cover">封面</span>' : ''}
       ${canWrite() ? `<button class="img-del" title="移除"
-           onclick="event.stopPropagation(); window.__socialRemoveImage(${i})">✕</button>` : ''}
+           onclick="event.stopPropagation(); window.__socialRemoveImage(${i})">✕</button>
+        <div class="img-move">
+          ${i > 0 ? `<button title="往前" onclick="event.stopPropagation(); window.__socialMoveImage(${i}, -1)">◀</button>` : ''}
+          ${i < current.images.length - 1 ? `<button title="往後" onclick="event.stopPropagation(); window.__socialMoveImage(${i}, 1)">▶</button>` : ''}
+        </div>` : ''}
     </div>`).join('') + mine.map((j) => `
     <div class="img-thumb pending" title="${esc(j.prompt)}">
       <div class="spinner"></div>
@@ -590,6 +596,22 @@ async function uploadImages(input) {
   } finally {
     restore();
   }
+}
+
+/**
+ * Move one attachment along the strip.
+ *
+ * The order is not cosmetic: it is the order the platforms publish in, and the
+ * first one is the carousel's cover — the only one most people see.
+ */
+function moveImage(i, dir) {
+  if (!current || !canWrite()) return;
+  const j = i + dir;
+  const arr = current.images;
+  if (j < 0 || j >= arr.length) return;
+  [arr[i], arr[j]] = [arr[j], arr[i]];
+  renderImages();
+  updateSaveBar();
 }
 
 function removeImage(i) {
@@ -1081,6 +1103,25 @@ async function runPublish() {
 
 let tmplFields = null;      // the bound meeting's facts
 let tmplBg     = null;      // HTMLImageElement, or null for the gradient
+let tmplLogo;               // undefined = not tried, null = failed, else Image
+
+/**
+ * The Toastmasters badge, fetched once.
+ *
+ * Served from this app's own /media, so unlike the artwork it needs no proxy
+ * and cannot taint the canvas. A failure is remembered as null rather than
+ * retried on every redraw — a poster without the badge is still a poster.
+ */
+async function getLogo() {
+  if (tmplLogo !== undefined) return tmplLogo;
+  tmplLogo = await new Promise((res) => {
+    const i = new Image();
+    i.onload = () => res(i);
+    i.onerror = () => res(null);
+    i.src = LOGO_URL;
+  });
+  return tmplLogo;
+}
 
 /**
  * Load an R2 image as a blob URL.
@@ -1195,6 +1236,7 @@ async function refreshTmplPreview() {
     template,
     values: templateValues(current.kind, tmplFields),
     background: tmplBg,
+    logo: await getLogo(),
     hideTitle: !!document.getElementById('tmplHideTitle')?.checked,
   });
 }
@@ -1226,7 +1268,8 @@ async function composePoster({ kind, templateKey, fields, imageUrl }) {
   if (!template) throw new Error('這個貼文用途沒有版型');
   const art = await loadBackground(imageUrl);
   const canvas = document.createElement('canvas');
-  drawTemplate(canvas, { template, values: templateValues(kind, fields), background: art });
+  drawTemplate(canvas, { template, values: templateValues(kind, fields),
+                         background: art, logo: await getLogo() });
   return { url: await uploadPng(await canvasToBlob(canvas), 'poster'),
            name: '例會海報', type: 'image' };
 }
@@ -1449,6 +1492,7 @@ export default function SocialPage() {
     window.__socialCopy        = copyActive;
     window.__socialUpload      = uploadImages;
     window.__socialRemoveImage = removeImage;
+    window.__socialMoveImage   = moveImage;
     window.__socialPreview     = openPreview;
     window.__socialDelete      = deletePost;
     window.__socialOpenGen     = openGenModal;
