@@ -7,7 +7,11 @@ export async function middleware(request) {
   // /svc/* and /api/* handle their own auth (FastAPI 401s on missing/bad
   // token, login/register are unauthenticated by design) — don't redirect
   // API calls to an HTML page.
-  if (pathname.startsWith('/svc') || pathname.startsWith('/api')) {
+  // /.well-known is OAuth discovery: an MCP client reads it *before* it has
+  // a token, so redirecting it to /login would break authorization at the
+  // first step.
+  if (pathname.startsWith('/svc') || pathname.startsWith('/api')
+      || pathname.startsWith('/.well-known')) {
     return NextResponse.next();
   }
 
@@ -39,5 +43,5 @@ export async function middleware(request) {
 }
 
 export const config = {
-  matcher: ['/((?!_next/static|_next/image|favicon.ico|media).*)'],
+  matcher: ['/((?!_next/static|_next/image|favicon.ico|media|\.well-known).*)'],
 };

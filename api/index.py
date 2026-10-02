@@ -12,7 +12,7 @@ import psycopg2.pool
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Depends, Query
+from fastapi import FastAPI, HTTPException, Depends, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -2898,3 +2898,172 @@ def _run_publish_job(username: str, club_id: Optional[int], params: dict) -> dic
 # surface stays in one place.
 _JOB_KINDS = _JOB_KINDS + ("publish",)
 _JOB_RUNNERS["publish"] = _run_publish_job
+
+
+# ==================================================================
+# MCP — OAUTH 2.1 RESOURCE SERVER
+# ==================================================================
+# This app can be driven by an MCP client (Claude and friends), which means it
+# has to act as an OAuth 2.1 resource server: tokens come from the
+# authorization half below, and every MCP request carries one.
+#
+# The scopes exist to make one particular thing a user decision rather than a
+# line of code: publishing is public and cannot be taken back, so `publish` is
+# NOT in the default set and NOT in `scopes_supported`. A client that wants it
+# has to be challenged for it, which puts "allow this to post as the club" on
+# the consent screen where someone can refuse it.
+#
+# A scope never widens what a person may do. It narrows what a token may do on
+# their behalf — the role checks (`require_club_admin_or_above`, `_social_scope`)
+# still run underneath, unchanged.
+
+# Signed separately from JWT_SECRET on purpose: a login cookie and a
+# machine-to-machine token have different lifetimes and blast radii, and
+# sharing one key means a leak of either compromises both.
+MCP_TOKEN_SECRET = os.getenv("MCP_TOKEN_SECRET", "")
+MCP_ACCESS_TTL   = timedelta(hours=1)
+MCP_REFRESH_TTL  = timedelta(days=60)
+MCP_CODE_TTL     = timedelta(minutes=5)
+
+MCP_SCOPES = {
+    "posts:read":  "讀取例會資料與貼文草稿",
+    "posts:write": "建立與修改貼文草稿",
+    "ai:generate": "用你的 AI 帳號產生文案與圖片（會消耗你的 API 額度）",
+    "publish":     "代表分會公開發文到 Facebook／Instagram／Threads",
+}
+# What a client gets without asking for more. `publish` is deliberately absent:
+# see the note above.
+MCP_DEFAULT_SCOPES = ("posts:read", "posts:write", "ai:generate")
+
+
+def _public_origin(request: Request) -> str:
+    """
+    The origin a client actually reached us on.
+
+    Taken from the forwarded headers rather than hardcoded: the canonical
+    resource URI has to match what the client sends in `resource`, and that is
+    whatever host they typed — production, a preview deployment, or localhost.
+    """
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or ""
+    proto = request.headers.get("x-forwarded-proto") or request.url.scheme or "https"
+    return f"{proto}://{host}"
+
+
+def _mcp_resource(request: Request) -> str:
+    """The canonical URI of this MCP server (RFC 8707 resource indicator)."""
+    return f"{_public_origin(request)}/api/mcp"
+
+
+def _prm_url(request: Request) -> str:
+    return f"{_public_origin(request)}/.well-known/oauth-protected-resource"
+
+
+def _mcp_secret() -> str:
+    if not MCP_TOKEN_SECRET:
+        raise HTTPException(
+            status_code=503,
+            detail="伺服器尚未設定 MCP_TOKEN_SECRET，無法簽發或驗證 MCP token",
+        )
+    return MCP_TOKEN_SECRET
+
+
+def _mint_access_token(username: str, client_id: str, scope: str,
+                       resource: str) -> tuple:
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": username,
+        "aud": resource,          # audience binding — see _verify_access_token
+        "iss": resource.rsplit("/api/mcp", 1)[0],
+        "client_id": client_id,
+        "scope": scope,
+        "iat": now,
+        "exp": now + MCP_ACCESS_TTL,
+        "jti": uuid.uuid4().hex,
+    }
+    token = jwt.encode(payload, _mcp_secret(), algorithm=JWT_ALGORITHM)
+    return token, int(MCP_ACCESS_TTL.total_seconds())
+
+
+def _unauthorized(request: Request, scope: str = "", error: str = ""):
+    """401 that tells the client where to go, as RFC 6750/9728 require."""
+    parts = [f'Bearer resource_metadata="{_prm_url(request)}"']
+    if scope:
+        parts.append(f'scope="{scope}"')
+    if error:
+        parts.append(f'error="{error}"')
+    return HTTPException(status_code=401, detail="需要授權",
+                         headers={"WWW-Authenticate": ", ".join(parts)})
+
+
+def _verify_access_token(request: Request, token: str) -> dict:
+    resource = _mcp_resource(request)
+    try:
+        claims = jwt.decode(token, _mcp_secret(), algorithms=[JWT_ALGORITHM],
+                            audience=resource)
+    except jwt.ExpiredSignatureError:
+        raise _unauthorized(request, error="invalid_token")
+    except jwt.InvalidAudienceError:
+        # The token was issued for somebody else's server. Accepting it is the
+        # confused-deputy hole the spec calls out, so this is a hard no.
+        raise _unauthorized(request, error="invalid_token")
+    except jwt.InvalidTokenError:
+        raise _unauthorized(request, error="invalid_token")
+    return claims
+
+
+def mcp_caller(request: Request) -> dict:
+    """
+    Who is calling, and what this token is allowed to do on their behalf.
+
+    Returns the same shape `get_current_user` does, plus `scopes`, so the
+    existing role checks can be reused verbatim rather than reimplemented.
+    """
+    auth = request.headers.get("authorization") or ""
+    if not auth.lower().startswith("bearer "):
+        raise _unauthorized(request, scope=" ".join(MCP_DEFAULT_SCOPES))
+    claims = _verify_access_token(request, auth[7:].strip())
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT username, role, club_id, status FROM users"
+                        " WHERE username=%s", (claims.get("sub"),))
+            row = cur.fetchone()
+    if not row or row[3] == "pending":
+        raise _unauthorized(request, error="invalid_token")
+
+    return {"username": row[0], "role": row[1], "club_id": row[2],
+            "scopes": set((claims.get("scope") or "").split()),
+            "client_id": claims.get("client_id", "")}
+
+
+def require_scope(caller: dict, scope: str, request: Request):
+    """403 + a challenge naming exactly what is missing (RFC 6750 §3.1)."""
+    if scope in caller["scopes"]:
+        return
+    raise HTTPException(
+        status_code=403,
+        detail=f"這個授權沒有包含「{MCP_SCOPES.get(scope, scope)}」",
+        headers={"WWW-Authenticate":
+                 f'Bearer error="insufficient_scope", scope="{scope}", '
+                 f'resource_metadata="{_prm_url(request)}"'},
+    )
+
+
+@app.get("/.well-known/oauth-protected-resource")
+@app.get("/.well-known/oauth-protected-resource/api/mcp")
+def protected_resource_metadata(request: Request):
+    """
+    RFC 9728. The first thing an MCP client fetches, before it has a token —
+    so this endpoint must stay unauthenticated, and middleware.js excludes
+    /.well-known for that reason.
+
+    `scopes_supported` is the minimum for basic functionality, which is why
+    `publish` is not in it.
+    """
+    origin = _public_origin(request)
+    return {
+        "resource": f"{origin}/api/mcp",
+        "authorization_servers": [origin],
+        "scopes_supported": list(MCP_DEFAULT_SCOPES),
+        "bearer_methods_supported": ["header"],
+    }
