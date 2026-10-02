@@ -3344,3 +3344,387 @@ async def oauth_token(request: Request):
         body["refresh_token"] = _issue_refresh(username, client_id, scope, resource)
     return Response(content=json.dumps(body), media_type="application/json",
                     headers={"Cache-Control": "no-store"})
+
+
+# ==================================================================
+# MCP — THE ENDPOINT AND ITS TOOLS
+# ==================================================================
+# Streamable HTTP, in its current shape: one POST endpoint, no sessions, no
+# initialize handshake. Every request carries its own protocol version and
+# capabilities in `_meta`, so nothing is remembered between calls — which is
+# exactly what a serverless function can offer.
+#
+# Tools are thin wrappers over the same helpers the web UI uses. That is the
+# whole safety argument: there is no second code path with its own idea of who
+# may do what. `_social_scope` and the role checks run underneath every tool,
+# and the OAuth scope only ever narrows what the token may ask for.
+
+MCP_PROTOCOL_VERSIONS = ("2026-07-28",)
+MCP_SERVER_INFO = {"name": "entrepreneur-agenda", "version": "1.0.0"}
+
+
+def _rpc_error(req_id, code, message, status=200, data=None):
+    err = {"code": code, "message": message}
+    if data is not None:
+        err["data"] = data
+    body = {"jsonrpc": "2.0", "error": err}
+    if req_id is not None:
+        body["id"] = req_id
+    return Response(content=json.dumps(body, ensure_ascii=False),
+                    status_code=status, media_type="application/json")
+
+
+def _rpc_ok(req_id, result):
+    result = {"resultType": "complete", **result}
+    result.setdefault("_meta", {})["io.modelcontextprotocol/serverInfo"] = MCP_SERVER_INFO
+    return Response(
+        content=json.dumps({"jsonrpc": "2.0", "id": req_id, "result": result},
+                           ensure_ascii=False),
+        media_type="application/json")
+
+
+def _tool_text(text: str, structured=None, is_error: bool = False) -> dict:
+    """
+    A tool result.
+
+    Failures a model can act on come back here with isError, not as JSON-RPC
+    errors: the spec reserves protocol errors for malformed requests, and a
+    model cannot correct itself from one.
+    """
+    out = {"content": [{"type": "text", "text": text}], "isError": is_error}
+    if structured is not None:
+        out["structuredContent"] = structured
+    return out
+
+
+# ------------------------------------------------------------------ tool bodies
+def _officer_only(caller: dict):
+    if caller["role"] not in ("system_admin", "club_admin"):
+        raise HTTPException(status_code=403, detail="需要分會管理員以上權限")
+
+
+def _tool_list_meetings(caller, args):
+    cid = _social_scope(caller, args.get("club_id"))
+    limit = min(int(args.get("limit") or 10), 50)
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, data->>'meetingDate', data->>'meetingNo',"
+                " data->>'meetingTheme' FROM agendas"
+                " WHERE (%s::int IS NULL OR club_id=%s)"
+                " ORDER BY data->>'meetingDate' DESC NULLS LAST LIMIT %s",
+                (cid, cid, limit))
+            rows = cur.fetchall()
+    items = [{"agendaId": r[0], "date": r[1] or "", "meetingNo": r[2] or "",
+              "theme": r[3] or ""} for r in rows]
+    lines = [f"{i['date']} 第{i['meetingNo']}次 · {i['theme']}（agendaId={i['agendaId']}）"
+             for i in items] or ["（沒有例會）"]
+    return _tool_text("\n".join(lines), {"meetings": items})
+
+
+def _tool_get_meeting(caller, args):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            f = _meeting_fields(cur, int(args["agenda_id"]), caller)
+    f.pop("agenda", None)
+    missing = [lb for k, lb in _KIND_REQUIRED["promo"] if not f.get(k)]
+    text = "\n".join(f"{k}: {v}" for k, v in f.items() if v)
+    if missing:
+        text += "\n\n⚠️ 作為例會宣傳還缺：" + "、".join(missing)
+    return _tool_text(text, {**f, "missingForPromo": missing})
+
+
+def _tool_list_posts(caller, args):
+    cid = _social_scope(caller, args.get("club_id"))
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT {_SOCIAL_COLS} FROM social_posts"
+                        " WHERE (%s::int IS NULL OR club_id=%s)"
+                        " ORDER BY created_at DESC LIMIT 50", (cid, cid))
+            rows = [_social_row(r) for r in cur.fetchall()]
+    items = [{"id": r["id"], "title": r["title"], "kind": r["kind"],
+              "status": r["status"], "agendaId": r["agendaId"],
+              "images": len(r["images"]), "published": sorted(r["published"])}
+             for r in rows]
+    lines = [f"#{i['id']} [{i['kind']}/{i['status']}] {i['title'] or '(無標題)'}"
+             f" · 圖 {i['images']}" + (f" · 已發布 {'、'.join(i['published'])}"
+                                       if i["published"] else "")
+             for i in items] or ["（沒有貼文）"]
+    return _tool_text("\n".join(lines), {"posts": items})
+
+
+def _tool_get_post(caller, args):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            row = _social_row(_load_social_post(cur, int(args["post_id"]), caller))
+    return _tool_text(json.dumps(row, ensure_ascii=False, indent=1), row)
+
+
+def _tool_create_post(caller, args):
+    _officer_only(caller)
+    cid = _social_scope(caller, args.get("club_id"))
+    kind = args.get("kind") if args.get("kind") in _POST_KINDS else "promo"
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO social_posts (club_id, agenda_id, kind, title, status,"
+                " body, variants, images) VALUES (%s,%s,%s,%s,'draft',%s,'{}'::jsonb,"
+                "'[]'::jsonb) RETURNING id",
+                (cid, args.get("agenda_id"), kind, (args.get("title") or "")[:200],
+                 args.get("body") or ""))
+            new_id = cur.fetchone()[0]
+    return _tool_text(f"已建立草稿 #{new_id}（{kind}）", {"postId": new_id, "kind": kind})
+
+
+def _tool_update_post(caller, args):
+    _officer_only(caller)
+    post_id = int(args["post_id"])
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            row = _social_row(_load_social_post(cur, post_id, caller))
+            variants = row["variants"]
+            for k, v in (args.get("variants") or {}).items():
+                if k in SOCIAL_PLATFORMS:
+                    variants[k] = {"text": v if isinstance(v, str) else v.get("text", ""),
+                                   "enabled": True}
+            cur.execute(
+                "UPDATE social_posts SET title=%s, body=%s, kind=%s, status=%s,"
+                " agenda_id=%s, variants=%s::jsonb, updated_at=NOW() WHERE id=%s",
+                (args.get("title", row["title"])[:200],
+                 args.get("body", row["body"]),
+                 args.get("kind") if args.get("kind") in _POST_KINDS else row["kind"],
+                 args.get("status") if args.get("status") in _STATUSES else row["status"],
+                 args.get("agenda_id", row["agendaId"]),
+                 json.dumps(variants), post_id))
+    return _tool_text(f"已更新貼文 #{post_id}", {"postId": post_id})
+
+
+def _tool_generate_copy(caller, args):
+    _officer_only(caller)
+    post_id = int(args["post_id"])
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            row = _social_row(_load_social_post(cur, post_id, caller))
+    req = SocialGenerateRequest(
+        club_id=row["clubId"], agenda_id=row["agendaId"], kind=row["kind"],
+        brief=args.get("brief") or "",
+        platforms=[p for p in (args.get("platforms") or []) if p in SOCIAL_PLATFORMS],
+        provider=args.get("provider") or "anthropic",
+        model=args.get("model") or "")
+    out = generate_social_copy(req, caller)      # same path the browser takes
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            variants = row["variants"]
+            for k, v in (out.get("variants") or {}).items():
+                if k in variants:
+                    variants[k] = {"text": v.get("text", ""),
+                                   "enabled": v.get("enabled", True)}
+            cur.execute("UPDATE social_posts SET title=COALESCE(NULLIF(title,''),%s),"
+                        " body=%s, variants=%s::jsonb, updated_at=NOW() WHERE id=%s",
+                        (out.get("title", ""), out.get("body", ""),
+                         json.dumps(variants), post_id))
+    return _tool_text(
+        f"已為貼文 #{post_id} 產生文案並存檔。\n\n主文案：\n{out.get('body','')}",
+        {"postId": post_id, "title": out.get("title", ""),
+         "body": out.get("body", ""), "variants": out.get("variants", {})})
+
+
+def _tool_publish_post(caller, args):
+    _officer_only(caller)
+    post_id = int(args["post_id"])
+    platforms = [p for p in (args.get("platforms") or []) if p in _PUBLISHERS]
+    if not platforms:
+        return _tool_text("請指定至少一個平台（facebook / instagram / threads）",
+                          is_error=True)
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            row = _social_row(_load_social_post(cur, post_id, caller))
+    cid = _social_scope(caller, row["clubId"])
+    out = _run_publish_job(caller["username"], cid,
+                           {"post_id": post_id, "platforms": platforms})
+    results = out.get("results", {})
+    lines = [f"{p}: " + ("已發布 " + (r.get("url") or "") if r.get("ok")
+                         else "失敗 — " + (r.get("error") or ""))
+             for p, r in results.items()]
+    return _tool_text("\n".join(lines), {"results": results},
+                      is_error=not any(r.get("ok") for r in results.values()))
+
+
+# ------------------------------------------------------------------ catalogue
+_OBJ = {"type": "object"}
+MCP_TOOLS = [
+    {
+        "name": "list_meetings", "scope": "posts:read", "title": "列出例會",
+        "description": "列出分會的例會（議程），最近的在前。回傳 agendaId，其他工具用它指定例會。",
+        "inputSchema": {"type": "object", "properties": {
+            "club_id": {"type": "integer", "description": "分會 id；系統管理員才需要指定"},
+            "limit": {"type": "integer", "description": "最多幾筆，預設 10，上限 50"},
+        }, "additionalProperties": False},
+        "handler": _tool_list_meetings,
+    },
+    {
+        "name": "get_meeting", "scope": "posts:read", "title": "取得例會資訊",
+        "description": "取得一場例會的日期、時間、地址、入場費與主題——例會宣傳貼文需要的全部事實。"
+                       "若缺少宣傳必填的欄位會一併指出。",
+        "inputSchema": {"type": "object", "properties": {
+            "agenda_id": {"type": "integer", "description": "例會 id，來自 list_meetings"},
+        }, "required": ["agenda_id"], "additionalProperties": False},
+        "handler": _tool_get_meeting,
+    },
+    {
+        "name": "list_posts", "scope": "posts:read", "title": "列出貼文草稿",
+        "description": "列出分會的社群貼文草稿與已發布貼文。",
+        "inputSchema": {"type": "object", "properties": {
+            "club_id": {"type": "integer"},
+        }, "additionalProperties": False},
+        "handler": _tool_list_posts,
+    },
+    {
+        "name": "get_post", "scope": "posts:read", "title": "取得貼文",
+        "description": "取得一則貼文的完整內容：主文案、各平台版本、圖片、已發布到哪些平台。",
+        "inputSchema": {"type": "object", "properties": {
+            "post_id": {"type": "integer"},
+        }, "required": ["post_id"], "additionalProperties": False},
+        "handler": _tool_get_post,
+    },
+    {
+        "name": "create_post", "scope": "posts:write", "title": "建立貼文草稿",
+        "description": "建立一則貼文草稿。kind 為 promo（例會宣傳）、recap（例會回顧）或 other。"
+                       "宣傳類請一併綁定 agenda_id，否則產生文案時會因為缺少日期地址費用而被擋下。",
+        "inputSchema": {"type": "object", "properties": {
+            "title": {"type": "string", "description": "內部標題，只給管理者辨識"},
+            "kind": {"type": "string", "enum": ["promo", "recap", "other"]},
+            "agenda_id": {"type": "integer"},
+            "body": {"type": "string", "description": "主文案；留空稍後用 generate_copy 產生"},
+            "club_id": {"type": "integer"},
+        }, "additionalProperties": False},
+        "handler": _tool_create_post,
+    },
+    {
+        "name": "update_post", "scope": "posts:write", "title": "修改貼文草稿",
+        "description": "修改貼文的標題、主文案、用途、狀態、綁定例會，或各平台的文案版本。",
+        "inputSchema": {"type": "object", "properties": {
+            "post_id": {"type": "integer"},
+            "title": {"type": "string"},
+            "body": {"type": "string"},
+            "kind": {"type": "string", "enum": ["promo", "recap", "other"]},
+            "status": {"type": "string", "enum": ["draft", "ready", "posted"]},
+            "agenda_id": {"type": "integer"},
+            "variants": {"type": "object",
+                         "description": "各平台文案，例如 {\"threads\": \"...\"}"},
+        }, "required": ["post_id"], "additionalProperties": False},
+        "handler": _tool_update_post,
+    },
+    {
+        "name": "generate_copy", "scope": "ai:generate", "title": "AI 產生文案",
+        "description": "用 AI 依貼文用途與綁定例會的資料產生文案，並直接存進該則貼文。"
+                       "⚠️ 這會消耗呼叫者自己（或分會共用）的 AI 帳號額度。",
+        "inputSchema": {"type": "object", "properties": {
+            "post_id": {"type": "integer"},
+            "brief": {"type": "string", "description": "補充指示，例如想強調什麼"},
+            "platforms": {"type": "array", "items": {"type": "string"},
+                          "description": "要產生哪些平台，預設全部"},
+            "provider": {"type": "string", "enum": ["anthropic", "openai"]},
+            "model": {"type": "string", "description": "留空用預設模型"},
+        }, "required": ["post_id"], "additionalProperties": False},
+        "handler": _tool_generate_copy,
+    },
+    {
+        "name": "publish_post", "scope": "publish", "title": "發布貼文",
+        "description": "把貼文發布到指定的社群平台。⚠️ 這是公開的，而且發出去無法透過這個系統收回；"
+                       "Instagram 一定要有圖片。發布前請先用 get_post 確認內容。",
+        "inputSchema": {"type": "object", "properties": {
+            "post_id": {"type": "integer"},
+            "platforms": {"type": "array", "items": {
+                "type": "string", "enum": ["facebook", "instagram", "threads"]}},
+        }, "required": ["post_id", "platforms"], "additionalProperties": False},
+        "handler": _tool_publish_post,
+    },
+]
+
+
+# ------------------------------------------------------------------ the endpoint
+@app.post("/api/mcp")
+async def mcp_endpoint(request: Request):
+    try:
+        body = json.loads(await request.body() or b"{}")
+    except Exception:
+        return _rpc_error(None, -32700, "Parse error", status=400)
+
+    req_id = body.get("id")
+    method = body.get("method") or ""
+    params = body.get("params") or {}
+    meta = params.get("_meta") or {}
+
+    # --- per-request protocol fields (there is no initialize to carry them) ---
+    version = meta.get("io.modelcontextprotocol/protocolVersion")
+    if not version or "io.modelcontextprotocol/clientCapabilities" not in meta:
+        return _rpc_error(req_id, -32602,
+                          "缺少 _meta 的 protocolVersion 或 clientCapabilities",
+                          status=400)
+    if version not in MCP_PROTOCOL_VERSIONS:
+        return _rpc_error(req_id, -32022, "不支援這個協定版本", status=400,
+                          data={"supported": list(MCP_PROTOCOL_VERSIONS)})
+
+    # --- headers must agree with the body ---------------------------------
+    # An intermediary routing on the header and a server acting on the body
+    # must never see different things; the spec makes the mismatch an error
+    # rather than letting either side guess.
+    hdr_version = request.headers.get("mcp-protocol-version")
+    if hdr_version != version:
+        return _rpc_error(req_id, -32020,
+                          "MCP-Protocol-Version 標頭與內容不符", status=400)
+    hdr_method = request.headers.get("mcp-method")
+    if hdr_method != method:
+        return _rpc_error(req_id, -32020, "Mcp-Method 標頭與內容不符", status=400)
+    if method in ("tools/call", "resources/read", "prompts/get"):
+        want = params.get("name") or params.get("uri") or ""
+        if (request.headers.get("mcp-name") or "") != want:
+            return _rpc_error(req_id, -32020, "Mcp-Name 標頭與內容不符", status=400)
+
+    caller = mcp_caller(request)      # raises 401 with the right challenge
+
+    # The set of tools may vary by the authorization presented — scopes are
+    # per-request input, not connection state — so a token without `publish`
+    # simply does not see a publish tool.
+    allowed = [t for t in MCP_TOOLS if t["scope"] in caller["scopes"]]
+
+    if method == "tools/list":
+        return _rpc_ok(req_id, {"tools": [
+            {k: v for k, v in t.items() if k in
+             ("name", "title", "description", "inputSchema")}
+            for t in allowed]})
+
+    if method == "tools/call":
+        name = params.get("name")
+        tool = next((t for t in MCP_TOOLS if t["name"] == name), None)
+        if tool is None:
+            return _rpc_error(req_id, -32602, f"沒有這個工具：{name}")
+        if tool["scope"] not in caller["scopes"]:
+            # A scope challenge, not a plain refusal: the client can ask the
+            # user to grant it and retry.
+            require_scope(caller, tool["scope"], request)
+        try:
+            result = tool["handler"](caller, params.get("arguments") or {})
+        except HTTPException as e:
+            # The app's own refusals are things a model can act on — a missing
+            # field, a wrong id, an unconnected platform — so they come back as
+            # tool errors rather than protocol errors.
+            result = _tool_text(str(e.detail), is_error=True)
+        except Exception:
+            result = _tool_text("工具執行失敗，請稍後再試", is_error=True)
+        return _rpc_ok(req_id, result)
+
+    return _rpc_error(req_id, -32601, f"不支援這個方法：{method}", status=404)
+
+
+@app.get("/api/mcp")
+@app.delete("/api/mcp")
+def mcp_endpoint_rejects(request: Request):
+    """
+    The current revision removed the GET stream and session termination, so
+    these are the documented responses for a client still speaking the older
+    shape.
+    """
+    return Response(status_code=405)
