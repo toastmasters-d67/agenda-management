@@ -11,3 +11,4 @@ sqlalchemy
 anthropic
 cryptography
 openai
+python-multipart

@@ -34,7 +34,13 @@ export async function middleware(request) {
   }
 
   if (!validToken) {
-    const response = NextResponse.redirect(new URL('/login', request.url));
+    // Remember where they were headed. The OAuth consent screen is reached
+    // from outside the app, so a user who is not logged in lands here
+    // mid-flow — sending them to /home afterwards would silently abandon the
+    // authorization they were in the middle of granting.
+    const login = new URL('/login', request.url);
+    login.searchParams.set('next', pathname + request.nextUrl.search);
+    const response = NextResponse.redirect(login);
     if (token) response.cookies.set('auth_token', '', { path: '/', maxAge: 0 });
     return response;
   }

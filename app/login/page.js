@@ -5,6 +5,28 @@ import { apiJson } from '@/lib/api';
 import { setAuth } from '@/lib/auth';
 import './login.css';
 
+/**
+ * Where to go once logged in.
+ *
+ * `next` arrives from the middleware when someone was sent here mid-flow —
+ * most often from the OAuth consent screen, which is reached from outside the
+ * app. It is a query parameter, so it is attacker-controllable, and only
+ * same-origin destinations are honoured.
+ */
+function afterLogin() {
+  const target = new URLSearchParams(window.location.search).get('next') || '';
+  try {
+    // Resolve against this origin and insist the result stayed on it. That
+    // rejects "//evil.example" and its backslash variants without any string
+    // picking, which is where open-redirect checks usually go wrong.
+    const u = new URL(target, window.location.origin);
+    if (u.origin === window.location.origin) return u.pathname + u.search;
+  } catch {
+    /* not a usable path — fall through */
+  }
+  return '/home';
+}
+
 export default function LoginPage() {
   const [tab, setTab] = useState('login');
   const [loginError, setLoginError] = useState('');
@@ -51,7 +73,7 @@ export default function LoginPage() {
     try {
       const data = await apiJson('/auth/login', { method: 'POST', body: { username, password } });
       setAuth(data.username, data.role, data.club_id, data.must_change_pw);
-      window.location.href = data.must_change_pw ? '/change-password' : '/home';
+      window.location.href = data.must_change_pw ? '/change-password' : afterLogin();
     } catch (e) {
       setLoginError(e.message || '無法連線到伺服器，請確認後端已啟動');
     } finally {

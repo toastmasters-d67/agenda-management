@@ -1,3 +1,4 @@
+import hmac
 import json
 import os
 import re
@@ -3067,3 +3068,279 @@ def protected_resource_metadata(request: Request):
         "scopes_supported": list(MCP_DEFAULT_SCOPES),
         "bearer_methods_supported": ["header"],
     }
+
+
+# ------------------------------------------------------------------ AS: clients
+# Client ID Metadata Documents: the client_id *is* an HTTPS URL, and the
+# document it points at says who the client is and where it may be redirected.
+# Chosen over Dynamic Client Registration because DCR is deprecated in the MCP
+# spec and needs a registration table and endpoint this app would then own.
+
+_CIMD_MAX_BYTES = 64 * 1024
+_CIMD_TIMEOUT   = 8
+_PRIVATE_HOST_RE = re.compile(
+    r"^(localhost$|127\.|10\.|192\.168\.|169\.254\.|0\.|\[?::1\]?$|"
+    r"172\.(1[6-9]|2\d|3[01])\.)", re.I)
+
+
+def _fetch_client_metadata(client_id: str) -> dict:
+    """
+    Resolve a CIMD client_id, or refuse.
+
+    This fetches a URL supplied by whoever started the authorization request,
+    which is an SSRF primitive if left open. Hence: https only, a path
+    component required, obvious internal hosts refused, a byte cap, and a
+    timeout. A server on a private network should additionally keep this
+    egress behind an allow-list — the host check below is a floor, not a
+    guarantee.
+    """
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    u = urllib.parse.urlparse(client_id)
+    if u.scheme != "https" or not u.netloc or u.path in ("", "/"):
+        raise HTTPException(status_code=400,
+                            detail="client_id 必須是帶路徑的 https 網址")
+    if _PRIVATE_HOST_RE.match(u.hostname or ""):
+        raise HTTPException(status_code=400, detail="client_id 指向內部位址")
+
+    try:
+        req = urllib.request.Request(client_id, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=_CIMD_TIMEOUT) as res:
+            raw = res.read(_CIMD_MAX_BYTES + 1)
+    except Exception:
+        raise HTTPException(status_code=400, detail="無法讀取 client_id 的中繼資料")
+    if len(raw) > _CIMD_MAX_BYTES:
+        raise HTTPException(status_code=400, detail="client_id 的中繼資料過大")
+
+    try:
+        meta = json.loads(raw.decode("utf-8"))
+    except Exception:
+        raise HTTPException(status_code=400, detail="client_id 的中繼資料不是有效的 JSON")
+
+    # The document must claim the exact URL it was fetched from, or anyone
+    # could host a document impersonating another client.
+    if meta.get("client_id") != client_id:
+        raise HTTPException(status_code=400, detail="中繼資料裡的 client_id 與網址不符")
+    if not isinstance(meta.get("redirect_uris"), list) or not meta["redirect_uris"]:
+        raise HTTPException(status_code=400, detail="中繼資料缺少 redirect_uris")
+    if not meta.get("client_name"):
+        raise HTTPException(status_code=400, detail="中繼資料缺少 client_name")
+    return meta
+
+
+# ------------------------------------------------------------------ AS: discovery
+@app.get("/.well-known/oauth-authorization-server")
+def authorization_server_metadata(request: Request):
+    """RFC 8414. Unauthenticated, like the protected-resource document."""
+    origin = _public_origin(request)
+    return {
+        "issuer": origin,
+        "authorization_endpoint": f"{origin}/oauth/authorize",
+        "token_endpoint": f"{origin}/api/oauth/token",
+        "scopes_supported": list(MCP_SCOPES),
+        "response_types_supported": ["code"],
+        "grant_types_supported": ["authorization_code", "refresh_token"],
+        # OAuth 2.1: PKCE is required, and plain is not a method we accept.
+        "code_challenge_methods_supported": ["S256"],
+        "token_endpoint_auth_methods_supported": ["none"],
+        "client_id_metadata_document_supported": True,
+        "authorization_response_iss_parameter_supported": True,
+    }
+
+
+# ------------------------------------------------------------------ AS: authorize
+def _check_authorize(request: Request, client_id: str, redirect_uri: str,
+                     code_challenge: str, code_challenge_method: str,
+                     resource: str, scope: str) -> tuple:
+    if code_challenge_method != "S256" or not code_challenge:
+        raise HTTPException(status_code=400, detail="需要 PKCE（S256）")
+    if resource != _mcp_resource(request):
+        # RFC 8707: the token must be minted for the server the client named,
+        # and that has to be this one.
+        raise HTTPException(status_code=400, detail="resource 與本伺服器不符")
+
+    meta = _fetch_client_metadata(client_id)
+    if redirect_uri not in meta["redirect_uris"]:
+        raise HTTPException(status_code=400, detail="redirect_uri 不在這個 client 的允許清單中")
+
+    wanted = [x for x in (scope or "").split() if x in MCP_SCOPES]
+    return meta, (wanted or list(MCP_DEFAULT_SCOPES))
+
+
+class AuthorizeRequest(BaseModel):
+    client_id:             str
+    redirect_uri:          str
+    code_challenge:        str
+    code_challenge_method: str = "S256"
+    resource:              str
+    scope:                 str = ""
+    state:                 str = ""
+
+
+@app.get("/api/oauth/authorize-info")
+def authorize_info(request: Request,
+                   client_id: str = Query(...), redirect_uri: str = Query(...),
+                   code_challenge: str = Query(...), resource: str = Query(...),
+                   code_challenge_method: str = Query(default="S256"),
+                   scope: str = Query(default=""),
+                   user: dict = Depends(get_current_user)):
+    """What the consent screen needs to show. Validates before anything is drawn."""
+    meta, wanted = _check_authorize(request, client_id, redirect_uri, code_challenge,
+                                    code_challenge_method, resource, scope)
+    return {
+        "clientName": meta["client_name"],
+        "clientUri":  meta.get("client_uri", ""),
+        "username":   user["username"],
+        "role":       user["role"],
+        "scopes":     [{"key": k, "label": MCP_SCOPES[k],
+                        "sensitive": k == "publish"} for k in wanted],
+    }
+
+
+@app.post("/api/oauth/authorize")
+def authorize_grant(request: Request, req: AuthorizeRequest,
+                    user: dict = Depends(get_current_user)):
+    """
+    The user pressed Allow. Mint a code and hand back where to send them.
+
+    Only the hash is stored, and the redirect is returned rather than issued
+    as a 302 so the consent page can navigate itself.
+    """
+    meta, wanted = _check_authorize(request, req.client_id, req.redirect_uri,
+                                    req.code_challenge, req.code_challenge_method,
+                                    req.resource, req.scope)
+    import hashlib
+    import urllib.parse
+    code = uuid.uuid4().hex + uuid.uuid4().hex
+    code_hash = hashlib.sha256(code.encode()).hexdigest()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO oauth_codes (code_hash, client_id, username,"
+                " redirect_uri, code_challenge, resource, scope, expires_at)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                (code_hash, req.client_id, user["username"], req.redirect_uri,
+                 req.code_challenge, req.resource, " ".join(wanted),
+                 datetime.now(timezone.utc) + MCP_CODE_TTL),
+            )
+    params = {"code": code, "iss": _public_origin(request)}
+    if req.state:
+        params["state"] = req.state
+    sep = "&" if "?" in req.redirect_uri else "?"
+    return {"redirect": f"{req.redirect_uri}{sep}{urllib.parse.urlencode(params)}"}
+
+
+# ------------------------------------------------------------------ AS: token
+def _token_error(code: str, desc: str):
+    # OAuth error bodies are a defined shape; FastAPI's {"detail": ...} is not
+    # one a client will understand.
+    return Response(content=json.dumps({"error": code, "error_description": desc}),
+                    status_code=400, media_type="application/json")
+
+
+def _issue_refresh(username: str, client_id: str, scope: str, resource: str) -> str:
+    import hashlib
+    token = uuid.uuid4().hex + uuid.uuid4().hex
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO oauth_refresh_tokens (token_hash, client_id, username,"
+                " scope, resource, expires_at) VALUES (%s,%s,%s,%s,%s,%s)",
+                (hashlib.sha256(token.encode()).hexdigest(), client_id, username,
+                 scope, resource, datetime.now(timezone.utc) + MCP_REFRESH_TTL),
+            )
+    return token
+
+
+@app.post("/api/oauth/token")
+async def oauth_token(request: Request):
+    """
+    Code → token, and refresh → token.
+
+    Reads form-encoded input because that is what OAuth clients send; this is
+    the one endpoint in the app that is not JSON.
+    """
+    import hashlib
+    import base64
+    form = await request.form()
+    grant = form.get("grant_type")
+
+    if grant == "authorization_code":
+        code = form.get("code") or ""
+        verifier = form.get("code_verifier") or ""
+        client_id = form.get("client_id") or ""
+        redirect_uri = form.get("redirect_uri") or ""
+        if not (code and verifier and client_id):
+            return _token_error("invalid_request", "缺少必要參數")
+
+        # Deleting and returning in one statement is what makes a code
+        # single-use: a replay finds nothing, even if it arrives concurrently.
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM oauth_codes WHERE code_hash=%s"
+                    " RETURNING client_id, username, redirect_uri, code_challenge,"
+                    " resource, scope, expires_at",
+                    (hashlib.sha256(code.encode()).hexdigest(),),
+                )
+                row = cur.fetchone()
+        if row is None:
+            return _token_error("invalid_grant", "授權碼無效或已使用")
+        if row[6] < datetime.now(timezone.utc):
+            return _token_error("invalid_grant", "授權碼已過期")
+        if not hmac.compare_digest(row[0], client_id):
+            return _token_error("invalid_grant", "client_id 與授權碼不符")
+        if not hmac.compare_digest(row[2], redirect_uri):
+            return _token_error("invalid_grant", "redirect_uri 與授權碼不符")
+
+        digest = hashlib.sha256(verifier.encode("ascii")).digest()
+        expected = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+        if not hmac.compare_digest(expected, row[3]):
+            return _token_error("invalid_grant", "PKCE 驗證失敗")
+
+        username, resource, scope = row[1], row[4], row[5]
+
+    elif grant == "refresh_token":
+        rt = form.get("refresh_token") or ""
+        client_id = form.get("client_id") or ""
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT client_id, username, scope, resource, expires_at, revoked_at"
+                    " FROM oauth_refresh_tokens WHERE token_hash=%s",
+                    (hashlib.sha256(rt.encode()).hexdigest(),),
+                )
+                row = cur.fetchone()
+        if row is None or row[5] is not None:
+            return _token_error("invalid_grant", "refresh token 無效或已撤銷")
+        if row[4] and row[4] < datetime.now(timezone.utc):
+            return _token_error("invalid_grant", "refresh token 已過期")
+        if client_id and not hmac.compare_digest(row[0], client_id):
+            return _token_error("invalid_grant", "client_id 不符")
+        username, scope, resource = row[1], row[2], row[3]
+        client_id = row[0]
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE oauth_refresh_tokens SET last_used_at=NOW()"
+                            " WHERE token_hash=%s",
+                            (hashlib.sha256(rt.encode()).hexdigest(),))
+    else:
+        return _token_error("unsupported_grant_type", "只支援 authorization_code 與 refresh_token")
+
+    # The account may have been suspended or deleted since the grant.
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT status FROM users WHERE username=%s", (username,))
+            u = cur.fetchone()
+    if not u or u[0] == "pending":
+        return _token_error("invalid_grant", "帳號已停用")
+
+    access, ttl = _mint_access_token(username, client_id, scope, resource)
+    body = {"access_token": access, "token_type": "Bearer",
+            "expires_in": ttl, "scope": scope}
+    if grant == "authorization_code":
+        body["refresh_token"] = _issue_refresh(username, client_id, scope, resource)
+    return Response(content=json.dumps(body), media_type="application/json",
+                    headers={"Cache-Control": "no-store"})
