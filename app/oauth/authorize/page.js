@@ -106,6 +106,9 @@ export default function AuthorizePage() {
           以 <strong>{info.username}</strong> 的身分
           {info.clientUri ? <> · <a href={info.clientUri} target="_blank" rel="noreferrer">{info.clientUri}</a></> : null}
         </p>
+        {info.redirectHost && (
+          <p className="oa-who">授權後會把你導回 <strong>{info.redirectHost}</strong></p>
+        )}
 
         <div className="oa-scopes">
           {info.scopes.map((s) => (

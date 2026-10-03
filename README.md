@@ -847,7 +847,8 @@ https://<你的網域>/api/mcp
 
 | 項目 | 做法 |
 |------|------|
-| 客戶端註冊 | **Client ID Metadata Documents（CIMD）**：`client_id` 本身是 https 網址，伺服器去抓、驗證 `client_id` 與網址相符、`redirect_uri` 在清單內。不支援 DCR（規格已 deprecated）。抓取限 https、擋內部位址、64 KB 上限、8 秒逾時 |
+| 客戶端註冊（CIMD） | **Client ID Metadata Documents**：`client_id` 本身是 https 網址，伺服器去抓、驗證 `client_id` 與網址相符、`redirect_uri` 在清單內。抓取限 https、擋內部位址、64 KB 上限、8 秒逾時 |
+| 客戶端註冊（DCR） | 給還不支援 CIMD 的客戶端（例如 Claude Desktop 的 connector）：`POST /api/oauth/register`（RFC 7591）。**不存資料表**：`client_id` 是 `dcr:` 加上用 `MCP_TOKEN_SECRET` 簽的 JWT，內含 redirect_uris 與名稱，改了就驗不過。redirect_uri 限 https，或 localhost 的 http（CLI 類客戶端）。任何人都能註冊、名稱可以亂取，所以同意畫面會另外顯示「授權後會導回哪個網域」 |
 | PKCE | 必填，只收 `S256` |
 | 授權碼 | 5 分鐘有效，只存 SHA-256 雜湊，`DELETE … RETURNING` 保證只能用一次 |
 | access token | JWT（`MCP_TOKEN_SECRET` 簽），**1 小時**；`aud` 綁定 `https://<host>/api/mcp`，別的伺服器發的 token 一律拒絕 |
@@ -858,9 +859,10 @@ https://<你的網域>/api/mcp
 
 ### 協定
 
-- 只實作目前版本 `2026-07-28` 的 Streamable HTTP：單一 `POST /api/mcp`，沒有 session、沒有 `initialize`，每個請求在 `params._meta` 自帶 `protocolVersion` 與 `clientCapabilities`。
-- `MCP-Protocol-Version`、`Mcp-Method`、`Mcp-Name` 標頭必須與內容一致，不一致回 `-32020`。
-- `GET` / `DELETE /api/mcp` 回 405（舊版的串流與 session 結束已移除）。
+- **先驗授權，再看協定。** 沒帶有效 token 的請求一律回 401 加 `WWW-Authenticate`，不論內容是新版、舊版或空的。客戶端（以及 connector 的「檢查伺服器」）只能從 401 知道要去哪裡登入。
+- **目前版本 `2026-07-28`**：單一 `POST /api/mcp`，沒有 session、沒有 `initialize`，每個請求在 `params._meta` 自帶 `protocolVersion` 與 `clientCapabilities`。`MCP-Protocol-Version`、`Mcp-Method`、`Mcp-Name` 標頭必須與內容一致，不一致回 `-32020`。
+- **舊版 `2025-11-25` / `2025-06-18` / `2025-03-26`**（`_meta` 沒有 protocolVersion 時走這條）：支援 `initialize` 握手、`notifications/*`（回 202）、`ping`、`tools/list`、`tools/call`。版本看 `MCP-Protocol-Version` 標頭，沒帶就當 `2025-03-26`。**不發 `Mcp-Session-Id`**，舊版規格允許無狀態伺服器這樣做，所以一樣能跑在 serverless 上。回應一律是 JSON，不用 SSE。不支援 JSON-RPC 批次。
+- `GET` / `DELETE /api/mcp` 回 405（沒有伺服器主動推送的串流，也沒有 session 可以結束）。
 
 ### 撤銷授權
 
@@ -1304,6 +1306,7 @@ DATABASE_URL=postgresql://user:pass@ep-xxx-pooler.../neondb?sslmode=require
 | GET  | `/api/oauth/authorize-info` | 同意畫面要顯示的客戶端名稱與 scope（會先驗證請求） | 已登入 |
 | POST | `/api/oauth/authorize` | 使用者按「允許」，發授權碼並回傳要跳轉的網址 | 已登入 |
 | POST | `/api/oauth/token` | 授權碼／refresh token 換 access token（form-encoded） | 無（靠 PKCE 與授權碼） |
+| POST | `/api/oauth/register` | RFC 7591 動態註冊客戶端（JSON），回傳 `dcr:` 開頭的 client_id | 無 |
 | POST | `/api/oauth/revoke` | RFC 7009 撤銷（form-encoded，`token` 可以是 access 或 refresh token；帶 `client_id` 時只能撤自己的）；一律回 200 | 無（持有 token 即可） |
 | GET  | `/api/me/oauth-grants` | 自己目前有效的授權列表 | 已登入 |
 | DELETE | `/api/me/oauth-grants/{id}` | 撤銷自己的一筆授權 | 已登入 |

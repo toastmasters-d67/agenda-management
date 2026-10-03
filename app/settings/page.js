@@ -26,10 +26,6 @@ function fmt(iso) {
                                                  hour: '2-digit', minute: '2-digit', hour12: false });
 }
 
-function hostOf(url) {
-  try { return new URL(url).host; } catch { return url; }
-}
-
 // ---------------------------------------------------------------- profile
 function ProfileSection({ me, onSaved, toast }) {
   const [nameZh, setNameZh] = useState(me.nameZh);
@@ -221,8 +217,8 @@ function AppsSection({ toast }) {
             <div className="st-app" key={g.id}>
               <div className="st-app-head">
                 <div>
-                  <div className="st-app-name">{g.clientName || hostOf(g.clientId)}</div>
-                  <div className="st-app-client" title={g.clientId}>{hostOf(g.clientId)}</div>
+                  <div className="st-app-name">{g.clientName || g.clientHost}</div>
+                  <div className="st-app-client">{g.clientHost}</div>
                 </div>
                 {confirming === g.id ? (
                   <div className="st-inline-actions">

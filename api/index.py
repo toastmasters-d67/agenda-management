@@ -3503,6 +3503,9 @@ def _fetch_client_metadata(client_id: str) -> dict:
     import urllib.parse
     import urllib.request
 
+    if client_id.startswith(_DCR_PREFIX):
+        return _dcr_client_metadata(client_id)
+
     u = urllib.parse.urlparse(client_id)
     if u.scheme != "https" or not u.netloc or u.path in ("", "/"):
         raise HTTPException(status_code=400,
@@ -3535,6 +3538,104 @@ def _fetch_client_metadata(client_id: str) -> dict:
     return meta
 
 
+# Dynamic Client Registration (RFC 7591), for clients that predate CIMD —
+# Claude Desktop's connectors among them. The current MCP revision deprecates
+# DCR, but a server that refuses it simply cannot be added by those clients.
+#
+# Stateless: the client_id *is* the registration — the redirect URIs and name,
+# signed with MCP_TOKEN_SECRET. Nothing to store, nothing to clean up, and a
+# client_id cannot be edited to add a redirect URI without breaking the
+# signature. The cost is that a registration cannot be deleted, which matters
+# little for public clients: what can be revoked is a user's grant.
+#
+# Anyone may register (that is what DCR is), with any name. The consent screen
+# therefore shows where the code will be sent, not just the self-chosen name.
+
+_DCR_PREFIX = "dcr:"
+
+
+def _host_of(url: str) -> str:
+    import urllib.parse
+    try:
+        return urllib.parse.urlparse(url).netloc or url
+    except Exception:
+        return url
+
+
+def _client_host(client_id: str) -> str:
+    """Something a person can recognise: the CIMD URL's host, or for a DCR
+    client (whose id is a long signed blob) the host it redirects to."""
+    if client_id.startswith(_DCR_PREFIX):
+        try:
+            uris = _dcr_client_metadata(client_id)["redirect_uris"]
+            return _host_of(uris[0]) if uris else "MCP 客戶端"
+        except HTTPException:
+            return "MCP 客戶端"
+    return _host_of(client_id)
+
+
+def _dcr_redirect_ok(uri: str) -> bool:
+    import urllib.parse
+    if not isinstance(uri, str) or len(uri) > 2000 or "#" in uri:
+        return False
+    u = urllib.parse.urlparse(uri)
+    if u.scheme == "https" and u.netloc:
+        return True
+    # Native clients (CLIs, desktop apps) receive the code on a loopback port.
+    return u.scheme == "http" and u.hostname in ("localhost", "127.0.0.1", "::1")
+
+
+def _dcr_client_metadata(client_id: str) -> dict:
+    try:
+        meta = jwt.decode(client_id[len(_DCR_PREFIX):], _mcp_secret(),
+                          algorithms=[JWT_ALGORITHM])
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=400, detail="client_id 無效")
+    if meta.get("typ") != "dcr":
+        raise HTTPException(status_code=400, detail="client_id 無效")
+    return {"client_id": client_id, "client_name": meta.get("client_name") or "MCP 客戶端",
+            "redirect_uris": meta.get("redirect_uris") or [],
+            "client_uri": meta.get("client_uri") or ""}
+
+
+@app.post("/api/oauth/register")
+async def oauth_register(request: Request):
+    def err(code, desc):
+        return Response(content=json.dumps({"error": code, "error_description": desc},
+                                           ensure_ascii=False),
+                        status_code=400, media_type="application/json")
+    try:
+        body = json.loads(await request.body() or b"{}")
+    except Exception:
+        return err("invalid_client_metadata", "請求內容不是有效的 JSON")
+    uris = body.get("redirect_uris")
+    if not isinstance(uris, list) or not uris or len(uris) > 10:
+        return err("invalid_redirect_uri", "需要 1 到 10 個 redirect_uris")
+    if not all(_dcr_redirect_ok(u) for u in uris):
+        return err("invalid_redirect_uri", "redirect_uri 必須是 https，或 localhost 的 http")
+    name = str(body.get("client_name") or "")[:200]
+    client_uri = str(body.get("client_uri") or "")[:500]
+
+    now = int(time.time())
+    token = jwt.encode({"typ": "dcr", "redirect_uris": uris, "client_name": name,
+                        "client_uri": client_uri, "iat": now},
+                       _mcp_secret(), algorithm=JWT_ALGORITHM)
+    out = {
+        "client_id": _DCR_PREFIX + token,
+        "client_id_issued_at": now,
+        "redirect_uris": uris,
+        "client_name": name,
+        # Public client: PKCE is the proof, there is no secret to issue.
+        "token_endpoint_auth_method": "none",
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+    }
+    if client_uri:
+        out["client_uri"] = client_uri
+    return Response(content=json.dumps(out, ensure_ascii=False), status_code=201,
+                    media_type="application/json", headers={"Cache-Control": "no-store"})
+
+
 # ------------------------------------------------------------------ AS: discovery
 @app.get("/.well-known/oauth-authorization-server")
 def authorization_server_metadata(request: Request):
@@ -3545,6 +3646,7 @@ def authorization_server_metadata(request: Request):
         "authorization_endpoint": f"{origin}/oauth/authorize",
         "token_endpoint": f"{origin}/api/oauth/token",
         "revocation_endpoint": f"{origin}/api/oauth/revoke",
+        "registration_endpoint": f"{origin}/api/oauth/register",
         "revocation_endpoint_auth_methods_supported": ["none"],
         "scopes_supported": list(MCP_SCOPES),
         "response_types_supported": ["code"],
@@ -3599,6 +3701,9 @@ def authorize_info(request: Request,
     return {
         "clientName": meta["client_name"],
         "clientUri":  meta.get("client_uri", ""),
+        # Where the code goes. The name is whatever the client says it is (with
+        # DCR, anyone can register as "Claude"); the redirect host is not.
+        "redirectHost": _host_of(redirect_uri),
         "username":   user["username"],
         "role":       user["role"],
         "scopes":     [{"key": k, "label": MCP_SCOPES[k],
@@ -3836,6 +3941,7 @@ def list_my_grants(user: dict = Depends(get_current_user)):
     return [{
         "id": r[0],
         "clientId": r[1],
+        "clientHost": _client_host(r[1]),
         "clientName": r[2] or "",
         "scopes": [{"key": s, "label": MCP_SCOPES.get(s, s),
                     "sensitive": s == "publish"} for s in (r[3] or "").split()],
@@ -3877,6 +3983,11 @@ def revoke_all_my_grants(user: dict = Depends(get_current_user)):
 # and the OAuth scope only ever narrows what the token may ask for.
 
 MCP_PROTOCOL_VERSIONS = ("2026-07-28",)
+# Earlier revisions, still spoken by shipping clients (Claude Desktop among
+# them): an `initialize` handshake, then the version in the
+# MCP-Protocol-Version header. Served statelessly — no Mcp-Session-Id is ever
+# issued, which those revisions allow — so the same serverless shape works.
+MCP_LEGACY_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26")
 MCP_SERVER_INFO = {"name": "entrepreneur-agenda", "version": "1.0.0"}
 
 
@@ -3891,9 +4002,10 @@ def _rpc_error(req_id, code, message, status=200, data=None):
                     status_code=status, media_type="application/json")
 
 
-def _rpc_ok(req_id, result):
-    result = {"resultType": "complete", **result}
-    result.setdefault("_meta", {})["io.modelcontextprotocol/serverInfo"] = MCP_SERVER_INFO
+def _rpc_ok(req_id, result, legacy: bool = False):
+    if not legacy:
+        result = {"resultType": "complete", **result}
+        result.setdefault("_meta", {})["io.modelcontextprotocol/serverInfo"] = MCP_SERVER_INFO
     return Response(
         content=json.dumps({"jsonrpc": "2.0", "id": req_id, "result": result},
                            ensure_ascii=False),
@@ -4169,38 +4281,67 @@ async def mcp_endpoint(request: Request):
     except Exception:
         return _rpc_error(None, -32700, "Parse error", status=400)
 
+    if not isinstance(body, dict):
+        return _rpc_error(None, -32600, "不支援批次請求", status=400)
     req_id = body.get("id")
     method = body.get("method") or ""
     params = body.get("params") or {}
     meta = params.get("_meta") or {}
 
-    # --- per-request protocol fields (there is no initialize to carry them) ---
-    version = meta.get("io.modelcontextprotocol/protocolVersion")
-    if not version or "io.modelcontextprotocol/clientCapabilities" not in meta:
-        return _rpc_error(req_id, -32602,
-                          "缺少 _meta 的 protocolVersion 或 clientCapabilities",
-                          status=400)
-    if version not in MCP_PROTOCOL_VERSIONS:
-        return _rpc_error(req_id, -32022, "不支援這個協定版本", status=400,
-                          data={"supported": list(MCP_PROTOCOL_VERSIONS)})
-
-    # --- headers must agree with the body ---------------------------------
-    # An intermediary routing on the header and a server acting on the body
-    # must never see different things; the spec makes the mismatch an error
-    # rather than letting either side guess.
-    hdr_version = request.headers.get("mcp-protocol-version")
-    if hdr_version != version:
-        return _rpc_error(req_id, -32020,
-                          "MCP-Protocol-Version 標頭與內容不符", status=400)
-    hdr_method = request.headers.get("mcp-method")
-    if hdr_method != method:
-        return _rpc_error(req_id, -32020, "Mcp-Method 標頭與內容不符", status=400)
-    if method in ("tools/call", "resources/read", "prompts/get"):
-        want = params.get("name") or params.get("uri") or ""
-        if (request.headers.get("mcp-name") or "") != want:
-            return _rpc_error(req_id, -32020, "Mcp-Name 標頭與內容不符", status=400)
-
+    # Authorization comes before any protocol check. An unauthenticated client
+    # — or a connector's "check this server" probe — learns how to sign in
+    # only from a 401 with the challenge; answering its first request with a
+    # 400 about protocol fields leaves it with nowhere to go.
     caller = mcp_caller(request)      # raises 401 with the right challenge
+
+    version = meta.get("io.modelcontextprotocol/protocolVersion")
+    legacy = not version
+    if legacy:
+        # --- earlier revisions: initialize handshake, version in a header ---
+        if method == "initialize":
+            asked = params.get("protocolVersion")
+            return _rpc_ok(req_id, {
+                "protocolVersion": asked if asked in MCP_LEGACY_VERSIONS
+                                   else MCP_LEGACY_VERSIONS[0],
+                "capabilities": {"tools": {"listChanged": False}},
+                "serverInfo": MCP_SERVER_INFO,
+            }, legacy=True)
+        # Absent header means 2025-03-26, per that revision.
+        hdr_version = request.headers.get("mcp-protocol-version") or "2025-03-26"
+        if hdr_version not in MCP_LEGACY_VERSIONS:
+            return _rpc_error(req_id, -32602, "不支援這個協定版本", status=400,
+                              data={"supported": list(MCP_PROTOCOL_VERSIONS
+                                                      + MCP_LEGACY_VERSIONS)})
+        if req_id is None:
+            # A notification (notifications/initialized and friends): accepted,
+            # nothing to answer.
+            return Response(status_code=202)
+        if method == "ping":
+            return _rpc_ok(req_id, {}, legacy=True)
+    else:
+        # --- current revision: per-request fields in _meta ------------------
+        if "io.modelcontextprotocol/clientCapabilities" not in meta:
+            return _rpc_error(req_id, -32602,
+                              "缺少 _meta 的 clientCapabilities", status=400)
+        if version not in MCP_PROTOCOL_VERSIONS:
+            return _rpc_error(req_id, -32022, "不支援這個協定版本", status=400,
+                              data={"supported": list(MCP_PROTOCOL_VERSIONS)})
+
+        # Headers must agree with the body. An intermediary routing on the
+        # header and a server acting on the body must never see different
+        # things; the spec makes the mismatch an error rather than letting
+        # either side guess.
+        hdr_version = request.headers.get("mcp-protocol-version")
+        if hdr_version != version:
+            return _rpc_error(req_id, -32020,
+                              "MCP-Protocol-Version 標頭與內容不符", status=400)
+        hdr_method = request.headers.get("mcp-method")
+        if hdr_method != method:
+            return _rpc_error(req_id, -32020, "Mcp-Method 標頭與內容不符", status=400)
+        if method in ("tools/call", "resources/read", "prompts/get"):
+            want = params.get("name") or params.get("uri") or ""
+            if (request.headers.get("mcp-name") or "") != want:
+                return _rpc_error(req_id, -32020, "Mcp-Name 標頭與內容不符", status=400)
 
     # The set of tools may vary by the authorization presented — scopes are
     # per-request input, not connection state — so a token without `publish`
@@ -4211,7 +4352,7 @@ async def mcp_endpoint(request: Request):
         return _rpc_ok(req_id, {"tools": [
             {k: v for k, v in t.items() if k in
              ("name", "title", "description", "inputSchema")}
-            for t in allowed]})
+            for t in allowed]}, legacy=legacy)
 
     if method == "tools/call":
         name = params.get("name")
@@ -4231,7 +4372,7 @@ async def mcp_endpoint(request: Request):
             result = _tool_text(str(e.detail), is_error=True)
         except Exception:
             result = _tool_text("工具執行失敗，請稍後再試", is_error=True)
-        return _rpc_ok(req_id, result)
+        return _rpc_ok(req_id, result, legacy=legacy)
 
     return _rpc_error(req_id, -32601, f"不支援這個方法：{method}", status=404)
 
@@ -4240,8 +4381,7 @@ async def mcp_endpoint(request: Request):
 @app.delete("/api/mcp")
 def mcp_endpoint_rejects(request: Request):
     """
-    The current revision removed the GET stream and session termination, so
-    these are the documented responses for a client still speaking the older
-    shape.
+    No server-initiated stream and no sessions to end, in any revision we
+    speak: 405 is the documented answer to both for a stateless server.
     """
     return Response(status_code=405)
