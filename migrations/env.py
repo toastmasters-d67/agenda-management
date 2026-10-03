@@ -23,8 +23,9 @@ def _get_url() -> str:
     raw = os.getenv("DATABASE_URL", "")
     if not raw:
         raise RuntimeError("DATABASE_URL 環境變數未設定，請確認 .env 或 Vercel 設定")
-    # 將 postgres:// 轉換為 postgresql://（SQLAlchemy 2.x 要求）
-    url = re.sub(r"^postgres://", "postgresql://", raw)
+    # 明確指定 psycopg2 driver：SQLAlchemy 2.x 不接受 postgres://，而較新版本的
+    # postgresql:// 預設改用 psycopg 3，requirements.txt 只裝了 psycopg2-binary。
+    url = re.sub(r"^postgres(ql)?(\+psycopg2?)?://", "postgresql+psycopg2://", raw)
     # 移除 channel_binding 查詢參數
     url = re.sub(r"[&?]channel_binding=[^&]*", "", url)
     return url
