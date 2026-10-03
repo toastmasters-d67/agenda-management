@@ -962,7 +962,11 @@ postgresql://user:pass@ep-xxx-pooler.ap-southeast-1.aws.neon.tech/dbname?sslmode
 
 ### 2. 部署
 
-Push 到 GitHub，Vercel 自動部署。Vercel 專案的 Framework Preset 要是 **Next.js**；`api/index.py` 會被另外部署成 Python function。
+Push 到 GitHub 的 **`master`** 分支，Vercel 自動部署到正式站；其他分支只會產生預覽部署。Vercel 專案的 Framework Preset 要是 **Next.js**；`api/index.py` 會被另外部署成 Python function。
+
+> 正式部署的分支設定在 Vercel 專案 **Settings → Environments → Production → Branch Tracking**，目前是 `master`。改 git 預設分支名稱時這裡要一起改，否則推上去不會部署到正式站。
+
+> **同步到組織 repo**：[toastmasters-d67/agenda-management](https://github.com/toastmasters-d67/agenda-management) 把本 repo 設成 `upstream`。在那個 repo 執行 `git pull upstream master`，再 `git push origin main`（那邊的分支仍叫 `main`）。
 
 > ⚠️ Vercel **不會自動執行 migration**。每次新增 migration 版本後，請手動在正式 DB 執行 `alembic upgrade head`。
 
