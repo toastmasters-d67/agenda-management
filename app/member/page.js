@@ -416,6 +416,8 @@ function openModal(username) {
   document.getElementById('fNameZh').value = m.nameZh || '';
   document.getElementById('fNameEn').value = m.nameEn || '';
   document.getElementById('fLevel').value = m.level || 'TM';
+  document.getElementById('fEmail').value = m.email || '';
+  document.getElementById('fMsLinked').textContent = m.microsoftLinked ? '已連結 Microsoft 帳號' : '';
   document.getElementById('fRole').value = m.role || 'club_member';
   document.getElementById('fClubId').value = m.clubId ?? '';
   // admin's role is fixed — the backend rejects changing it.
@@ -462,6 +464,7 @@ async function saveMember() {
     name_zh: document.getElementById('fNameZh').value.trim(),
     name_en: document.getElementById('fNameEn').value.trim(),
     level: document.getElementById('fLevel').value.trim() || 'TM',
+    email: document.getElementById('fEmail').value.trim(),
   };
   if (!body.name_zh || !body.name_en) { alert('請填入中英文姓名'); return; }
   if (isSystemAdmin()) {
@@ -725,6 +728,13 @@ export default function MemberPage() {
           <div className="modal-field">
             <label>等級</label>
             <input type="text" id="fLevel" placeholder="TM / L1 / L2 / L3 / L4 / L5 / DTM" />
+          </div>
+          <div className="modal-field">
+            <label>Email <span id="fMsLinked" style={{ color: '#16a34a', fontWeight: 600, marginLeft: 6 }}></span></label>
+            <input type="email" id="fEmail" placeholder="name@example.com" />
+            <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4, lineHeight: 1.5 }}>
+              用 Microsoft 帳號第一次登入時，會依這個 Email 找到對應的帳號。
+            </div>
           </div>
           <div className="modal-field system-admin-only" style={{ display: 'none' }}>
             <label>角色</label>

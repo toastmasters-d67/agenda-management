@@ -1,46 +1,63 @@
 # EntrepreneurAgenda
 
-企業家國際演講會 Club Management 系統，含登入、議程管理、會員管理、分會管理與圖片雲端儲存。
+企業家國際演講會 Club Management 系統：帳號密碼或 Microsoft 帳號登入、議程產生、角色安排、會員與分會管理、Pathways 目錄、社群發文（AI 文案／生圖、發布到 FB／IG／Threads），以及讓 AI 助理透過 **MCP** 操作系統。
+
+## 架構
+
+| 層 | 技術 | 說明 |
+|----|------|------|
+| 前端 | **Next.js 14**（App Router，`app/`） | 每個頁面一個 `app/<route>/page.js`；`middleware.js` 在 edge 驗登入 cookie |
+| 前端 → 後端 | `/svc/*` 代理（`app/svc/**`） | 瀏覽器只拿得到 httpOnly 的 `auth_token` cookie，代理在伺服器端把它轉成 `Authorization: Bearer` 送到 FastAPI。前端一律用 `lib/api.js` 的 `apiJson()` |
+| 後端 | **FastAPI**（`api/index.py`，單一檔案） | 所有 `/api/*`、OAuth 與 MCP 端點；Vercel 上是 Python serverless function |
+| 資料庫 | Neon PostgreSQL，**Alembic** 管 schema | 見「Database Migration」 |
+| 檔案 | Cloudflare R2 | 前端拿 presigned URL 直傳 |
 
 ## 專案結構
 
 ```
 EntrepreneurAgenda/
-├── auth.js               # 共用 auth 工具（API_BASE 自動偵測環境、角色輔助函式）
-├── login.html            # 登入 / 註冊頁面
-├── home.html             # 會務管理首頁（Dashboard 版型）
-├── index.html            # 議程表產生器（需登入）
-├── roles.html            # 角色安排頁面（多場例會 × 角色矩陣）
-├── member.html           # 會員管理頁面（管理 users 資料表；含 system_admin 專屬的角色 / 分會指派）
-├── club.html             # 分會管理頁面
-├── change-password.html  # 修改密碼頁面（含首次登入強制改密碼）
-├── app.js                # 議程產生器主邏輯
-├── roles.js              # 角色安排邏輯（ROLE_GROUPS 角色清單 + 矩陣編輯 / merge 存檔）
-├── member-ac.js          # 可重用的會員自動完成元件（下拉建議 + 可自由輸入）
-├── templates.js          # 議程版型引擎（AGENDA_TEMPLATES + 每版型 manifest / 預設素材 / 語言能力）
-├── style.css             # 議程產生器樣式（含各版型 .tmpl-<key> 命名空間）
-├── media/                # 靜態圖片
-│   ├── toastmasters_logo.png   # 官方 TM Logo（標準版預設）
-│   ├── Entrepreneur/           # 標準版預設 QR（FacebookQR / LINEQR）
-│   └── ChillHiHigh/            # Chill Hi High 預設素材（logo / FB·IG·LINE QR / 第二頁兩張圖）
-├── requirements.txt      # Python 套件（Vercel 用）
-├── vercel.json           # Vercel 路由設定
-├── alembic.ini           # Alembic 設定
-├── .env                  # 本地環境變數（不進版控）
-├── api/
-│   └── index.py         # FastAPI（本地開發 & 正式環境共用）
+├── app/                      # Next.js 頁面（App Router）
+│   ├── layout.js / globals.css
+│   ├── login/                # 登入 / 自行註冊 / Microsoft 登入與申請（支援 ?next= 回跳）
+│   ├── home/                 # 會務 Dashboard
+│   ├── agenda/               # 議程表產生器（公開網址是 /index，見 next.config.mjs）
+│   ├── roles/                # 角色安排（多場例會 × 角色矩陣，ROLE_GROUPS / META_FIELDS）
+│   ├── social/               # 社群發文
+│   ├── member/               # 會員管理
+│   ├── club/                 # 分會管理（品牌、版型設定、社群帳號、分會 AI 金鑰）
+│   ├── pathways/             # Pathways 目錄管理（system_admin）
+│   ├── change-password/      # 修改密碼 / 首次登入強制改密碼
+│   ├── oauth/authorize/      # MCP 客戶端的 OAuth 同意畫面
+│   ├── settings/             # 每位使用者的設定：個人資料、登入方式、已授權的應用程式
+│   └── svc/                  # 同源代理：cookie → Bearer → FastAPI
+│       ├── [...path]/route.js
+│       └── auth/
+│           ├── {login,logout,register}/route.js    # 登入時把 JWT 寫成 httpOnly cookie
+│           └── microsoft/{start,callback}/route.js # Microsoft 登入：state / PKCE / nonce cookie、回呼後設 cookie
+├── components/Sidebar.js     # 側邊選單
+├── lib/
+│   ├── api.js                # apiFetch / apiJson（打 /svc/*）
+│   ├── auth.js               # 角色輔助函式、applyRoleUI()
+│   ├── agendaTemplates.js    # 議程版型引擎（AGENDA_TEMPLATES + 每版型 manifest / 預設素材 / 語言能力）
+│   ├── postTemplates.js      # 社群海報版型
+│   ├── socialPlatforms.js    # 各平台字數、圖片規則
+│   ├── pathways.js           # Pathways 目錄載入與查詢
+│   ├── rolesSheet.js         # 角色表 Google Sheet 匯入解析
+│   └── memberAutocomplete.js # 會員自動完成（下拉建議 + 可自由輸入）
+├── public/media/             # 靜態圖片（各版型預設 logo / QR）
+│   ├── toastmasters_logo.png
+│   ├── Entrepreneur/  ChillHiHigh/  China/
+├── middleware.js             # 未登入導向 /login；/api、/svc、/.well-known 放行
+├── next.config.mjs           # 舊 .html 網址轉址、/index → /agenda
+├── api/index.py              # FastAPI（本地開發 & 正式環境共用）
+├── requirements.txt          # Python 套件
+├── package.json              # Node 套件（next / react / jose）
+├── vercel.json               # /api/* 與 /.well-known/* 交給 api/index.py
+├── alembic.ini
+├── .env                      # 本地環境變數（不進版控）
 └── migrations/
-    ├── env.py            # Alembic 環境設定（讀取 DATABASE_URL）
-    ├── script.py.mako    # Migration 模板
-    └── versions/
-        ├── 0001_initial_schema.py        # 建立 users / agendas / members
-        ├── 0002_seed_admin_user.py       # 初始 admin 帳號
-        ├── 0003_add_clubs.py             # 建立 clubs 資料表、members 加 club_id
-        ├── 0004_add_roles.py             # users 加 role / club_id、agendas 加 club_id
-        ├── 0005_merge_members_to_users.py # users 加 level，廢棄 members 資料表
-        ├── 0006_add_must_change_pw.py    # users 加 must_change_pw（首次登入改密）
-        ├── 0007_add_status.py            # users 加 status（active / pending 審核制）
-        └── 0008_add_club_branding.py     # clubs 加品牌欄位 + template_key（分會專屬版型）
+    ├── env.py                # 讀取 DATABASE_URL
+    └── versions/             # 0001 … 0017，見「Database Migration」
 ```
 
 ---
@@ -60,7 +77,7 @@ EntrepreneurAgenda/
 
 ## 議程版型引擎（分會專屬版型）
 
-每個分會可擁有**自己的品牌**與**獨立的議程版型**。版型與其所有相關設定（欄位、預設素材、語言能力）**集中定義於 `templates.js`，是單一事實來源**——新增/調整版型基本上只動這個檔案（＋樣式）。
+每個分會可擁有**自己的品牌**與**獨立的議程版型**。版型與其所有相關設定（欄位、預設素材、語言能力）**集中定義於 `lib/agendaTemplates.js`，是單一事實來源**——新增/調整版型基本上只動這個檔案（＋樣式）。
 
 ### 版型物件（`AGENDA_TEMPLATES[key]`）
 
@@ -78,7 +95,7 @@ EntrepreneurAgenda/
 
 ### 運作方式
 
-- `app.js` 渲染時 `getActiveClub()` 解析目前分會 → 依 `template_key` 取版型 → `render()` 產出 HTML，外層套 `.tmpl-<key>` class。
+- `app/agenda/page.js` 渲染時 `getActiveClub()` 解析目前分會 → 依 `template_key` 取版型 → `render()` 產出 HTML，外層套 `.tmpl-<key>` class。
   - `system_admin`：版型 / 品牌取自議程上方「所屬分會」下拉（從 `/home` 點「新建議程」會以 `?club_id=` 自動帶入所選分會）。
   - `club_admin` / `club_member`：自動取自己所屬分會。
 - 品牌與版型為**即時解析**（不快照進 `agendas.data`）。
@@ -90,11 +107,11 @@ EntrepreneurAgenda/
 
 - `standard` / `compact`：提供中/英切換（設定選單的「語言」）。
 - `chillhihigh`：中英混用，**隱藏「語言」切換**、固定渲染語言，且成員姓名顯示「English 中文」。
-- `app.js` 於 `updatePreview()` 依版型旗標顯示/隱藏「語言」選單並 pin 語言。
+- `app/agenda/page.js` 於 `updatePreview()` 依版型旗標顯示/隱藏「語言」選單並 pin 語言。
 
 ### 版型專屬欄位 manifest（`template.settings`）
 
-每個版型專屬欄位**只在 manifest 宣告一次**，`club.html` 的「版型設定」modal 會據此**動態產生**欄位（含填值與存檔）：
+每個版型專屬欄位**只在 manifest 宣告一次**，`/club`（`app/club/page.js`）的「版型設定」modal 會據此**動態產生**欄位（含填值與存檔）：
 
 ```js
 { key, label, type:'text|textarea|image', store:'column|setting',
@@ -151,7 +168,7 @@ EntrepreneurAgenda/
 
 `個別講評 2'~3'`、`計時員報告 1'`、`贅語報告 1'`、`語言講評 3'~5'`、`總講評 3'~5'`、`講評員講評 2'~3'` 原本寫死在版型裡，現在改為每場可編輯的**顯示字串**（可填區間，不參與加總運算），與 `signals` 同一套模式：載入時 merge 到預設值上，舊議程自動沿用原本字樣。
 
-> 版型端從 `ctx.durationLabels` 取用，並以 `templates.js` 的 `DEFAULT_DURATION_LABELS` 作最後防線。`standard` 與 `compact` 已改為資料驅動；`chillhihigh` 的講評列本來就用 `signals` 的綠/黃/紅欄，不受影響。
+> 版型端從 `ctx.durationLabels` 取用，並以 `lib/agendaTemplates.js` 的 `DEFAULT_DURATION_LABELS` 作最後防線。`standard` 與 `compact` 已改為資料驅動；`chillhihigh` 的講評列本來就用 `signals` 的綠/黃/紅欄，不受影響。
 
 ### 每個欄位旁的「自動: X」與 ⟳
 
@@ -165,12 +182,12 @@ EntrepreneurAgenda/
 
 ### 依版型顯示表單區塊（統一 `data-tmpl`）
 
-議程表單中版型專屬區塊以 `data-tmpl="<key>"` 標記；`app.js` 的 `applyTemplateFields()` 呼叫共用的 `applyTmplVisibility()` 依目前版型顯示 / 隱藏。（「版型設定」modal 則直接依 manifest 產生欄位，不需此屬性。）
+議程表單中版型專屬區塊以 `data-tmpl="<key>"` 標記；`app/agenda/page.js` 的 `applyTemplateFields()` 呼叫共用的 `applyTmplVisibility()` 依目前版型顯示 / 隱藏。（「版型設定」modal 則直接依 manifest 產生欄位，不需此屬性。）
 
 ### 新增一個版型
 
-1. 在 `templates.js` 的 `AGENDA_TEMPLATES` 新增 entry：`key` / `label` / `render`，視需要加 `langToggle` 等語言旗標、`assetDefaults` / `fieldDefaults`、`settings` manifest。
-2. 在 `style.css` 以 `.tmpl-<key>` 命名空間撰寫樣式（勿污染其他版型）。
+1. 在 `lib/agendaTemplates.js` 的 `AGENDA_TEMPLATES` 新增 entry：`key` / `label` / `render`，視需要加 `langToggle` 等語言旗標、`assetDefaults` / `fieldDefaults`、`settings` manifest。
+2. 在 `app/agenda/agenda.css` 以 `.tmpl-<key>` 命名空間撰寫樣式（勿污染其他版型）。
 
 > 「版型設定」modal 欄位、預設值/預設圖、分會版型下拉（`TEMPLATE_OPTIONS`）皆會**自動跟上**——欄位只需在 manifest 宣告一次。
 
@@ -212,11 +229,11 @@ EntrepreneurAgenda/
 
 ### 沒有另一套資料表
 
-角色安排**不另存**——每一格讀寫的就是該場議程 `agendas.data` 裡**同一個欄位**（`app.js` 的 `collectData()` 那些）。因此：
+角色安排**不另存**——每一格讀寫的就是該場議程 `agendas.data` 裡**同一個欄位**（`app/agenda/page.js` 的 `collectData()` 那些）。因此：
 
 - ✅ 在此頁排定角色 → 該場議程表**立即**顯示同一個人。
 - ✅ 在議程產生器改角色 → 回到此頁重新載入即同步。
-- ⚠️ 角色清單（`roles.js` 的 `ROLE_GROUPS`）是**從議程欄位推導**的。議程若新增角色欄位，記得同步加進 `ROLE_GROUPS`。
+- ⚠️ 角色清單（`app/roles/page.js` 的 `ROLE_GROUPS`）是**從議程欄位推導**的。議程若新增角色欄位，記得同步加進 `ROLE_GROUPS`。
 
 ### 全站共用同一份角色 schema——不適用的欄位鎖住，不是拿掉
 
@@ -254,9 +271,9 @@ EntrepreneurAgenda/
 
 ### CHINA 版型：跟其他版型一樣的固定欄位
 
-CHINA 議程曾經是一份自由格式的逐列清單（`agendaRows`），已經改成跟其他版型相同的固定角色欄位——`templates.js` 的 `china` 版型內部有一張不對外匯出的 `CHINA_SCHEDULE`（該分會目前的週會流程表），每一列綁定要讀的欄位（例如 `Timer` 這一列讀 `data.timer`），純粹是 render() 排版用，角色安排矩陣完全不需要知道它的存在，就跟 standard/compact 一樣。
+CHINA 議程曾經是一份自由格式的逐列清單（`agendaRows`），已經改成跟其他版型相同的固定角色欄位——`lib/agendaTemplates.js` 的 `china` 版型內部有一張不對外匯出的 `CHINA_SCHEDULE`（該分會目前的週會流程表），每一列綁定要讀的欄位（例如 `Timer` 這一列讀 `data.timer`），純粹是 render() 排版用，角色安排矩陣完全不需要知道它的存在，就跟 standard/compact 一樣。
 
-CHINA 議程表右側原本每列都有一欄「下一場負責人」（`assigneeNext`），現在**不再存進資料庫**，改成**列印/預覽議程時即時查詢**：`app.js` 的 `ensureNextMeetingRoles()` 依「分會 + 這場日期」查詢同分會日期最近的下一場例會（`GET /api/agendas?order=date_asc&date_from=<+1天>&limit=1`），把該場的角色欄位整包當作 `ctx.nextMeetingRoles` 傳給 `render()`；查不到（還沒建立下一場）就顯示空白。查詢結果有 cache（只在分會/日期真的改變時才重查），不會每次打字都打 API。議程編輯頁因此不再有「下次 Next Meeting Assignee」的手動輸入欄。
+CHINA 議程表右側原本每列都有一欄「下一場負責人」（`assigneeNext`），現在**不再存進資料庫**，改成**列印/預覽議程時即時查詢**：`app/agenda/page.js` 的 `ensureNextMeetingRoles()` 依「分會 + 這場日期」查詢同分會日期最近的下一場例會（`GET /api/agendas?order=date_asc&date_from=<+1天>&limit=1`），把該場的角色欄位整包當作 `ctx.nextMeetingRoles` 傳給 `render()`；查不到（還沒建立下一場）就顯示空白。查詢結果有 cache（只在分會/日期真的改變時才重查），不會每次打字都打 API。議程編輯頁因此不再有「下次 Next Meeting Assignee」的手動輸入欄。
 
 ### 欄標題可編輯的每場欄位（`META_FIELDS`）
 
@@ -304,7 +321,7 @@ const META_FIELDS = [
 
 ### 人選輸入：下拉建議 + 可自由輸入
 
-每格都是 `<input class="member-ac">`，由 `member-ac.js` 提供下拉建議（↑↓ 選擇、Enter 確認、Esc 關閉），**同時可以直接打字**——來賓、代理人、`TBD` 都填得進去，下拉只是建議，不會限制輸入值。
+每格都是 `<input class="member-ac">`，由 `lib/memberAutocomplete.js` 提供下拉建議（↑↓ 選擇、Enter 確認、Esc 關閉），**同時可以直接打字**——來賓、代理人、`TBD` 都填得進去，下拉只是建議，不會限制輸入值。
 
 - 建議名單來自 `/api/users`（僅 `active`），系統管理員依所選分會取用。
 - 插入格式為 `姓名, 等級`，依**該場議程自己的 `data.lang`** 決定中文名或英文名（`data-ac-lang`）。
@@ -741,6 +758,125 @@ IG 的取得方式是**從粉專身上取**（`instagram_business_account`），
 
 ---
 
+## Microsoft 帳號登入
+
+登入頁有「使用 Microsoft 帳號登入」按鈕，**任何 Microsoft 帳號**都能用（公司／學校帳號或個人 Outlook、Hotmail 帳號）。帳號密碼登入照常保留。伺服器沒設 `MS_CLIENT_ID` / `MS_CLIENT_SECRET` 時按鈕不會出現。
+
+### 流程
+
+1. `/svc/auth/microsoft/start`（Next.js）產生 state、nonce、PKCE verifier，存進 10 分鐘的 httpOnly cookie，把瀏覽器導到 Microsoft（`common` 端點）。
+2. Microsoft 導回 `/svc/auth/microsoft/callback`。這裡先比對 state，再請 FastAPI 用 client secret 換 code、驗證 id_token（簽章、`aud`、`iss` 必須對應 token 裡的 `tid`、nonce）。
+3. 依下面的規則找到帳號後，設定跟密碼登入一樣的 `auth_token` cookie。
+
+### id_token 怎麼對應到帳號
+
+| 順序 | 條件 | 結果 |
+|------|------|------|
+| 1 | `users.ms_sub` 等於 token 的 `sub` | 登入該帳號。**第一次之後只看這條** |
+| 2 | Email **經 Microsoft 驗證**，且等於某個還沒綁定的帳號的 `users.email`（不分大小寫） | 綁定（寫入 `ms_sub`）後登入 |
+| 3 | 都對不到 | 進入申請表單：填中英文姓名、選分會，建立 `pending` 帳號（沒有密碼），等分會管理員審核 |
+
+帳號是 `pending` 時一律顯示「尚待審核」，不會登入。
+
+**為什麼要「經 Microsoft 驗證」**：`common` 端點接受任何租戶，任何人都能自己開一個租戶、在裡面把任意 Email 設給自己，id_token 的 `email` 就會帶著那個地址（即「nOAuth」帳號接管手法）。所以只在以下情況才拿 Email 去比對：
+
+- **個人 Microsoft 帳號**（`tid` 為 `9188040d-6c67-4c5b-b112-36a304b66dad`）：Email 由 Microsoft 驗證過。
+- **公司／學校帳號**且 token 帶 `xms_edov=true`：該租戶證明自己擁有這個網域。這個 claim **要在 App 註冊的「權杖設定」加上 optional claim 才會出現**，見下方設定步驟。
+
+Email 沒有經過驗證的帳號照樣可以申請新帳號，但申請時不會帶入那個 Email。如果系統裡已經有人用那個 Email，會請對方先用帳號密碼登入，再到「設定」手動連結。
+
+### 相關規則
+
+- **Email 只能由管理員設定**（`/member` 編輯會員），使用者在「設定」頁只能看、不能改。如果自己能改，就可以把別人的 Email 填進自己的帳號，搶走對方第一次 Microsoft 登入的對應。第一次用經驗證的 Microsoft 帳號連結時，如果該帳號還沒有 Email，會自動帶入。
+- **手動連結**：已登入的使用者在「設定 → 登入方式」按「連結 Microsoft 帳號」，不看 Email 直接綁定。一個 Microsoft 帳號只能綁一個使用者。
+- **解除連結**：帳號沒有密碼時不能解除，否則就沒辦法登入了。請先在「設定密碼」設一組。
+- **沒有密碼的帳號**（從 Microsoft 申請來的）：`password_hash` 存空字串，帳號密碼登入一律失敗。到 `/change-password` 不用輸入舊密碼就能設定第一組密碼。管理員重設密碼也可以。
+
+### 在 Microsoft Entra 註冊 App
+
+1. [Entra 系統管理中心](https://entra.microsoft.com) → **應用程式** → **應用程式註冊** → **新增註冊**。
+   - 名稱：隨意（使用者登入時會看到，例如「分會管理平台」）。
+   - **支援的帳戶類型**：選「**任何組織目錄中的帳戶及個人 Microsoft 帳戶**」。
+   - **重新導向 URI**：平台選 **Web**，填 `https://<你的網域>/svc/auth/microsoft/callback`。
+2. 註冊完成後，「概觀」頁的 **應用程式 (用戶端) 識別碼** 就是 `MS_CLIENT_ID`。
+3. **憑證及祕密** → **新增用戶端密碼** → 複製「**值**」（不是「祕密識別碼」），這就是 `MS_CLIENT_SECRET`。密碼會過期（最長 24 個月），到期前要換新的，並更新 Vercel 的環境變數。
+4. **驗證** → 再加上其他要用的重新導向 URI：預覽站、本機 `http://localhost:3000/svc/auth/microsoft/callback`。每個 URI 都要完全一致，包含 http／https 和連接埠。
+5. **權杖設定** → **新增選擇性宣告** → 權杖類型選 **ID** → 勾選 `email` 和 `xms_edov`。
+6. **API 權限**：預設的 `User.Read` 就夠了（實際只用到 `openid profile email`）。
+7. 把 `MS_CLIENT_ID`、`MS_CLIENT_SECRET` 設到 Vercel，然後 Redeploy。
+
+> 某些公司租戶會禁止使用者自行同意第三方 App，那些使用者登入時會看到「需要管理員核准」。這是對方租戶的設定，只能請對方的 IT 核准，或改用帳號密碼登入。
+
+---
+
+## MCP：讓 AI 助理操作這個系統
+
+Claude 之類的 MCP 客戶端可以直接連上這個站台：列例會、讀寫貼文草稿、產生文案，經使用者另外同意後也能發布。實作全部在 `api/index.py` 的「MCP」兩段。
+
+### 連線方式
+
+在 MCP 客戶端新增一個遠端（Streamable HTTP）伺服器，網址填：
+
+```
+https://<你的網域>/api/mcp
+```
+
+客戶端會自己走完 OAuth：讀 `/.well-known/...` → 把使用者帶到 `/oauth/authorize` 同意畫面（沒登入會先到 `/login`，登入後回到同意畫面）→ 換到 token。不需要事先在系統裡登記客戶端。
+
+前提：伺服器有設 `MCP_TOKEN_SECRET`，資料庫已跑到 migration `0016`。
+
+### 工具與 scope
+
+| 工具 | scope | 說明 |
+|------|-------|------|
+| `list_meetings` | `posts:read` | 列出分會例會（最近的在前），回傳 `agendaId` |
+| `get_meeting` | `posts:read` | 一場例會的日期、時間、地址、入場費、主題；缺宣傳必填欄位會指出 |
+| `list_posts` | `posts:read` | 列出貼文草稿與已發布貼文 |
+| `get_post` | `posts:read` | 一則貼文的完整內容（主文案、各平台版本、圖片、發布狀態） |
+| `create_post` | `posts:write` | 建立草稿（`promo` / `recap` / `other`） |
+| `update_post` | `posts:write` | 修改標題、文案、用途、狀態、綁定例會、各平台版本 |
+| `generate_copy` | `ai:generate` | 用 AI 產生文案並存進貼文，**消耗呼叫者（或分會共用）的 AI 額度** |
+| `publish_post` | `publish` | 發布到 Facebook／Instagram／Threads，**公開且無法透過本系統收回** |
+
+- **預設 scope** 是 `posts:read posts:write ai:generate`。`publish` 不在預設裡，也不在 `scopes_supported` 裡：客戶端要用就得另外請求，同意畫面上它預設**不勾**，並標示「公開且無法收回」。
+- **scope 只會收窄、不會放寬權限。** 每支工具底下照跑網頁版用的同一套 helper 與角色檢查（`_social_scope`、分會管理員限制）；`club_member` 拿到 `posts:write` 也一樣寫不了。
+- `tools/list` 只列出這個 token 有 scope 的工具；呼叫沒 scope 的工具會收到 403 + `insufficient_scope` 挑戰，客戶端可以請使用者補授權。
+- 工具層級的失敗（找不到貼文、平台未連接、缺欄位）回 `isError: true` 的結果讓模型自行修正，不回 JSON-RPC 錯誤。
+
+### 授權伺服器的設計
+
+| 項目 | 做法 |
+|------|------|
+| 客戶端註冊（CIMD） | **Client ID Metadata Documents**：`client_id` 本身是 https 網址，伺服器去抓、驗證 `client_id` 與網址相符、`redirect_uri` 在清單內。抓取限 https、擋內部位址、64 KB 上限、8 秒逾時 |
+| 客戶端註冊（DCR） | 給還不支援 CIMD 的客戶端（例如 Claude Desktop 的 connector）：`POST /api/oauth/register`（RFC 7591）。**不存資料表**：`client_id` 是 `dcr:` 加上用 `MCP_TOKEN_SECRET` 簽的 JWT，內含 redirect_uris 與名稱，改了就驗不過。redirect_uri 限 https，或 localhost 的 http（CLI 類客戶端）。任何人都能註冊、名稱可以亂取，所以同意畫面會另外顯示「授權後會導回哪個網域」 |
+| PKCE | 必填，只收 `S256` |
+| 授權碼 | 5 分鐘有效，只存 SHA-256 雜湊，`DELETE … RETURNING` 保證只能用一次 |
+| access token | JWT（`MCP_TOKEN_SECRET` 簽），**1 小時**；`aud` 綁定 `https://<host>/api/mcp`，別的伺服器發的 token 一律拒絕 |
+| refresh token | **60 天**，只存雜湊（`oauth_refresh_tokens`）。每一筆就是一個「授權」，可撤銷 |
+| 撤銷 | access token 帶 `grant` claim（指向它來自的 refresh token），MCP 端點**每次呼叫都檢查該授權仍有效**，所以撤銷立即生效，不用等 access token 過期 |
+| 帳號狀態 | 換 token 與每次呼叫都會重查 `users`，帳號被刪或變回 `pending` 立即失效 |
+| 網域 | resource URI 依請求的 host 算，不寫死：正式站、預覽站、本機各自獨立，token 不能跨站用 |
+
+### 協定
+
+- **先驗授權，再看協定。** 沒帶有效 token 的請求一律回 401 加 `WWW-Authenticate`，不論內容是新版、舊版或空的。客戶端（以及 connector 的「檢查伺服器」）只能從 401 知道要去哪裡登入。
+- **目前版本 `2026-07-28`**：單一 `POST /api/mcp`，沒有 session、沒有 `initialize`，每個請求在 `params._meta` 自帶 `protocolVersion` 與 `clientCapabilities`。`MCP-Protocol-Version`、`Mcp-Method`、`Mcp-Name` 標頭必須與內容一致，不一致回 `-32020`。
+- **舊版 `2025-11-25` / `2025-06-18` / `2025-03-26`**（`_meta` 沒有 protocolVersion 時走這條）：支援 `initialize` 握手、`notifications/*`（回 202）、`ping`、`tools/list`、`tools/call`。版本看 `MCP-Protocol-Version` 標頭，沒帶就當 `2025-03-26`。**不發 `Mcp-Session-Id`**，舊版規格允許無狀態伺服器這樣做，所以一樣能跑在 serverless 上。回應一律是 JSON，不用 SSE。不支援 JSON-RPC 批次。
+- `GET` / `DELETE /api/mcp` 回 405（沒有伺服器主動推送的串流，也沒有 session 可以結束）。
+
+### 撤銷授權
+
+- **使用者自己撤銷**：「設定」頁（`/settings`）的「已授權的應用程式」區塊列出目前有效的授權：客戶端名稱、scope（`publish` 標紅）、授權時間、最後使用、到期日。可以逐筆撤銷，也可以全部撤銷。同一個客戶端從兩台裝置授權會是兩筆，可以只撤掉其中一台。
+- **客戶端自己登出**：RFC 7009 `POST /api/oauth/revoke`，access token 或 refresh token 都收，撤銷的是整個授權。不論有沒有找到 token 一律回 200。
+- **管理員停權**：刪除帳號（FK cascade 一併刪掉授權），或把 status 改回 `pending`（每次呼叫都會檢查），授權都會立即失效。管理員目前不能替別人撤銷個別授權。
+- 只能撤銷自己的授權；別人的授權 id 一律回 404。
+
+### 其他注意事項
+
+- 輪換 `MCP_TOKEN_SECRET` 會讓所有 access token 立刻失效（refresh token 不受影響，客戶端會用它換新的 access token）。refresh token 換 access token 時不會輪換，同一把用到過期或被撤銷為止。
+
+---
+
 ## 權限系統（RBAC）
 
 系統共有三種角色：
@@ -768,7 +904,7 @@ IG 的取得方式是**從粉專身上取**（`instagram_business_account`），
 
 ### 前端 UI 規則
 
-`auth.js` 的 `applyRoleUI()` 會依角色隱藏對應元素：
+`lib/auth.js` 的 `applyRoleUI()` 會依角色隱藏對應元素（`club_member` 另外會把 `.form-scroll-body` 裡的輸入欄位全部 disable）：
 
 | CSS class | 說明 |
 |-----------|------|
@@ -793,6 +929,10 @@ IG 的取得方式是**從粉專身上取**（`instagram_business_account`），
 | `R2_BUCKET_NAME` | R2 Bucket 名稱 |
 | `R2_PUBLIC_URL` | R2 Public Development URL（`https://pub-xxx.r2.dev`） |
 | `CREDENTIALS_SECRET_KEY` | 加密 AI 金鑰與 Meta App Secret 的主密鑰（`openssl rand -base64 32`）。**未設定時儲存金鑰會直接失敗**，不會以明文落地 |
+| `MS_CLIENT_ID` / `MS_CLIENT_SECRET` | Microsoft 登入用的 Entra App（見「Microsoft 帳號登入」）。**選填**：沒設就不顯示 Microsoft 按鈕 |
+| `MCP_TOKEN_SECRET` | 簽 MCP access token 的密鑰（`python -c "import secrets; print(secrets.token_urlsafe(48))"`）。**必須和 `JWT_SECRET` 不同**；正式站與預覽站建議各用一把。未設定時 MCP 與 OAuth 端點回 503，其他功能不受影響 |
+
+> `JWT_SECRET` 同時被 FastAPI（簽發）與 Next.js `middleware.js`（驗證登入 cookie）讀取，Vercel 上設一次兩邊都拿得到。
 
 以下為**選填**，只有「全站共用一個 App」才需要。各分會自己填 App ID / Secret 時用不到——分會層的值優先，這些只是沒填時的退路：
 
@@ -822,26 +962,33 @@ postgresql://user:pass@ep-xxx-pooler.ap-southeast-1.aws.neon.tech/dbname?sslmode
 
 ### 2. 部署
 
-Push 到 GitHub，Vercel 自動部署。`/api/*` 的請求透過 `vercel.json` 路由至 `api/index.py`。
+Push 到 GitHub 的 **`master`** 分支，Vercel 自動部署到正式站；其他分支只會產生預覽部署。Vercel 專案的 Framework Preset 要是 **Next.js**；`api/index.py` 會被另外部署成 Python function。
+
+> 正式部署的分支設定在 Vercel 專案 **Settings → Environments → Production → Branch Tracking**，目前是 `master`。改 git 預設分支名稱時這裡要一起改，否則推上去不會部署到正式站。
+
+> **同步到組織 repo**：[toastmasters-d67/agenda-management](https://github.com/toastmasters-d67/agenda-management) 把本 repo 設成 `upstream`。在那個 repo 執行 `git pull upstream master`，再 `git push origin main`（那邊的分支仍叫 `main`）。
 
 > ⚠️ Vercel **不會自動執行 migration**。每次新增 migration 版本後，請手動在正式 DB 執行 `alembic upgrade head`。
 
-### 3. URL 路由規則（vercel.json）
+### 3. URL 路由
 
-| URL | 對應檔案 | 說明 |
-|-----|---------|------|
-| `/login` | `login.html` | 登入 / 自行註冊（送出後等待審核） |
-| `/home` | `home.html` | 會務 Dashboard |
-| `/index` | `index.html` | 議程表產生器 |
-| `/roles` | `roles.html` | 角色安排（多場例會 × 角色矩陣） |
-| `/social` | — | 社群發文草稿箱（FB／IG／Threads 文案與圖片） |
-| `/member` | `member.html` | 會員管理（管理 users；system_admin 另可設定角色與所屬分會） |
-| `/club` | `club.html` | 分會管理 |
-| `/change-password` | `change-password.html` | 修改密碼 / 首次登入強制改密碼 |
+| URL | 由誰處理 | 設定在 |
+|-----|---------|--------|
+| `/api/*` | FastAPI（`api/index.py`） | `vercel.json` rewrite |
+| `/.well-known/*` | FastAPI（OAuth 探索，免登入） | `vercel.json` rewrite；`middleware.js` 也排除它 |
+| `/svc/*` | Next.js route handler → 轉發到 `/api/*` | `app/svc/**` |
+| `/index` | `app/agenda/page.js` | `next.config.mjs` rewrite（Next.js 保留 `index` 這個路由名稱） |
+| `/` | 轉址到 `/login` | `next.config.mjs` |
+| `/login.html`、`/home.html`… | 轉址到不含 `.html` 的新網址；`/admin`、`/admin.html` 轉到 `/member` | `next.config.mjs` |
+| 其他頁面 | `app/<route>/page.js`（見「前端頁面」） | — |
+
+未登入（或 cookie 驗不過）造訪頁面時，`middleware.js` 會導向 `/login?next=<原網址>`，登入後回到原頁。回跳目標會解析網址並比對 origin，不接受站外網址。
 
 ---
 
-## 本地開發（FastAPI）
+## 本地開發
+
+本機要同時跑兩個行程：FastAPI（:8001）與 Next.js（:3000）。瀏覽器開 `http://localhost:3000`，Next.js 的 `/svc/*` 代理會把請求轉到 `http://localhost:8001/api/*`（可用 `FASTAPI_BASE_URL` 覆寫）。
 
 ### 第一次設定
 
@@ -850,16 +997,21 @@ Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 python -m venv venv
 .\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+npm install
 ```
 
 ### 之後每次啟動
 
 ```powershell
+# 終端機 1：後端
 .\venv\Scripts\Activate.ps1
 uvicorn api.index:app --reload --port 8001
+
+# 終端機 2：前端
+npm run dev
 ```
 
-後端跑在 `http://localhost:8001`。
+> 測 MCP 時客戶端要直接連後端看得到的網址（例如 `http://localhost:8001/api/mcp`）。resource URI 是依請求的 host 算的，同一把 token 換個 host 就會被拒絕。
 
 | 文件頁面 | 位址 |
 |----------|------|
@@ -877,7 +1029,15 @@ R2_SECRET_ACCESS_KEY=your-secret-key
 R2_BUCKET_NAME=your-bucket-name
 R2_PUBLIC_URL=https://pub-xxx.r2.dev
 CREDENTIALS_SECRET_KEY=用 openssl rand -base64 32 產生
+MCP_TOKEN_SECRET=另外產生一把，不要和 JWT_SECRET 相同
+# 選填
+# MS_CLIENT_ID=...                         # Microsoft 登入；本機的重新導向 URI 也要加進 Entra App
+# MS_CLIENT_SECRET=...
+# FASTAPI_BASE_URL=http://localhost:8001   # Next.js 代理的後端位址，預設本機 :8001、正式環境同源
+# ANTHROPIC_API_KEY=...                    # Claude 文案的伺服器退路
 ```
+
+Next.js 也會讀 `.env`（`middleware.js` 要用 `JWT_SECRET` 驗 cookie），所以一份 `.env` 兩邊共用。
 
 > `CREDENTIALS_SECRET_KEY` 本機與 Vercel **必須是同一組**，否則兩邊存的金鑰互相解不開。輪換它會讓既有金鑰全部失效，需要各使用者重新設定一次。
 
@@ -903,7 +1063,16 @@ alembic upgrade head
 5. `0005` — `users` 加 `level`；廢棄並刪除 `members` 資料表
 6. `0006` — `users` 加 `must_change_pw`（admin 建立帳號首次登入強制改密碼）
 7. `0007` — `users` 加 `status`（`active` / `pending` 審核制）
-8. `0008` — `clubs` 加品牌欄位 + `template_key`（分會專屬品牌與版型）
+8. `0008` — `clubs` 加品牌欄位 + `template_key` + `settings`（分會專屬品牌與版型）
+9. `0009` — 建立 `social_posts`（社群貼文草稿，`variants` / `images` 為 JSONB）
+10. `0010` — 建立 `user_ai_credentials`（個人 AI 金鑰，加密存）
+11. `0011` — 建立 `ai_jobs`（生圖／發布工作，前端輪詢）
+12. `0012` — 建立 `club_secrets`（分會層級密鑰：Meta App Secret、分會共用 AI 金鑰）、`club_social_accounts`（已連接的粉專／IG／Threads）；`social_posts` 加 `published`
+13. `0013` — 建立 Pathways 目錄四張表並匯入初始資料
+14. `0014` — `social_posts` 加 `kind`（`promo` / `recap` / `other`，既有資料設為 `other`）
+15. `0015` — 建立 `oauth_codes`、`oauth_refresh_tokens`（MCP 的 OAuth 授權）
+16. `0016` — 兩張 OAuth 表加 `client_name`（同意當下記下客戶端名稱，給「已授權的應用程式」顯示）
+17. `0017` — `users` 加 `email`（不分大小寫唯一）與 `ms_sub`（綁定的 Microsoft 身分，唯一）
 
 ### 常用指令
 
@@ -943,7 +1112,7 @@ DATABASE_URL=postgresql://user:pass@ep-xxx-pooler.../neondb?sslmode=require
 **3. 跑 migration 並驗證**
 ```powershell
 .\venv\Scripts\alembic.exe upgrade head
-.\venv\Scripts\alembic.exe current   # 應顯示 0008 (head)
+.\venv\Scripts\alembic.exe current   # 應顯示 0017 (head)
 ```
 
 **4. 確認無誤後，將 `.env` 改回正式 DB，再執行一次**
@@ -982,12 +1151,12 @@ DATABASE_URL=postgresql://user:pass@ep-xxx-pooler.../neondb?sslmode=require
   - 分會 logo/QR/第二頁圖：`media/clubs/3/{時間}_{uuid}.png`
 - 未帶 `club_id`：fallback 到扁平 `media/{時間}_{uuid}.png`
 
-> **分會圖片採「延後上傳」**：在 `club.html` 選圖時只在瀏覽器本地預覽快取，按「儲存」才上傳 R2。
+> **分會圖片採「延後上傳」**：在 `/club` 選圖時只在瀏覽器本地預覽快取，按「儲存」才上傳 R2。
 > - 新增分會：先 `POST` 建立分會拿到 id → 把快取的圖上傳到 `media/clubs/{新id}/` → `PUT` 寫回 URL。
 > - 編輯既有分會：直接上傳到該分會資料夾後存檔。
 > - 按「取消」不會上傳，不留孤兒檔。
 >
-> 議程主題圖（`app.js`）仍為選檔即時上傳，帶該議程所屬分會（system_admin 用所選分會、其餘用自己分會）。
+> 議程主題圖（`/index`）仍為選檔即時上傳，帶該議程所屬分會（system_admin 用所選分會、其餘用自己分會）。
 
 ---
 
@@ -995,19 +1164,19 @@ DATABASE_URL=postgresql://user:pass@ep-xxx-pooler.../neondb?sslmode=require
 
 | 頁面（Vercel URL） | 檔案 | 說明 | 最低權限 |
 |--------------------|------|------|----------|
-| `/login` | `login.html` | 登入 / 自行註冊（送出後需等待審核） | 無 |
-| `/home` | `home.html` | 會務管理 Dashboard，含統計卡片、議程列表 | 任何登入用戶 |
-| `/index` | `index.html` | 議程表產生器，即時預覽並可匯出 PDF / JPG | 任何登入用戶 |
-| `/roles` | `roles.html` | 角色安排，多場例會 × 角色矩陣，人選可下拉選取或自由輸入 | `club_admin`（寫入） |
-| `/social` | — | 社群發文，AI 產生文案／生圖、各平台版本與規則檢查 | `club_admin`（寫入） |
-| `/member` | `member.html` | 會員管理，新增、編輯、批量匯入、審核、移除會員；system_admin 另可設定角色與所屬分會 | `club_admin`（寫入） |
-| `/club` | `club.html` | 分會管理，新增、編輯、刪除分會 | `system_admin`（寫入） |
-| `/pathways` | — | Pathways 路徑管理：路徑、各級必修、專案中英名稱、選修清單 | `system_admin` |
-| `/change-password` | `change-password.html` | 修改密碼；admin 建立帳號後首次登入強制跳轉 | 任何登入用戶 |
+| `/login` | `app/login/page.js` | 登入 / 自行註冊（送出後需等待審核）/ Microsoft 登入與申請；支援 `?next=` 回跳 | 無 |
+| `/home` | `app/home/page.js` | 會務管理 Dashboard，含統計卡片、議程列表 | 任何登入用戶 |
+| `/index` | `app/agenda/page.js` | 議程表產生器，即時預覽並可匯出 PDF / JPG | 任何登入用戶 |
+| `/roles` | `app/roles/page.js` | 角色安排，多場例會 × 角色矩陣，人選可下拉選取或自由輸入 | `club_admin`（寫入） |
+| `/social` | `app/social/page.js` | 社群發文，AI 產生文案／生圖、海報版型、各平台版本與規則檢查、發布；個人與分會共用 AI 金鑰也在這裡設定 | `club_admin`（寫入） |
+| `/member` | `app/member/page.js` | 會員管理，新增、編輯（含 Email）、批量匯入、審核、重設密碼、移除會員；system_admin 另可設定角色與所屬分會 | `club_admin`（寫入） |
+| `/club` | `app/club/page.js` | 分會管理：新增／刪除分會、品牌、版型設定、社群帳號（Meta App）設定 | `system_admin`（寫入） |
+| `/pathways` | `app/pathways/page.js` | Pathways 路徑管理：路徑、各級必修、專案中英名稱、選修清單 | `system_admin` |
+| `/change-password` | `app/change-password/page.js` | 修改密碼；admin 建立帳號後首次登入強制跳轉；沒有密碼的帳號在這裡設定第一組（不需舊密碼） | 任何登入用戶 |
+| `/oauth/authorize` | `app/oauth/authorize/page.js` | MCP 客戶端的授權同意畫面，scope 逐項勾選 | 任何登入用戶 |
+| `/settings` | `app/settings/page.js` | 設定：修改自己的中英文姓名；查看帳號、Email、分會、角色；設定／變更密碼；連結／解除 Microsoft 帳號；列出並撤銷已授權的應用程式 | 任何登入用戶 |
 
-`auth.js` 會自動偵測環境：
-- **本地**（localhost）→ `http://localhost:8001`
-- **Vercel**（正式）→ 相對路徑（同網域）
+前端不直接打 `/api/*`：一律透過 `lib/api.js` 打同源的 `/svc/*`，由 Next.js 在伺服器端附上 Bearer token。JWT 只存在 httpOnly cookie 裡，前端 JS 讀不到。
 
 ---
 
@@ -1019,8 +1188,20 @@ DATABASE_URL=postgresql://user:pass@ep-xxx-pooler.../neondb?sslmode=require
 |------|------|------|------|
 | POST | `/api/auth/register` | 自行註冊；帳號預設 `status=pending`，**需審核後才能登入** | 無 |
 | POST | `/api/auth/login` | 登入，回傳 JWT token（有效期 24 小時）；`pending` 帳號拒絕登入 | 無 |
-| GET  | `/api/auth/verify` | 驗證 token，回傳 username / role / club_id / must_change_pw | 已登入 |
-| PUT  | `/api/auth/change-password` | 修改自己的密碼；成功後清除 `must_change_pw` 旗標 | 已登入 |
+| GET  | `/api/auth/verify` | 驗證 token，回傳 username / role / club_id / must_change_pw / has_password | 已登入 |
+| PUT  | `/api/auth/change-password` | 修改自己的密碼；成功後清除 `must_change_pw` 旗標。帳號沒有密碼時不需 `old_password` | 已登入 |
+| GET  | `/api/auth/microsoft/config` | 是否啟用 Microsoft 登入（`{enabled}`） | 無 |
+| GET  | `/api/auth/microsoft/authorize-url` | 組 Microsoft 授權網址（由 `/svc/auth/microsoft/start` 呼叫） | 無 |
+| POST | `/api/auth/microsoft/callback` | 換 code、驗 id_token、對應帳號；回傳 `login` / `pending` / `signup` / `linked`（由 `/svc/auth/microsoft/callback` 呼叫；`mode=link` 需帶登入 token） | 無／已登入 |
+| POST | `/api/auth/microsoft/register` | 用 sign-up ticket（30 分鐘）建立 `pending` 帳號 | 無（持有 ticket） |
+
+### 我的帳號
+
+| 方法 | 路徑 | 說明 | 權限 |
+|------|------|------|------|
+| GET    | `/api/me` | 自己的個人資料、是否有密碼、是否連結 Microsoft | 已登入 |
+| PUT    | `/api/me` | 修改自己的中英文姓名（其他欄位由管理員設定） | 已登入 |
+| DELETE | `/api/me/microsoft` | 解除 Microsoft 連結（沒有密碼時拒絕） | 已登入 |
 
 ### 議程管理（需 Bearer Token）
 
@@ -1087,10 +1268,11 @@ DATABASE_URL=postgresql://user:pass@ep-xxx-pooler.../neondb?sslmode=require
 
 | 方法 | 路徑 | 說明 | 權限 |
 |------|------|------|------|
-| GET    | `/api/users` | 取得用戶列表（含 level、status；`?club_id=X` 可篩選） | 已登入 |
+| GET    | `/api/users` | 取得用戶列表（含 level、status、email、microsoftLinked；`?club_id=X` 可篩選） | 已登入 |
 | POST   | `/api/users` | 新增單一用戶（直接 `active`，`must_change_pw=true`） | `club_admin` 以上 |
 | POST   | `/api/users/bulk` | 批量建立 `club_member`（username 自動從 name_en 產生） | `club_admin` 以上 |
-| PUT    | `/api/users/{username}` | 更新用戶資料（club_admin：僅 name / level；system_admin：含 role / club_id） | `club_admin` 以上 |
+| PUT    | `/api/users/{username}` | 更新用戶資料（club_admin：name / level / email；system_admin：另含 role / club_id）。`email` 省略不變、`""` 清空，重複回 400 | `club_admin` 以上 |
+| PUT    | `/api/users/{username}/reset-password` | 管理員替用戶重設密碼（至少 6 字元；club_admin 限同分會） | `club_admin` 以上 |
 | PUT    | `/api/users/{username}/approve` | 審核通過 pending 用戶（設 status = 'active'） | `club_admin` 以上 |
 | DELETE | `/api/users/{username}/reject` | 拒絕並刪除 pending 用戶 | `club_admin` 以上 |
 | DELETE | `/api/users/{username}` | 刪除用戶（`admin` 不可刪；club_admin 只能刪同分會 club_member） | `club_admin` 以上 |
@@ -1116,6 +1298,25 @@ DATABASE_URL=postgresql://user:pass@ep-xxx-pooler.../neondb?sslmode=require
 |------|------|------|------|
 | POST | `/api/upload/presign` | 取得 R2 Presigned URL（前端直傳） | `club_admin` 以上 |
 | GET  | `/api/image-proxy` | 代理取得 R2 私有圖片（`?url=...`） | 已登入 |
+
+### OAuth 與 MCP
+
+這組端點給 MCP 客戶端用，認證方式跟上面不同：MCP 端點吃的是 OAuth access token，不是登入 JWT。細節見「MCP：讓 AI 助理操作這個系統」。
+
+| 方法 | 路徑 | 說明 | 權限 |
+|------|------|------|------|
+| GET  | `/.well-known/oauth-protected-resource`（及 `/api/mcp` 後綴版） | RFC 9728 資源中繼資料 | 無 |
+| GET  | `/.well-known/oauth-authorization-server` | RFC 8414 授權伺服器中繼資料 | 無 |
+| GET  | `/api/oauth/authorize-info` | 同意畫面要顯示的客戶端名稱與 scope（會先驗證請求） | 已登入 |
+| POST | `/api/oauth/authorize` | 使用者按「允許」，發授權碼並回傳要跳轉的網址 | 已登入 |
+| POST | `/api/oauth/token` | 授權碼／refresh token 換 access token（form-encoded） | 無（靠 PKCE 與授權碼） |
+| POST | `/api/oauth/register` | RFC 7591 動態註冊客戶端（JSON），回傳 `dcr:` 開頭的 client_id | 無 |
+| POST | `/api/oauth/revoke` | RFC 7009 撤銷（form-encoded，`token` 可以是 access 或 refresh token；帶 `client_id` 時只能撤自己的）；一律回 200 | 無（持有 token 即可） |
+| GET  | `/api/me/oauth-grants` | 自己目前有效的授權列表 | 已登入 |
+| DELETE | `/api/me/oauth-grants/{id}` | 撤銷自己的一筆授權 | 已登入 |
+| DELETE | `/api/me/oauth-grants` | 撤銷自己的全部授權 | 已登入 |
+| POST | `/api/mcp` | MCP JSON-RPC：`tools/list`、`tools/call` | MCP access token |
+| GET / DELETE | `/api/mcp` | 一律 405 | — |
 
 ---
 
@@ -1149,6 +1350,8 @@ CREATE TABLE users (
     level          VARCHAR(100) NOT NULL DEFAULT 'TM',
     must_change_pw BOOLEAN      NOT NULL DEFAULT false,
     status         VARCHAR(20)  NOT NULL DEFAULT 'active',
+    email          VARCHAR(254),          -- 不分大小寫唯一；Microsoft 首次登入的比對依據
+    ms_sub         VARCHAR(100),          -- 綁定的 Microsoft 身分（id_token sub），唯一
     created_at     TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -1167,6 +1370,21 @@ CREATE TABLE agendas (
 
 議程的 `data` JSONB 欄位包含 `themeImgUrl`，用於儲存 R2 主題圖片的公開網址。
 
+### 其他資料表
+
+完整欄位見各 migration 檔（每個檔案裡都有寫設計理由）。
+
+| 資料表 | migration | 用途 |
+|--------|-----------|------|
+| `social_posts` | `0009`、`0012`、`0014` | 社群貼文。`kind`（promo/recap/other）、`status`、主文案 `body`、各平台版本 `variants`（JSONB）、圖片 `images`（JSONB，順序即發布順序）、發布結果 `published`（JSONB）；`agenda_id` 例會刪除時設為 NULL |
+| `user_ai_credentials` | `0010` | 個人 AI 金鑰。`key_cipher` 是 Fernet 密文，`key_hint` 只存末幾碼；`(username, provider)` 唯一 |
+| `ai_jobs` | `0011` | 生圖／發布工作。`status` 由 `queued` 推進，結果存 `result`；`updated_at` 用來判斷被中斷的工作 |
+| `club_secrets` | `0012` | 分會層級密鑰（Meta App Secret、分會共用 AI 金鑰），加密存；不放 `clubs.settings` 是因為 `GET /api/clubs` 不需登入 |
+| `club_social_accounts` | `0012` | 分會已連接的 FB 粉專／IG／Threads，長效 token 加密存，`expires_at` 用來提前警告；`(club_id, platform)` 唯一 |
+| `pathways`、`pathway_projects`、`pathway_required`、`pathway_electives` | `0013` | Pathways 目錄，見「Pathways 路徑管理」 |
+| `oauth_codes` | `0015`、`0016` | MCP 授權碼（只存雜湊，5 分鐘） |
+| `oauth_refresh_tokens` | `0015`、`0016` | MCP refresh token，也就是「授權」本身（只存雜湊，60 天）。`client_name` 同意時的客戶端名稱、`revoked_at` 撤銷時間、`last_used_at` 最後使用時間 |
+
 ### users 欄位說明
 
 | 欄位 | 說明 |
@@ -1174,7 +1392,10 @@ CREATE TABLE agendas (
 | `role` | `system_admin` / `club_admin` / `club_member` |
 | `level` | TM 等級（`TM`、`ACB`、`DTM` 等），預設 `TM` |
 | `must_change_pw` | `true` → 登入後強制導向改密碼頁；admin 建立帳號時自動設為 `true` |
-| `status` | `active`（正常）/ `pending`（自行註冊，等待審核） |
+| `status` | `active`（正常）/ `pending`（自行註冊或 Microsoft 申請，等待審核） |
+| `password_hash` | bcrypt 雜湊；**空字串**表示沒有密碼（Microsoft 申請的帳號），帳號密碼登入一律失敗 |
+| `email` | 由管理員設定，或首次用經驗證的 Microsoft 帳號登入／連結時自動帶入 |
+| `ms_sub` | 綁定的 Microsoft 帳號；有值之後 Microsoft 登入只比對這欄 |
 
 ### Role 值說明
 
