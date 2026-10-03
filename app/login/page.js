@@ -175,7 +175,8 @@ export default function LoginPage() {
     if (!username || !password) { setRegisterError('請填寫帳號和密碼'); return; }
     if (!name_en) { setRegisterError('請輸入英文姓名'); return; }
     if (!name_zh) { setRegisterError('請輸入中文姓名'); return; }
-    const club_id = clubVal ? parseInt(clubVal) : null;
+    if (!clubVal) { setRegisterError('請選擇所屬分會'); return; }
+    const club_id = parseInt(clubVal);
     setRegisterBusy(true);
     try {
       await apiJson('/auth/register', { method: 'POST', body: { username, password, name_en, name_zh, club_id } });

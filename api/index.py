@@ -264,10 +264,16 @@ def register(req: RegisterRequest):
         raise HTTPException(status_code=400, detail="請輸入英文姓名")
     if not req.name_zh.strip():
         raise HTTPException(status_code=400, detail="請輸入中文姓名")
+    # The club routes the request to an approver; see ms_register.
+    if not req.club_id:
+        raise HTTPException(status_code=400, detail="請選擇所屬分會")
     password_hash = bcrypt.hashpw(req.password.encode(), bcrypt.gensalt()).decode()
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM clubs WHERE id=%s", (req.club_id,))
+                if not cur.fetchone():
+                    raise HTTPException(status_code=400, detail="找不到這個分會，請重新選擇")
                 cur.execute(
                     "INSERT INTO users (username, password_hash, name_en, name_zh, role, club_id, status)"
                     " VALUES (%s, %s, %s, %s, 'club_member', %s, 'pending')",
