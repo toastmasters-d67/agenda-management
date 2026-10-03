@@ -986,6 +986,46 @@ Push 到 GitHub 的 **`master`** 分支，Vercel 自動部署到正式站；其�
 
 ---
 
+## 正式部署（Azure VM，Docker）
+
+正式站網址：`https://postgen-d67.eastasia.cloudapp.azure.com/club-management`
+
+`vm-postgen-prod`（Ubuntu 24.04，B1s）與 post-generator 共用，主機上的 nginx 依路徑導流：`/club-management/` 屬於本專案，其餘屬於 post-generator。
+
+| 元件 | 位置 |
+|------|------|
+| 前端 Next.js（`basePath=/club-management`） | 容器 `web`，`127.0.0.1:3000` |
+| FastAPI | 容器 `api`，`127.0.0.1:8001` |
+| PostgreSQL 16 | 容器 `db`，不對外開 port，資料在 volume `club-management_pgdata` |
+| compose、`.env`、部署腳本 | `/srv/club-management/`（屬於 `deploy` 帳號） |
+| nginx 設定 | `/etc/nginx/snippets/club-management*.conf`，由 `sites-enabled/postgen` 的 443 區塊 `include` |
+| 備份 | `/mnt/backup-disk/club-management/`（另一顆磁碟），每晚一次＋每次部署前一次，保留 14 天 |
+
+### CI/CD（`.github/workflows/ci-cd.yml`）
+
+- **PR / push**：`npm run build`、Python 語法與 import 檢查。
+- **push 到 `main`**：build 兩個 image 推到 GHCR（tag 為 commit SHA）→ 把 `deploy/` 的檔案和 `.env` 上傳到 VM → `remote-deploy.sh`：部署前備份 → `alembic upgrade head` → 換版 → 健康檢查。Migration 會自動執行。
+
+GitHub → Settings → Environments → `production` 需要的 secrets：
+
+| Secret | 內容 |
+|--------|------|
+| `VM_HOST` | `postgen-d67.eastasia.cloudapp.azure.com` |
+| `VM_USER` | `deploy` |
+| `VM_SSH_KEY` | 本專案專用的部署私鑰（公鑰在 VM 的 `/home/deploy/.ssh/authorized_keys`） |
+| `VM_SSH_KNOWN_HOSTS` | `ssh-keyscan postgen-d67.eastasia.cloudapp.azure.com` 的輸出 |
+| `PROD_ENV_FILE` | 整份 `.env` 內容，欄位見 `deploy/env.production.example` |
+
+### 子路徑部署要注意的地方
+
+- Next.js 只會自動幫 `<Link>`、redirects、rewrites 加上 basePath。手寫的 `<a href>`、`<img src>`、`fetch()`、`location.href` 都要透過 `lib/basePath.js` 的 `withBase()`。
+- `NEXT_PUBLIC_BASE_PATH` 是 **build 時**寫進 bundle 的（Dockerfile.web 的 build-arg）。Vercel 不設，行為不變。
+- 登入 cookie 的 path 是 `/club-management`，避免跟同網域的其他專案互相干擾。
+- FastAPI 經由 `/svc` 代理收到的 Host 是 `api:8001`，所以 OAuth / MCP 的 issuer 與 resource 以 `PUBLIC_BASE_URL` 為準；Microsoft 登入的回呼網址以 `PUBLIC_ORIGIN` 為準。
+- Microsoft 登入（Entra）、Meta 的 redirect URI 要登記為 `https://postgen-d67.eastasia.cloudapp.azure.com/club-management/svc/auth/microsoft/callback` 與 `.../club-management/club`。
+
+---
+
 ## 本地開發
 
 本機要同時跑兩個行程：FastAPI（:8001）與 Next.js（:3000）。瀏覽器開 `http://localhost:3000`，Next.js 的 `/svc/*` 代理會把請求轉到 `http://localhost:8001/api/*`（可用 `FASTAPI_BASE_URL` 覆寫）。

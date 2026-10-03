@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import crypto from 'crypto';
-import { backendUrl } from '../../../_backend';
+import { backendUrl, publicUrl } from '../../../_backend';
+import { withBase } from '@/lib/basePath';
 import { MS_COOKIE, callbackUrl, safeNext } from '../_shared';
 
 // Step 1 of "sign in with Microsoft": mint state / nonce / PKCE verifier, park
@@ -25,7 +26,7 @@ export async function GET(request) {
                           { cache: 'no-store' });
   const data = await res.json().catch(() => null);
   if (!res.ok || !data?.url) {
-    const back = new URL(mode === 'link' ? '/settings' : '/login', request.url);
+    const back = publicUrl(request, mode === 'link' ? '/settings' : '/login');
     back.searchParams.set('ms_error', data?.detail || 'Microsoft 登入目前無法使用');
     return NextResponse.redirect(back);
   }
@@ -37,7 +38,7 @@ export async function GET(request) {
     // Lax, not Strict: the callback is a top-level navigation *from Microsoft*,
     // and a Strict cookie would not be sent on it.
     sameSite: 'lax',
-    path: '/svc/auth/microsoft',
+    path: withBase('/svc/auth/microsoft'),
     maxAge: 600,
   });
   return response;

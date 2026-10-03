@@ -2,6 +2,7 @@
 
 import { logout } from '@/lib/auth';
 import './sidebar.css';
+import { withBase } from '@/lib/basePath';
 
 const NAV_ITEMS = [
   {
@@ -60,7 +61,7 @@ export default function Sidebar({ active, navOverrides = {} }) {
       </div>
       <aside className="sidebar" id="sidebar">
         <div className="sidebar-brand">
-          <img src="/media/toastmasters_logo.png" className="sidebar-brand-logo" alt="TM Logo" />
+          <img src={withBase('/media/toastmasters_logo.png')} className="sidebar-brand-logo" alt="TM Logo" />
           <div className="sidebar-brand-text">
             <div className="sidebar-brand-name">分會管理平台</div>
             <div className="sidebar-brand-sub">Club Management</div>
@@ -73,7 +74,7 @@ export default function Sidebar({ active, navOverrides = {} }) {
             <a
               key={item.key}
               className={`nav-item ${item.key === active ? 'active' : ''} ${item.systemAdminOnly ? 'system-admin-only' : ''}`}
-              href={item.href}
+              href={withBase(item.href)}
               onClick={navOverrides[item.key] ? (e) => { e.preventDefault(); navOverrides[item.key](); } : undefined}
               style={item.systemAdminOnly ? { display: 'none' } : undefined}
             >
@@ -90,7 +91,7 @@ export default function Sidebar({ active, navOverrides = {} }) {
               <div className="user-name" id="navUser">—</div>
               <div className="user-role">成員</div>
             </div>
-            <button className="btn-changepw-sidebar" onClick={() => { location.href = '/change-password'; }} title="變更密碼">
+            <button className="btn-changepw-sidebar" onClick={() => { location.href = withBase('/change-password'); }} title="變更密碼">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
             </button>
             <button className="btn-logout-sidebar" onClick={logout} title="登出">

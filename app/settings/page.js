@@ -5,6 +5,7 @@ import { apiJson } from '@/lib/api';
 import { setAuth, clearAuth, applyRoleUI } from '@/lib/auth';
 import Sidebar from '@/components/Sidebar';
 import './settings.css';
+import { withBase } from '@/lib/basePath';
 
 // ================================================================
 // 設定 — every user's own profile, sign-in methods and authorized apps
@@ -114,7 +115,7 @@ function SignInSection({ me, onChanged, toast }) {
           <div className="st-row-title">密碼</div>
           <div className="st-row-sub">{me.hasPassword ? '已設定，可以用帳號密碼登入' : '尚未設定，目前只能用 Microsoft 帳號登入'}</div>
         </div>
-        <a className="btn-secondary" href="/change-password">{me.hasPassword ? '變更密碼' : '設定密碼'}</a>
+        <a className="btn-secondary" href={withBase('/change-password')}>{me.hasPassword ? '變更密碼' : '設定密碼'}</a>
       </div>
 
       {(me.microsoftEnabled || me.microsoftLinked) && (
@@ -139,7 +140,7 @@ function SignInSection({ me, onChanged, toast }) {
             )
           ) : (
             me.microsoftEnabled && (
-              <a className="btn-secondary" href="/svc/auth/microsoft/start?mode=link">連結 Microsoft 帳號</a>
+              <a className="btn-secondary" href={withBase('/svc/auth/microsoft/start?mode=link')}>連結 Microsoft 帳號</a>
             )
           )}
         </div>
@@ -272,12 +273,12 @@ export default function SettingsPage() {
       try {
         const data = await apiJson('/auth/verify');
         setAuth(data.username, data.role, data.club_id, data.must_change_pw);
-        if (data.must_change_pw) { location.href = '/change-password'; return; }
+        if (data.must_change_pw) { location.href = withBase('/change-password'); return; }
         applyRoleUI();
         await loadMe();
       } catch {
         clearAuth();
-        location.href = '/login';
+        location.href = withBase('/login');
         return;
       }
       // Results of the Microsoft link round-trip, then drop them from the URL.
@@ -285,7 +286,7 @@ export default function SettingsPage() {
       if (params.get('ms_linked')) toast('已連結 Microsoft 帳號');
       if (params.get('ms_error')) toast(params.get('ms_error'), true);
       if (params.has('ms_linked') || params.has('ms_error')) {
-        window.history.replaceState(null, '', '/settings');
+        window.history.replaceState(null, '', withBase('/settings'));
       }
     })();
   }, []);

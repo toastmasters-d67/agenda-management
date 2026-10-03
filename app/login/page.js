@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { apiJson } from '@/lib/api';
 import { setAuth } from '@/lib/auth';
 import './login.css';
+import { withBase } from '@/lib/basePath';
 
 /**
  * Where to go once logged in.
@@ -41,7 +42,7 @@ function readTicket(ticket) {
 
 function startMicrosoft() {
   const next = new URLSearchParams(window.location.search).get('next') || '';
-  window.location.href = `/svc/auth/microsoft/start${next ? `?next=${encodeURIComponent(next)}` : ''}`;
+  window.location.href = withBase(`/svc/auth/microsoft/start${next ? `?next=${encodeURIComponent(next)}` : ''}`);
 }
 
 function MicrosoftButton({ label }) {
@@ -103,7 +104,7 @@ export default function LoginPage() {
     if (params.has('ms_error') || params.has('ms_status') || params.has('ms_signup')) {
       ['ms_error', 'ms_status', 'ms_signup'].forEach((k) => params.delete(k));
       const qs = params.toString();
-      window.history.replaceState(null, '', `/login${qs ? `?${qs}` : ''}`);
+      window.history.replaceState(null, '', withBase(`/login${qs ? `?${qs}` : ''}`));
     }
     apiJson('/auth/microsoft/config').then((d) => setMsEnabled(!!d.enabled)).catch(() => {});
   }, []);
@@ -157,7 +158,7 @@ export default function LoginPage() {
     try {
       const data = await apiJson('/auth/login', { method: 'POST', body: { username, password } });
       setAuth(data.username, data.role, data.club_id, data.must_change_pw);
-      window.location.href = data.must_change_pw ? '/change-password' : afterLogin();
+      window.location.href = withBase(data.must_change_pw ? '/change-password' : afterLogin());
     } catch (e) {
       setLoginError(e.message || '無法連線到伺服器，請確認後端已啟動');
     } finally {
@@ -191,7 +192,7 @@ export default function LoginPage() {
   return (
     <div className="login-card">
       <div className="login-logo">
-        <img src="/media/toastmasters_logo.png" alt="TM Logo" />
+        <img src={withBase('/media/toastmasters_logo.png')} alt="TM Logo" />
       </div>
       <h2>分會管理平台</h2>
       <p className="login-subtitle">Club Management</p>
@@ -207,7 +208,7 @@ export default function LoginPage() {
               請等待分會管理員審核，通過後用 Microsoft 帳號登入即可。<br />
               （系統帳號：<strong>{msSignupDone}</strong>）
             </div>
-            <a href="/login" style={{ color: '#004165', fontSize: 13, fontWeight: 600, textDecoration: 'none' }}>← 返回登入</a>
+            <a href={withBase('/login')} style={{ color: '#004165', fontSize: 13, fontWeight: 600, textDecoration: 'none' }}>← 返回登入</a>
           </div>
         ) : (
           <div>
@@ -240,7 +241,7 @@ export default function LoginPage() {
               {registerBusy ? (<><span className="spinner" />處理中...</>) : '提交申請'}
             </button>
             <p style={{ marginTop: 14, fontSize: 12 }}>
-              <a href="/login" style={{ color: '#004165' }}>取消</a>
+              <a href={withBase('/login')} style={{ color: '#004165' }}>取消</a>
             </p>
           </div>
         )

@@ -9,6 +9,7 @@ import { parseRolesSheet, resolveMemberName, isPersonField, META_IDS } from '@/l
 import { loadPathways, CUSTOM_VALUE, pathwaySelect, levelSelect, projectSelect } from '@/lib/pathways';
 import Sidebar from '@/components/Sidebar';
 import './roles.css';
+import { withBase } from '@/lib/basePath';
 
 // ================================================================
 // This page is a deliberate lift-and-shift port of the legacy
@@ -273,14 +274,14 @@ async function checkRolesAuth() {
   try {
     const data = await apiJson('/auth/verify');
     setAuth(data.username, data.role, data.club_id, data.must_change_pw);
-    if (data.must_change_pw) { location.href = '/change-password'; return false; }
+    if (data.must_change_pw) { location.href = withBase('/change-password'); return false; }
     document.getElementById('navUser').textContent = data.username;
     document.getElementById('userAvatar').textContent = data.username.slice(0, 1).toUpperCase();
     applyRoleUI();
     return true;
   } catch {
     clearAuth();
-    location.href = '/login';
+    location.href = withBase('/login');
     return false;
   }
 }
@@ -529,7 +530,7 @@ function renderMatrix() {
                title="${esc(f.label)}（可編輯）" oninput="window.__rolesOnCellInput(this)">`).join('')}
       <div class="rm-m-foot">
         <span class="rm-m-fill" id="fill_${m.id}"></span>
-        <a class="rm-m-link" href="/index?id=${m.id}" title="開啟此場議程">議程 ↗</a>
+        <a class="rm-m-link" href="${withBase('/index')}?id=${m.id}" title="開啟此場議程">議程 ↗</a>
       </div>
     </th>`).join('');
 

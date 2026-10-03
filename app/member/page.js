@@ -6,6 +6,7 @@ import { apiJson } from '@/lib/api';
 import { setAuth, clearAuth, applyRoleUI, isSystemAdmin, canWrite } from '@/lib/auth';
 import Sidebar from '@/components/Sidebar';
 import './member.css';
+import { withBase } from '@/lib/basePath';
 
 // This page is the single entry point for managing people. It used to be split
 // into /member (names, levels, bulk import) and /admin (roles, club assignment),
@@ -52,14 +53,14 @@ async function checkMemberAuth() {
   try {
     const data = await apiJson('/auth/verify');
     setAuth(data.username, data.role, data.club_id, data.must_change_pw);
-    if (data.must_change_pw) { location.href = '/change-password'; return false; }
+    if (data.must_change_pw) { location.href = withBase('/change-password'); return false; }
     document.getElementById('navUser').textContent = data.username;
     document.getElementById('userAvatar').textContent = data.username.slice(0, 1).toUpperCase();
     applyRoleUI();
     return true;
   } catch {
     clearAuth();
-    location.href = '/login';
+    location.href = withBase('/login');
     return false;
   }
 }

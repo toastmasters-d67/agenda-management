@@ -1,0 +1,56 @@
+# Production stack on vm-postgen-prod, at /srv/club-management/ next to its
+# .env (written by the deploy workflow from the PROD_ENV_FILE secret).
+# The host's nginx terminates TLS and proxies /club-management/ to the
+# 127.0.0.1 ports below — see nginx-club-management.conf.
+#
+# The VM is a B1s (1 vCPU / ~900 MB RAM) shared with post-generator, hence
+# the small Postgres settings and a single uvicorn worker.
+name: club-management
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    command: >
+      postgres
+      -c shared_buffers=64MB
+      -c max_connections=30
+      -c work_mem=4MB
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-agenda}
+      POSTGRES_USER: ${POSTGRES_USER:-agenda}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # No published port: only reachable on the compose network.
+
+  api:
+    image: ghcr.io/toastmasters-d67/agenda-management-api:${IMAGE_TAG:?IMAGE_TAG is required}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-agenda}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-agenda}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8001:8001"
+
+  web:
+    image: ghcr.io/toastmasters-d67/agenda-management-web:${IMAGE_TAG:?IMAGE_TAG is required}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      FASTAPI_BASE_URL: http://api:8001
+    depends_on:
+      - api
+    ports:
+      - "127.0.0.1:3000:3000"
+
+volumes:
+  pgdata:

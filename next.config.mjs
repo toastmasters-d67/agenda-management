@@ -1,5 +1,10 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  // Self-contained server bundle for the Docker image (Dockerfile.web).
+  output: 'standalone',
+  // Sub-path deploy (e.g. /club-management on the shared VM); unset on Vercel.
+  // Also see lib/basePath.js for the places Next.js doesn't prefix itself.
+  basePath: process.env.NEXT_PUBLIC_BASE_PATH || undefined,
   async redirects() {
     return [
       { source: '/', destination: '/login', permanent: false },

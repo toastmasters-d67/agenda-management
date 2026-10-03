@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { COOKIE_PATH } from '@/lib/basePath';
 import { backendUrl } from '../../_backend';
 
 // Login is special-cased (not the generic [...path] proxy) because it's
@@ -24,7 +25,7 @@ export async function POST(request) {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
     sameSite: 'lax',
-    path: '/',
+    path: COOKIE_PATH,
     maxAge: 60 * 60 * 24, // matches JWT_EXPIRE_HOURS in api/index.py
   });
   return response;
