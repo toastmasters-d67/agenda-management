@@ -583,6 +583,11 @@ def ms_register(req: MsRegisterRequest):
         raise HTTPException(status_code=400, detail="請輸入英文姓名")
     if not name_zh:
         raise HTTPException(status_code=400, detail="請輸入中文姓名")
+    # Enforced here, not just in the form: the club is what routes the request
+    # to an approver. A club-less pending account is visible only to system
+    # admins, so a direct API call could otherwise slip past every club admin.
+    if not req.club_id:
+        raise HTTPException(status_code=400, detail="請選擇所屬分會")
     email = t.get("email") or None
 
     # Username from the email's local part, or the English name; made unique
@@ -593,6 +598,9 @@ def ms_register(req: MsRegisterRequest):
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM clubs WHERE id=%s", (req.club_id,))
+                if not cur.fetchone():
+                    raise HTTPException(status_code=400, detail="找不到這個分會，請重新選擇")
                 cur.execute("SELECT 1 FROM users WHERE ms_sub=%s", (t["sub"],))
                 if cur.fetchone():
                     raise HTTPException(status_code=400,
