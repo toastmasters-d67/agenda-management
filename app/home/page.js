@@ -5,6 +5,7 @@ import { apiJson, apiFetch } from '@/lib/api';
 import { setAuth, clearAuth, applyRoleUI, isSystemAdmin } from '@/lib/auth';
 import Sidebar from '@/components/Sidebar';
 import './home.css';
+import { withBase } from '@/lib/basePath';
 
 // Module-level state mirrors the original inline <script> globals — this
 // page is a deliberate lift-and-shift port (imperative DOM ops kept as-is)
@@ -94,7 +95,7 @@ async function loadClubs() {
 
 // New agenda: carry the chosen club so /index applies that club's template.
 function goNewAgenda() {
-  let url = '/index';
+  let url = withBase('/index');
   if (isSystemAdmin() && selectedClubId != null) url += `?club_id=${selectedClubId}`;
   location.href = url;
 }
@@ -113,13 +114,13 @@ async function checkHomeAuth() {
   try {
     const data = await apiJson('/auth/verify');
     setAuth(data.username, data.role, data.club_id, data.must_change_pw);
-    if (data.must_change_pw) { location.href = '/change-password'; return; }
+    if (data.must_change_pw) { location.href = withBase('/change-password'); return; }
     document.getElementById('navUser').textContent = data.username;
     document.getElementById('userAvatar').textContent = data.username.slice(0, 1).toUpperCase();
     applyRoleUI();
   } catch {
     clearAuth();
-    location.href = '/login';
+    location.href = withBase('/login');
   }
 }
 
@@ -261,7 +262,7 @@ function renderPagination(page, pages, total) {
   pgBtns.innerHTML = html;
 }
 
-function editAgenda(id) { location.href = `/index?id=${id}`; }
+function editAgenda(id) { location.href = withBase(`/index?id=${id}`); }
 
 async function deleteItem(id, btn) {
   if (!confirm('確定要刪除這份議程嗎？')) return;

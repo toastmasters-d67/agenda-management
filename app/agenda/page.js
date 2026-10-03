@@ -26,6 +26,7 @@ import {
   projectSelect,
 } from '@/lib/pathways';
 import './agenda.css';
+import { withBase } from '@/lib/basePath';
 
 // ================================================================
 // This page is a deliberate lift-and-shift port of the legacy
@@ -1948,7 +1949,7 @@ async function checkAuth() {
     const data = await apiJson('/auth/verify');
     setAuth(data.username, data.role, data.club_id, data.must_change_pw);
     if (data.must_change_pw) {
-      window.location.href = '/change-password';
+      window.location.href = withBase('/change-password');
       return false;
     }
     document.querySelector('.app-layout').style.display = 'flex';
@@ -1957,7 +1958,7 @@ async function checkAuth() {
     return true;
   } catch {
     clearAuth();
-    window.location.href = '/login';
+    window.location.href = withBase('/login');
     return false;
   }
 }
@@ -2686,7 +2687,7 @@ export default function AgendaIndexPage() {
 
         <div className="preview-panel">
           <div className="preview-toolbar">
-            <button className="btn-home-rwd" onClick={() => { location.href = '/home'; }}>← 首頁</button>
+            <button className="btn-home-rwd" onClick={() => { location.href = withBase('/home'); }}>← 首頁</button>
             <span className="toolbar-label">預覽（即時更新）</span>
             <div className="toolbar-right">
               <div className="settings-dropdown" id="settingsDropdown">
@@ -2703,7 +2704,7 @@ export default function AgendaIndexPage() {
                 </div>
               </div>
               <div className="toolbar-sep"></div>
-              <button className="btn-toolbar-nav" onClick={() => { location.href = '/home'; }}>← 首頁</button>
+              <button className="btn-toolbar-nav" onClick={() => { location.href = withBase('/home'); }}>← 首頁</button>
               <span id="saveStatus" className="save-status unsaved">○ 未儲存</span>
               <button id="logoutBtn" className="btn-logout" onClick={logout}></button>
             </div>

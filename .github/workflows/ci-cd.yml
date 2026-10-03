@@ -1,0 +1,113 @@
+name: CI / CD
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Python syntax / import check
+        run: |
+          python -m compileall -q api migrations
+          python -c "import api.index"
+
+  deploy:
+    needs: ci
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE_TAG: ${{ github.sha }}
+      REGISTRY: ghcr.io/toastmasters-d67
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push api image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.api
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/agenda-management-api:${{ env.IMAGE_TAG }}
+            ${{ env.REGISTRY }}/agenda-management-api:latest
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,mode=max,scope=api
+
+      - name: Build & push web image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.web
+          build-args: NEXT_PUBLIC_BASE_PATH=/club-management
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/agenda-management-web:${{ env.IMAGE_TAG }}
+            ${{ env.REGISTRY }}/agenda-management-web:latest
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,mode=max,scope=web
+
+      # deploy 帳號（docker 群組）的 SSH key；VM 上其他專案用的是另一把。
+      - name: Set up SSH
+        env:
+          VM_SSH_KEY: ${{ secrets.VM_SSH_KEY }}
+          VM_SSH_KNOWN_HOSTS: ${{ secrets.VM_SSH_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$VM_SSH_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          printf '%s\n' "$VM_SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+      - name: Upload compose files and .env
+        env:
+          PROD_ENV_FILE: ${{ secrets.PROD_ENV_FILE }}
+          TARGET: ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}
+        run: |
+          umask 077
+          printf '%s\n' "$PROD_ENV_FILE" > deploy/.env
+          chmod 755 deploy/*.sh
+          scp -i ~/.ssh/id_deploy -p \
+            deploy/docker-compose.yml deploy/remote-deploy.sh deploy/backup.sh deploy/.env \
+            "$TARGET:/srv/club-management/"
+
+      - name: Deploy on VM
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET: ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}
+        run: |
+          printf '%s\n' "$GHCR_TOKEN" | ssh -i ~/.ssh/id_deploy "$TARGET" \
+            "IMAGE_TAG='$IMAGE_TAG' REGISTRY_USER='${{ github.actor }}' /srv/club-management/remote-deploy.sh"

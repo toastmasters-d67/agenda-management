@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import crypto from 'crypto';
-import { backendUrl } from '../../../_backend';
+import { backendUrl, publicUrl } from '../../../_backend';
+import { COOKIE_PATH, withBase } from '@/lib/basePath';
 import { MS_COOKIE, callbackUrl, safeNext } from '../_shared';
 
 // Step 2: Microsoft sends the browser back here with ?code&state. Check state
@@ -14,10 +15,10 @@ export async function GET(request) {
   const mode = saved?.mode === 'link' ? 'link' : 'login';
 
   const finish = (path, query = {}) => {
-    const url = new URL(path, request.url);
+    const url = publicUrl(request, path);
     Object.entries(query).forEach(([k, v]) => url.searchParams.set(k, v));
     const res = NextResponse.redirect(url);
-    res.cookies.set(MS_COOKIE, '', { path: '/svc/auth/microsoft', maxAge: 0 });
+    res.cookies.set(MS_COOKIE, '', { path: withBase('/svc/auth/microsoft'), maxAge: 0 });
     return res;
   };
   const fail = (msg) => finish(mode === 'link' ? '/settings' : '/login', { ms_error: msg });
@@ -67,7 +68,7 @@ export async function GET(request) {
         httpOnly: true,
         secure: process.env.NODE_ENV === 'production',
         sameSite: 'lax',
-        path: '/',
+        path: COOKIE_PATH,
         maxAge: 60 * 60 * 24, // matches JWT_EXPIRE_HOURS in api/index.py
       });
       return response;

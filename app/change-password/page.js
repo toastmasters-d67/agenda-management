@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { apiJson } from '@/lib/api';
 import { setAuth, getUsername, getRole, getClubId, clearAuth } from '@/lib/auth';
 import './change-password.css';
+import { withBase } from '@/lib/basePath';
 
 export default function ChangePasswordPage() {
   const [notice, setNotice] = useState('您的帳號是首次登入，請先設定自己的密碼才能繼續使用系統。');
@@ -34,7 +35,7 @@ export default function ChangePasswordPage() {
         );
       } catch {
         clearAuth();
-        location.href = '/login';
+        location.href = withBase('/login');
       }
     })();
   }, []);
@@ -69,7 +70,7 @@ export default function ChangePasswordPage() {
   return (
     <div className="card">
       <div className="card-logo">
-        <img src="/media/toastmasters_logo.png" alt="TM Logo" />
+        <img src={withBase('/media/toastmasters_logo.png')} alt="TM Logo" />
       </div>
       <h2>{hasPassword ? '設定新密碼' : '設定密碼'}</h2>
       <p className="card-subtitle">分會管理平台</p>
@@ -112,7 +113,7 @@ export default function ChangePasswordPage() {
       </button>
       {!forced && (
         <p className="hint" id="skipHint">
-          <a href="/settings" style={{ color: '#004165' }}>取消，返回設定</a>
+          <a href={withBase('/settings')} style={{ color: '#004165' }}>取消，返回設定</a>
         </p>
       )}
     </div>

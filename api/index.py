@@ -59,13 +59,16 @@ app.add_middleware(
 )
 
 
-_pool: Optional[psycopg2.pool.SimpleConnectionPool] = None
+# Threaded: on a long-running uvicorn, sync endpoints run concurrently in
+# FastAPI's threadpool, and SimpleConnectionPool is not thread-safe.
+_pool: Optional[psycopg2.pool.ThreadedConnectionPool] = None
+_DB_POOL_MAX = int(os.getenv("DB_POOL_MAX", "10"))
 
 
-def _get_pool() -> psycopg2.pool.SimpleConnectionPool:
+def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
     global _pool
     if _pool is None or _pool.closed:
-        _pool = psycopg2.pool.SimpleConnectionPool(1, 5, DATABASE_URL)
+        _pool = psycopg2.pool.ThreadedConnectionPool(1, _DB_POOL_MAX, DATABASE_URL)
     return _pool
 
 
@@ -3337,6 +3340,8 @@ MCP_SCOPES = {
 # see the note above.
 MCP_DEFAULT_SCOPES = ("posts:read", "posts:write", "ai:generate")
 
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
+
 
 def _public_origin(request: Request) -> str:
     """
@@ -3345,7 +3350,13 @@ def _public_origin(request: Request) -> str:
     Taken from the forwarded headers rather than hardcoded: the canonical
     resource URI has to match what the client sends in `resource`, and that is
     whatever host they typed — production, a preview deployment, or localhost.
+
+    PUBLIC_BASE_URL overrides that when the headers can't be trusted to say it:
+    on the Docker deployment the /svc proxy reaches us as http://api:8001, and
+    the app lives under a sub-path (https://host/club-management).
     """
+    if PUBLIC_BASE_URL:
+        return PUBLIC_BASE_URL
     host = request.headers.get("x-forwarded-host") or request.headers.get("host") or ""
     proto = request.headers.get("x-forwarded-proto") or request.url.scheme or "https"
     return f"{proto}://{host}"

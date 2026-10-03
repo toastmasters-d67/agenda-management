@@ -10,6 +10,7 @@ import { POST_KINDS, KIND_KEYS, KIND_REQUIRED, kindSpec, kindLabel,
   from '@/lib/postTemplates';
 import Sidebar from '@/components/Sidebar';
 import './social.css';
+import { withBase } from '@/lib/basePath';
 
 // ================================================================
 // 社群發文 — composer, draft box, and publishing
@@ -82,14 +83,14 @@ async function checkSocialAuth() {
   try {
     const data = await apiJson('/auth/verify');
     setAuth(data.username, data.role, data.club_id, data.must_change_pw);
-    if (data.must_change_pw) { location.href = '/change-password'; return false; }
+    if (data.must_change_pw) { location.href = withBase('/change-password'); return false; }
     document.getElementById('navUser').textContent = data.username;
     document.getElementById('userAvatar').textContent = data.username.slice(0, 1).toUpperCase();
     applyRoleUI();
     return true;
   } catch {
     clearAuth();
-    location.href = '/login';
+    location.href = withBase('/login');
     return false;
   }
 }

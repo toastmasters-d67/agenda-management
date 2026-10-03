@@ -6,6 +6,7 @@ import { setAuth, clearAuth, applyRoleUI, isSystemAdmin } from '@/lib/auth';
 import { LEVELS, loadPathways, getPathwayCatalog, setPathwayCatalog } from '@/lib/pathways';
 import Sidebar from '@/components/Sidebar';
 import './pathways.css';
+import { withBase } from '@/lib/basePath';
 
 // ================================================================
 // Pathways 路徑管理 — edit the catalog behind the Pathways dropdowns
@@ -362,14 +363,14 @@ async function checkPathwaysAuth() {
   try {
     const data = await apiJson('/auth/verify');
     setAuth(data.username, data.role, data.club_id, data.must_change_pw);
-    if (data.must_change_pw) { location.href = '/change-password'; return false; }
+    if (data.must_change_pw) { location.href = withBase('/change-password'); return false; }
     document.getElementById('navUser').textContent = data.username;
     document.getElementById('userAvatar').textContent = data.username.slice(0, 1).toUpperCase();
     applyRoleUI();
     return true;
   } catch {
     clearAuth();
-    location.href = '/login';
+    location.href = withBase('/login');
     return false;
   }
 }

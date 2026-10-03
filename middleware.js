@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { jwtVerify } from 'jose';
+import { COOKIE_PATH } from '@/lib/basePath';
 
 export async function middleware(request) {
   const { pathname } = request.nextUrl;
@@ -30,7 +31,7 @@ export async function middleware(request) {
   // (mirrors the old onLoad() check in login.html, now done at the edge
   // since the token itself isn't readable by client JS anymore).
   if (pathname === '/login') {
-    return validToken ? NextResponse.redirect(new URL('/home', request.url)) : NextResponse.next();
+    return validToken ? NextResponse.redirect(appUrl(request, '/home')) : NextResponse.next();
   }
 
   if (!validToken) {
@@ -38,10 +39,10 @@ export async function middleware(request) {
     // from outside the app, so a user who is not logged in lands here
     // mid-flow — sending them to /home afterwards would silently abandon the
     // authorization they were in the middle of granting.
-    const login = new URL('/login', request.url);
+    const login = appUrl(request, '/login');
     login.searchParams.set('next', pathname + request.nextUrl.search);
     const response = NextResponse.redirect(login);
-    if (token) response.cookies.set('auth_token', '', { path: '/', maxAge: 0 });
+    if (token) response.cookies.set('auth_token', '', { path: COOKIE_PATH, maxAge: 0 });
     return response;
   }
 
@@ -51,3 +52,12 @@ export async function middleware(request) {
 export const config = {
   matcher: ['/((?!_next/static|_next/image|favicon.ico|media|\.well-known).*)'],
 };
+
+// nextUrl.pathname has basePath stripped, and cloning nextUrl keeps it, so
+// `new URL('/home', request.url)` would drop the /club-management prefix.
+function appUrl(request, pathname) {
+  const url = request.nextUrl.clone();
+  url.pathname = pathname;
+  url.search = '';
+  return url;
+}
