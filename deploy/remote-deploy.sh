@@ -37,7 +37,7 @@ fi
 docker compose pull api web
 
 # ③ 資料庫起來後先備份，再跑 migration。第一次部署時資料庫是空的，備份也無妨。
-docker compose up -d db
+docker compose up -d --wait db
 echo "→ 部署前備份"
 ./backup.sh pre-deploy
 
