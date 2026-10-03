@@ -3514,11 +3514,20 @@ def _fetch_client_metadata(client_id: str) -> dict:
         raise HTTPException(status_code=400, detail="client_id 指向內部位址")
 
     try:
-        req = urllib.request.Request(client_id, headers={"Accept": "application/json"})
+        # A User-Agent is required in practice: Claude's document sits behind
+        # Cloudflare, which answers urllib's default ("Python-urllib/3.x")
+        # with a 403 challenge.
+        req = urllib.request.Request(client_id, headers={
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0 (compatible; entrepreneur-agenda-mcp/1.0)",
+        })
         with urllib.request.urlopen(req, timeout=_CIMD_TIMEOUT) as res:
             raw = res.read(_CIMD_MAX_BYTES + 1)
+    except urllib.error.HTTPError as e:
+        raise HTTPException(status_code=400,
+                            detail=f"無法讀取 client_id 的中繼資料（HTTP {e.code}）")
     except Exception:
-        raise HTTPException(status_code=400, detail="無法讀取 client_id 的中繼資料")
+        raise HTTPException(status_code=400, detail="無法讀取 client_id 的中繼資料（連線失敗）")
     if len(raw) > _CIMD_MAX_BYTES:
         raise HTTPException(status_code=400, detail="client_id 的中繼資料過大")
 
