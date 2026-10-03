@@ -134,6 +134,7 @@ class UserUpdateRequest(BaseModel):
     level: Optional[str] = None
     name_en: Optional[str] = None
     name_zh: Optional[str] = None
+    email: Optional[str] = None   # "" clears it
 
 
 class BulkMemberItem(BaseModel):
@@ -149,7 +150,7 @@ class BulkMemberRequest(BaseModel):
 
 
 class ChangePasswordRequest(BaseModel):
-    old_password: str
+    old_password: str = ""      # not needed when the account has no password yet
     new_password: str
 
 
@@ -166,6 +167,16 @@ class PresignRequest(BaseModel):
 
 
 # ------------------------------------------------------------------ helpers
+def _check_password(password: str, password_hash: str) -> bool:
+    """
+    An empty hash means the account has no password (created through Microsoft
+    sign-up) — nothing matches it. bcrypt would raise on it rather than say no.
+    """
+    if not password_hash:
+        return False
+    return bcrypt.checkpw(password.encode(), password_hash.encode())
+
+
 def make_token(username: str) -> str:
     payload = {
         "sub": username,
@@ -230,7 +241,7 @@ def login(req: LoginRequest):
                 (req.username,),
             )
             row = cur.fetchone()
-    if not row or not bcrypt.checkpw(req.password.encode(), row[0].encode()):
+    if not row or not _check_password(req.password, row[0]):
         raise HTTPException(status_code=401, detail="帳號或密碼錯誤")
     if row[4] == "pending":
         raise HTTPException(status_code=403, detail="帳號尚待審核，請等待分會管理員批准後再登入")
@@ -275,11 +286,17 @@ def register(req: RegisterRequest):
 
 @app.get("/api/auth/verify")
 def verify(user: dict = Depends(get_current_user)):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT password_hash <> '' FROM users WHERE username=%s",
+                        (user["username"],))
+            has_password = cur.fetchone()[0]
     return {
         "username":       user["username"],
         "role":           user["role"],
         "club_id":        user["club_id"],
         "must_change_pw": user["must_change_pw"],
+        "has_password":   has_password,
     }
 
 
@@ -295,7 +312,9 @@ def change_password(req: ChangePasswordRequest, user: dict = Depends(get_current
                 (user["username"],),
             )
             row = cur.fetchone()
-    if not row or not bcrypt.checkpw(req.old_password.encode(), row[0].encode()):
+    # An account created through Microsoft has no password to confirm; this is
+    # how it gets its first one (it is already authenticated by the token).
+    if not row or (row[0] and not _check_password(req.old_password, row[0])):
         raise HTTPException(status_code=400, detail="目前密碼錯誤")
     new_hash = bcrypt.hashpw(req.new_password.encode(), bcrypt.gensalt()).decode()
     with get_db() as conn:
@@ -304,6 +323,344 @@ def change_password(req: ChangePasswordRequest, user: dict = Depends(get_current
                 "UPDATE users SET password_hash=%s, must_change_pw=false WHERE username=%s",
                 (new_hash, user["username"]),
             )
+    return {"ok": True}
+
+
+# ------------------------------------------------------------------ sign in with Microsoft
+# OpenID Connect against the multi-tenant `common` endpoint, so any Microsoft
+# account works — work/school or personal. The browser side (state, PKCE
+# verifier, nonce, the cookie that holds them) lives in the Next.js routes
+# under app/svc/auth/microsoft/; this half exchanges the code with the client
+# secret, validates the id_token, and decides which account it is.
+#
+# How an id_token becomes an account, in order:
+#   1. users.ms_sub matches        → that account. The only rule after the first time.
+#   2. a VERIFIED email matches an
+#      account not yet bound       → bind it (ms_sub), then as 1.
+#   3. nothing matches             → a sign-up ticket: the user picks a club and
+#                                    a pending account is created for approval.
+#
+# "Verified" is the whole security argument for 2. With `common`, anyone can
+# create their own tenant and put any address on a user in it, and the email
+# claim will carry it — the "nOAuth" account-takeover pattern. So an address is
+# trusted only when Microsoft vouches for it: a personal Microsoft account
+# (whose email Microsoft itself verified), or a work account whose tenant has
+# proven it owns the address's domain (the `xms_edov` claim, which has to be
+# enabled as an optional claim on the app registration). Anything else can
+# still sign in, but only into an account it was explicitly linked to from
+# the settings page while signed in with a password.
+
+MS_CLIENT_ID     = os.getenv("MS_CLIENT_ID", "")
+MS_CLIENT_SECRET = os.getenv("MS_CLIENT_SECRET", "")
+MS_AUTHORITY     = "https://login.microsoftonline.com/common"
+MS_SCOPE         = "openid profile email"
+MS_SIGNUP_TTL    = timedelta(minutes=30)
+# The tenant every personal Microsoft account (outlook.com, hotmail.com…) signs
+# in through. Its email claims are verified by Microsoft.
+MS_CONSUMER_TID  = "9188040d-6c67-4c5b-b112-36a304b66dad"
+
+_ms_jwks_client = None
+
+
+def _ms_enabled() -> bool:
+    return bool(MS_CLIENT_ID and MS_CLIENT_SECRET)
+
+
+def _ms_signing_key(id_token: str):
+    global _ms_jwks_client
+    if _ms_jwks_client is None:
+        _ms_jwks_client = jwt.PyJWKClient(f"{MS_AUTHORITY}/discovery/v2.0/keys",
+                                          cache_keys=True)
+    return _ms_jwks_client.get_signing_key_from_jwt(id_token).key
+
+
+def _ms_verify_id_token(id_token: str, nonce: str) -> dict:
+    try:
+        claims = jwt.decode(id_token, _ms_signing_key(id_token), algorithms=["RS256"],
+                            audience=MS_CLIENT_ID, options={"require": ["exp", "iat", "sub"]})
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=400, detail="Microsoft 回傳的身分驗證無效")
+    # `common` signs for every tenant, so the issuer cannot be a fixed string;
+    # it must name the very tenant the token says it is from.
+    tid = claims.get("tid") or ""
+    if claims.get("iss") != f"https://login.microsoftonline.com/{tid}/v2.0":
+        raise HTTPException(status_code=400, detail="Microsoft 身分驗證的簽發者不符")
+    if not nonce or not hmac.compare_digest(str(claims.get("nonce") or ""), nonce):
+        raise HTTPException(status_code=400, detail="登入流程已失效，請重新登入")
+    return claims
+
+
+def _ms_exchange_code(code: str, code_verifier: str, redirect_uri: str, nonce: str) -> dict:
+    """Code → validated id_token claims."""
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+    data = urllib.parse.urlencode({
+        "client_id": MS_CLIENT_ID, "client_secret": MS_CLIENT_SECRET,
+        "grant_type": "authorization_code", "code": code,
+        "redirect_uri": redirect_uri, "code_verifier": code_verifier, "scope": MS_SCOPE,
+    }).encode()
+    req = urllib.request.Request(f"{MS_AUTHORITY}/oauth2/v2.0/token", data=data,
+                                 headers={"Content-Type": "application/x-www-form-urlencoded"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as res:
+            body = json.loads(res.read())
+    except urllib.error.HTTPError as e:
+        try:
+            desc = json.loads(e.read()).get("error_description", "")
+        except Exception:
+            desc = ""
+        # Keep the AADSTS code and sentence; drop the trace / correlation ids.
+        desc = desc.splitlines()[0].split(" Trace ID")[0] if desc else ""
+        raise HTTPException(status_code=400,
+                            detail="Microsoft 登入失敗" + (f"：{desc}" if desc else ""))
+    except Exception:
+        raise HTTPException(status_code=502, detail="無法連線到 Microsoft")
+    if not body.get("id_token"):
+        raise HTTPException(status_code=400, detail="Microsoft 沒有回傳身分資訊")
+    return _ms_verify_id_token(body["id_token"], nonce)
+
+
+def _ms_email_verified(claims: dict) -> Optional[str]:
+    """The claim's email if Microsoft vouches for it, else None. See the note above."""
+    email = (claims.get("email") or "").strip().lower()
+    if not email or not _EMAIL_RE.match(email):
+        return None
+    if claims.get("tid") == MS_CONSUMER_TID:
+        return email
+    if claims.get("xms_edov") in (True, 1, "1", "true", "True"):
+        return email
+    return None
+
+
+def _login_payload(username: str) -> dict:
+    """The same body POST /api/auth/login returns."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT role, club_id, must_change_pw FROM users WHERE username=%s",
+                        (username,))
+            row = cur.fetchone()
+    return {"result": "login", "token": make_token(username), "username": username,
+            "role": row[0], "club_id": row[1], "must_change_pw": row[2]}
+
+
+@app.get("/api/auth/microsoft/config")
+def ms_config():
+    """Whether the login page should offer the Microsoft button."""
+    return {"enabled": _ms_enabled()}
+
+
+@app.get("/api/auth/microsoft/authorize-url")
+def ms_authorize_url(redirect_uri: str = Query(...), state: str = Query(...),
+                     nonce: str = Query(...), code_challenge: str = Query(...)):
+    """
+    Built here so the client id lives in one place (this server's env). The
+    Next.js route generated state / nonce / verifier and keeps them in a cookie.
+    Microsoft itself checks redirect_uri against the app registration.
+    """
+    import urllib.parse
+    if not _ms_enabled():
+        raise HTTPException(status_code=503, detail="伺服器尚未設定 Microsoft 登入")
+    q = urllib.parse.urlencode({
+        "client_id": MS_CLIENT_ID, "response_type": "code", "response_mode": "query",
+        "redirect_uri": redirect_uri, "scope": MS_SCOPE, "state": state, "nonce": nonce,
+        "code_challenge": code_challenge, "code_challenge_method": "S256",
+        "prompt": "select_account",
+    })
+    return {"url": f"{MS_AUTHORITY}/oauth2/v2.0/authorize?{q}"}
+
+
+class MsCallbackRequest(BaseModel):
+    code:          str
+    code_verifier: str
+    nonce:         str
+    redirect_uri:  str
+    mode:          str = "login"     # "login" | "link"
+
+
+@app.post("/api/auth/microsoft/callback")
+def ms_callback(req: MsCallbackRequest, request: Request):
+    """
+    Returns one of:
+      {"result": "login", "token", ...}  — signed in (same shape as /api/auth/login)
+      {"result": "pending"}              — account exists but awaits approval
+      {"result": "signup", "ticket", "name", "email"}  — no account yet
+      {"result": "linked"}               — mode=link: bound to the signed-in user
+    """
+    if not _ms_enabled():
+        raise HTTPException(status_code=503, detail="伺服器尚未設定 Microsoft 登入")
+    claims = _ms_exchange_code(req.code, req.code_verifier, req.redirect_uri, req.nonce)
+    sub = claims["sub"]
+    email = _ms_email_verified(claims)
+
+    if req.mode == "link":
+        # Explicit linking from the settings page, by someone already signed in
+        # — the path for a Microsoft account whose email cannot be verified, or
+        # that differs from the one on file.
+        auth = request.headers.get("authorization") or ""
+        if not auth.lower().startswith("bearer "):
+            raise HTTPException(status_code=401, detail="請先登入再連結 Microsoft 帳號")
+        username = decode_token(auth[7:].strip())
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT username FROM users WHERE ms_sub=%s", (sub,))
+                owner = cur.fetchone()
+                if owner and owner[0] != username:
+                    raise HTTPException(status_code=409,
+                                        detail="這個 Microsoft 帳號已經連結到另一個使用者")
+                cur.execute("UPDATE users SET ms_sub=%s WHERE username=%s", (sub, username))
+                # Fill in a missing email from a verified claim, if no one has it.
+                if email:
+                    cur.execute(
+                        "UPDATE users SET email=%s WHERE username=%s AND email IS NULL"
+                        " AND NOT EXISTS (SELECT 1 FROM users WHERE lower(email)=%s)",
+                        (email, username, email))
+        return {"result": "linked"}
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT username, status FROM users WHERE ms_sub=%s", (sub,))
+            row = cur.fetchone()
+            if row is None and email:
+                cur.execute("SELECT username, status, ms_sub FROM users WHERE lower(email)=%s",
+                            (email,))
+                hit = cur.fetchone()
+                if hit and hit[2]:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="這個 Email 的帳號已經連結了另一個 Microsoft 帳號，請改用那個帳號登入")
+                if hit:
+                    cur.execute("UPDATE users SET ms_sub=%s WHERE username=%s", (sub, hit[0]))
+                    row = hit[:2]
+            elif row is None:
+                # An unverified address that is on file is not proof of anything,
+                # but it is a strong hint the person has an account: say so,
+                # rather than walking them into a duplicate sign-up.
+                claimed = (claims.get("email") or "").strip().lower()
+                if claimed:
+                    cur.execute("SELECT 1 FROM users WHERE lower(email)=%s", (claimed,))
+                    if cur.fetchone():
+                        raise HTTPException(
+                            status_code=409,
+                            detail="無法確認這個 Microsoft 帳號的 Email。若你已有帳號，"
+                                   "請先用帳號密碼登入，再到「設定」連結 Microsoft 帳號")
+
+    if row is not None:
+        if row[1] == "pending":
+            return {"result": "pending"}
+        return _login_payload(row[0])
+
+    now = datetime.now(timezone.utc)
+    ticket = jwt.encode({"typ": "ms_signup", "sub": sub, "email": email or "",
+                         "name": claims.get("name") or "", "iat": now,
+                         "exp": now + MS_SIGNUP_TTL}, JWT_SECRET, algorithm=JWT_ALGORITHM)
+    return {"result": "signup", "ticket": ticket,
+            "name": claims.get("name") or "", "email": email or ""}
+
+
+class MsRegisterRequest(BaseModel):
+    ticket:  str
+    name_en: str
+    name_zh: str
+    club_id: Optional[int] = None
+
+
+@app.post("/api/auth/microsoft/register")
+def ms_register(req: MsRegisterRequest):
+    """
+    Finish a Microsoft sign-up: a pending account, no password, bound to the
+    Microsoft identity in the ticket. Approval works exactly like the
+    password self-registration.
+    """
+    try:
+        t = jwt.decode(req.ticket, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=400, detail="註冊連結已失效，請重新用 Microsoft 登入")
+    if t.get("typ") != "ms_signup":
+        raise HTTPException(status_code=400, detail="註冊連結無效")
+    name_en, name_zh = req.name_en.strip(), req.name_zh.strip()
+    if not name_en:
+        raise HTTPException(status_code=400, detail="請輸入英文姓名")
+    if not name_zh:
+        raise HTTPException(status_code=400, detail="請輸入中文姓名")
+    email = t.get("email") or None
+
+    # Username from the email's local part, or the English name; made unique
+    # the same way the bulk import does.
+    base = re.sub(r"[^a-z0-9]", "", (email or "").split("@")[0].lower()) \
+        or re.sub(r"[^a-z0-9]", "", name_en.lower())
+    base = (base if len(base) >= 3 else (base + "member"))[:20]
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM users WHERE ms_sub=%s", (t["sub"],))
+                if cur.fetchone():
+                    raise HTTPException(status_code=400,
+                                        detail="這個 Microsoft 帳號已經申請過了，請等待審核")
+                username, i = base, 2
+                cur.execute("SELECT 1 FROM users WHERE username=%s", (username,))
+                while cur.fetchone():
+                    username = f"{base}{i}"
+                    i += 1
+                    cur.execute("SELECT 1 FROM users WHERE username=%s", (username,))
+                cur.execute(
+                    "INSERT INTO users (username, password_hash, name_en, name_zh, role,"
+                    " club_id, status, email, ms_sub)"
+                    " VALUES (%s, '', %s, %s, 'club_member', %s, 'pending', %s, %s)",
+                    (username, name_en, name_zh, req.club_id, email, t["sub"]))
+    except psycopg2.errors.UniqueViolation:
+        raise HTTPException(status_code=400, detail="這個 Email 已有帳號，請先用帳號密碼登入後在「設定」連結")
+    return {"ok": True, "pending": True, "username": username,
+            "message": "帳號已提交審核，請等待分會管理員批准後再登入"}
+
+
+# ------------------------------------------------------------------ my profile
+class ProfileUpdateRequest(BaseModel):
+    name_en: str
+    name_zh: str
+
+
+@app.get("/api/me")
+def get_my_profile(user: dict = Depends(get_current_user)):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT u.username, u.name_zh, u.name_en, u.email, u.level, u.role,"
+                " u.club_id, c.name, u.ms_sub IS NOT NULL, u.password_hash <> ''"
+                " FROM users u LEFT JOIN clubs c ON c.id=u.club_id WHERE u.username=%s",
+                (user["username"],))
+            r = cur.fetchone()
+    return {"username": r[0], "nameZh": r[1] or "", "nameEn": r[2] or "",
+            "email": r[3] or "", "level": r[4] or "", "role": r[5],
+            "clubId": r[6], "clubName": r[7] or "",
+            "microsoftLinked": r[8], "hasPassword": r[9],
+            "microsoftEnabled": _ms_enabled()}
+
+
+@app.put("/api/me")
+def update_my_profile(req: ProfileUpdateRequest, user: dict = Depends(get_current_user)):
+    """Name only — role, club, level and email are set by admins."""
+    name_en, name_zh = req.name_en.strip(), req.name_zh.strip()
+    if not name_en or not name_zh:
+        raise HTTPException(status_code=400, detail="請提供中英文姓名")
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE users SET name_en=%s, name_zh=%s WHERE username=%s",
+                        (name_en[:100], name_zh[:100], user["username"]))
+    return {"ok": True}
+
+
+@app.delete("/api/me/microsoft")
+def unlink_my_microsoft(user: dict = Depends(get_current_user)):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT password_hash <> '' FROM users WHERE username=%s",
+                        (user["username"],))
+            if not cur.fetchone()[0]:
+                # Unlinking would leave no way to sign in at all.
+                raise HTTPException(status_code=400,
+                                    detail="你的帳號還沒有密碼，請先設定密碼再解除連結")
+            cur.execute("UPDATE users SET ms_sub=NULL WHERE username=%s", (user["username"],))
     return {"ok": True}
 
 
@@ -664,7 +1021,7 @@ def list_users(
                 if club_id is not None:
                     cur.execute("""
                         SELECT u.username, u.name_en, u.name_zh, u.role, u.club_id,
-                               c.name, u.level, u.created_at, u.status
+                               c.name, u.level, u.created_at, u.status, u.email, u.ms_sub IS NOT NULL
                         FROM users u
                         LEFT JOIN clubs c ON c.id = u.club_id
                         WHERE u.club_id = %s
@@ -673,7 +1030,7 @@ def list_users(
                 else:
                     cur.execute("""
                         SELECT u.username, u.name_en, u.name_zh, u.role, u.club_id,
-                               c.name, u.level, u.created_at, u.status
+                               c.name, u.level, u.created_at, u.status, u.email, u.ms_sub IS NOT NULL
                         FROM users u
                         LEFT JOIN clubs c ON c.id = u.club_id
                         ORDER BY u.status, u.created_at
@@ -681,7 +1038,7 @@ def list_users(
             else:
                 cur.execute("""
                     SELECT u.username, u.name_en, u.name_zh, u.role, u.club_id,
-                           c.name, u.level, u.created_at, u.status
+                           c.name, u.level, u.created_at, u.status, u.email, u.ms_sub IS NOT NULL
                     FROM users u
                     LEFT JOIN clubs c ON c.id = u.club_id
                     WHERE u.club_id = %s
@@ -698,7 +1055,22 @@ def list_users(
         "level":     r[6],
         "createdAt": r[7].isoformat() if r[7] else "",
         "status":    r[8],
+        "email":     r[9] or "",
+        "microsoftLinked": r[10],
     } for r in rows]
+
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _normalize_email(raw: Optional[str]) -> Optional[str]:
+    """'' → None (cleared); otherwise trimmed and lowercased, or 400."""
+    email = (raw or "").strip().lower()
+    if not email:
+        return None
+    if len(email) > 254 or not _EMAIL_RE.match(email):
+        raise HTTPException(status_code=400, detail="Email 格式不正確")
+    return email
 
 
 @app.put("/api/users/{username}")
@@ -706,19 +1078,32 @@ def update_user(username: str, req: UserUpdateRequest, user: dict = Depends(get_
     if user["role"] == "club_member":
         raise HTTPException(status_code=403, detail="權限不足")
 
+    try:
+        return _update_user(username, req, user)
+    except psycopg2.errors.UniqueViolation:
+        raise HTTPException(status_code=400, detail="此 Email 已被其他帳號使用")
+
+
+def _update_user(username: str, req: UserUpdateRequest, user: dict):
+    # Email is admin-set on purpose (members cannot edit their own): it is what
+    # a first Microsoft sign-in matches on, so letting anyone claim any address
+    # would let them squat on someone else's sign-in.
     if user["role"] == "club_admin":
-        # club_admin: only update name / level for users in their own club
+        # club_admin: only update name / level / email for users in their own club
         name_en = (req.name_en or "").strip()
         name_zh = (req.name_zh or "").strip()
         level   = (req.level   or "TM").strip()
         if not name_en or not name_zh:
             raise HTTPException(status_code=400, detail="請提供中英文姓名")
+        set_email = req.email is not None
+        email = _normalize_email(req.email) if set_email else None
         with get_db() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE users SET name_en=%s, name_zh=%s, level=%s"
+                    "UPDATE users SET name_en=%s, name_zh=%s, level=%s,"
+                    " email=CASE WHEN %s THEN %s ELSE email END"
                     " WHERE username=%s AND club_id=%s",
-                    (name_en, name_zh, level, username, user["club_id"]),
+                    (name_en, name_zh, level, set_email, email, username, user["club_id"]),
                 )
                 if cur.rowcount == 0:
                     raise HTTPException(status_code=404, detail="找不到此用戶或無權限修改")
@@ -749,6 +1134,8 @@ def update_user(username: str, req: UserUpdateRequest, user: dict = Depends(get_
         set_clauses.append("name_en = %s"); values.append(req.name_en.strip())
     if req.name_zh is not None:
         set_clauses.append("name_zh = %s"); values.append(req.name_zh.strip())
+    if req.email is not None:
+        set_clauses.append("email = %s");   values.append(_normalize_email(req.email))
 
     if not set_clauses:
         return {"ok": True}  # nothing to update
@@ -2969,13 +3356,21 @@ def _mcp_secret() -> str:
 
 
 def _mint_access_token(username: str, client_id: str, scope: str,
-                       resource: str) -> tuple:
+                       resource: str, grant: str) -> tuple:
+    """
+    `grant` is the hash of the refresh token this access token descends from.
+    It ties a self-contained JWT back to a row that can be revoked — without
+    it, revoking a grant would leave its access tokens working until expiry.
+    It is a hash of a random 256-bit value, so carrying it in a signed (not
+    encrypted) token reveals nothing usable.
+    """
     now = datetime.now(timezone.utc)
     payload = {
         "sub": username,
         "aud": resource,          # audience binding — see _verify_access_token
         "iss": resource.rsplit("/api/mcp", 1)[0],
         "client_id": client_id,
+        "grant": grant,
         "scope": scope,
         "iat": now,
         "exp": now + MCP_ACCESS_TTL,
@@ -3024,12 +3419,22 @@ def mcp_caller(request: Request) -> dict:
         raise _unauthorized(request, scope=" ".join(MCP_DEFAULT_SCOPES))
     claims = _verify_access_token(request, auth[7:].strip())
 
+    # The grant has to still be live, checked on every call. This is what makes
+    # revocation immediate: an access token outlives nothing it came from. A
+    # token without a `grant` claim predates this check and is refused, which
+    # just sends the client through a refresh.
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT username, role, club_id, status FROM users"
-                        " WHERE username=%s", (claims.get("sub"),))
+            cur.execute(
+                "SELECT u.username, u.role, u.club_id, u.status,"
+                " EXISTS (SELECT 1 FROM oauth_refresh_tokens t"
+                "         WHERE t.token_hash=%s AND t.username=u.username"
+                "           AND t.revoked_at IS NULL"
+                "           AND (t.expires_at IS NULL OR t.expires_at > NOW()))"
+                " FROM users u WHERE u.username=%s",
+                (claims.get("grant") or "", claims.get("sub")))
             row = cur.fetchone()
-    if not row or row[3] == "pending":
+    if not row or row[3] == "pending" or not row[4]:
         raise _unauthorized(request, error="invalid_token")
 
     return {"username": row[0], "role": row[1], "club_id": row[2],
@@ -3139,6 +3544,8 @@ def authorization_server_metadata(request: Request):
         "issuer": origin,
         "authorization_endpoint": f"{origin}/oauth/authorize",
         "token_endpoint": f"{origin}/api/oauth/token",
+        "revocation_endpoint": f"{origin}/api/oauth/revoke",
+        "revocation_endpoint_auth_methods_supported": ["none"],
         "scopes_supported": list(MCP_SCOPES),
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code", "refresh_token"],
@@ -3218,10 +3625,11 @@ def authorize_grant(request: Request, req: AuthorizeRequest,
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO oauth_codes (code_hash, client_id, username,"
+                "INSERT INTO oauth_codes (code_hash, client_id, client_name, username,"
                 " redirect_uri, code_challenge, resource, scope, expires_at)"
-                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
-                (code_hash, req.client_id, user["username"], req.redirect_uri,
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (code_hash, req.client_id, str(meta["client_name"])[:200],
+                 user["username"], req.redirect_uri,
                  req.code_challenge, req.resource, " ".join(wanted),
                  datetime.now(timezone.utc) + MCP_CODE_TTL),
             )
@@ -3240,18 +3648,21 @@ def _token_error(code: str, desc: str):
                     status_code=400, media_type="application/json")
 
 
-def _issue_refresh(username: str, client_id: str, scope: str, resource: str) -> str:
+def _issue_refresh(username: str, client_id: str, client_name: str, scope: str,
+                   resource: str) -> tuple:
+    """Returns (token, token_hash); the hash doubles as the grant id."""
     import hashlib
     token = uuid.uuid4().hex + uuid.uuid4().hex
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO oauth_refresh_tokens (token_hash, client_id, username,"
-                " scope, resource, expires_at) VALUES (%s,%s,%s,%s,%s,%s)",
-                (hashlib.sha256(token.encode()).hexdigest(), client_id, username,
+                "INSERT INTO oauth_refresh_tokens (token_hash, client_id, client_name,"
+                " username, scope, resource, expires_at) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                (token_hash, client_id, client_name, username,
                  scope, resource, datetime.now(timezone.utc) + MCP_REFRESH_TTL),
             )
-    return token
+    return token, token_hash
 
 
 @app.post("/api/oauth/token")
@@ -3282,7 +3693,7 @@ async def oauth_token(request: Request):
                 cur.execute(
                     "DELETE FROM oauth_codes WHERE code_hash=%s"
                     " RETURNING client_id, username, redirect_uri, code_challenge,"
-                    " resource, scope, expires_at",
+                    " resource, scope, expires_at, client_name",
                     (hashlib.sha256(code.encode()).hexdigest(),),
                 )
                 row = cur.fetchone()
@@ -3300,17 +3711,19 @@ async def oauth_token(request: Request):
         if not hmac.compare_digest(expected, row[3]):
             return _token_error("invalid_grant", "PKCE 驗證失敗")
 
-        username, resource, scope = row[1], row[4], row[5]
+        username, resource, scope, client_name = row[1], row[4], row[5], row[7]
+        grant_id = None           # minted below, after the account check
 
     elif grant == "refresh_token":
         rt = form.get("refresh_token") or ""
         client_id = form.get("client_id") or ""
+        grant_id = hashlib.sha256(rt.encode()).hexdigest()
         with get_db() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT client_id, username, scope, resource, expires_at, revoked_at"
                     " FROM oauth_refresh_tokens WHERE token_hash=%s",
-                    (hashlib.sha256(rt.encode()).hexdigest(),),
+                    (grant_id,),
                 )
                 row = cur.fetchone()
         if row is None or row[5] is not None:
@@ -3324,8 +3737,7 @@ async def oauth_token(request: Request):
         with get_db() as conn:
             with conn.cursor() as cur:
                 cur.execute("UPDATE oauth_refresh_tokens SET last_used_at=NOW()"
-                            " WHERE token_hash=%s",
-                            (hashlib.sha256(rt.encode()).hexdigest(),))
+                            " WHERE token_hash=%s", (grant_id,))
     else:
         return _token_error("unsupported_grant_type", "只支援 authorization_code 與 refresh_token")
 
@@ -3337,13 +3749,118 @@ async def oauth_token(request: Request):
     if not u or u[0] == "pending":
         return _token_error("invalid_grant", "帳號已停用")
 
-    access, ttl = _mint_access_token(username, client_id, scope, resource)
+    refresh = None
+    if grant == "authorization_code":
+        refresh, grant_id = _issue_refresh(username, client_id, client_name,
+                                           scope, resource)
+    access, ttl = _mint_access_token(username, client_id, scope, resource, grant_id)
     body = {"access_token": access, "token_type": "Bearer",
             "expires_in": ttl, "scope": scope}
-    if grant == "authorization_code":
-        body["refresh_token"] = _issue_refresh(username, client_id, scope, resource)
+    if refresh:
+        body["refresh_token"] = refresh
     return Response(content=json.dumps(body), media_type="application/json",
                     headers={"Cache-Control": "no-store"})
+
+
+# ------------------------------------------------------------------ AS: revocation
+def _revoke_grant(grant_id: str, username: Optional[str] = None) -> bool:
+    """Mark one grant revoked. Returns whether a live grant was found."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE oauth_refresh_tokens SET revoked_at=NOW()"
+                " WHERE token_hash=%s AND revoked_at IS NULL"
+                " AND (%s::text IS NULL OR username=%s)",
+                (grant_id, username, username))
+            return cur.rowcount > 0
+
+
+@app.post("/api/oauth/revoke")
+async def oauth_revoke(request: Request):
+    """
+    RFC 7009, for a client signing itself out.
+
+    Takes either token. A refresh token is looked up by hash; an access token
+    is decoded and its `grant` claim followed — revoking the grant either way,
+    since an access token on its own cannot be revoked (it is a JWT).
+
+    Always 200, whether or not anything matched: the spec says so, and a
+    different answer would let a caller probe which tokens exist.
+    """
+    import hashlib
+    form = await request.form()
+    token = form.get("token") or ""
+    client_id = form.get("client_id") or ""
+
+    grant_id = hashlib.sha256(token.encode()).hexdigest()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT client_id FROM oauth_refresh_tokens WHERE token_hash=%s",
+                        (grant_id,))
+            row = cur.fetchone()
+    if row is None:
+        try:
+            claims = jwt.decode(token, _mcp_secret(), algorithms=[JWT_ALGORITHM],
+                                audience=_mcp_resource(request))
+            grant_id = claims.get("grant") or ""
+            row = (claims.get("client_id", ""),)
+        except jwt.InvalidTokenError:
+            row = None
+
+    # A public client authenticates only by naming itself; when it does, it may
+    # only revoke its own tokens.
+    if row is not None and (not client_id or hmac.compare_digest(row[0], client_id)):
+        _revoke_grant(grant_id)
+    return Response(status_code=200, headers={"Cache-Control": "no-store"})
+
+
+# ------------------------------------------------------------------ AS: my grants
+# The user-facing half of revocation: "which apps can act as me, and cut one
+# off". Scoped to the caller's own grants only — an officer who leaves is cut
+# off by deleting or suspending the account, which already kills every grant
+# (FK cascade / the status check in mcp_caller).
+
+@app.get("/api/me/oauth-grants")
+def list_my_grants(user: dict = Depends(get_current_user)):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT token_hash, client_id, client_name, scope, created_at,"
+                " last_used_at, expires_at FROM oauth_refresh_tokens"
+                " WHERE username=%s AND revoked_at IS NULL"
+                " AND (expires_at IS NULL OR expires_at > NOW())"
+                " ORDER BY created_at DESC",
+                (user["username"],))
+            rows = cur.fetchall()
+    iso = lambda d: d.isoformat() if d else None
+    return [{
+        "id": r[0],
+        "clientId": r[1],
+        "clientName": r[2] or "",
+        "scopes": [{"key": s, "label": MCP_SCOPES.get(s, s),
+                    "sensitive": s == "publish"} for s in (r[3] or "").split()],
+        "createdAt": iso(r[4]),
+        "lastUsedAt": iso(r[5]),
+        "expiresAt": iso(r[6]),
+    } for r in rows]
+
+
+@app.delete("/api/me/oauth-grants/{grant_id}")
+def revoke_my_grant(grant_id: str, user: dict = Depends(get_current_user)):
+    if not _revoke_grant(grant_id, user["username"]):
+        raise HTTPException(status_code=404, detail="找不到這個授權，可能已經撤銷或過期")
+    return {"ok": True}
+
+
+@app.delete("/api/me/oauth-grants")
+def revoke_all_my_grants(user: dict = Depends(get_current_user)):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE oauth_refresh_tokens SET revoked_at=NOW()"
+                        " WHERE username=%s AND revoked_at IS NULL",
+                        (user["username"],))
+            n = cur.rowcount
+    return {"ok": True, "revoked": n}
 
 
 # ==================================================================
