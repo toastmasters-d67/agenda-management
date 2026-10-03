@@ -6,7 +6,8 @@ import { backendUrl } from '../_backend';
 // and forward to the (untouched) FastAPI backend at /api/<path>.
 async function proxy(request, { params }) {
   const token = request.cookies.get('auth_token')?.value;
-  const url = backendUrl(request, params.path.join('/'), request.nextUrl.search);
+  const { path } = await params;   // a Promise since Next 15
+  const url = backendUrl(request, path.join('/'), request.nextUrl.search);
 
   const headers = {};
   const contentType = request.headers.get('content-type');

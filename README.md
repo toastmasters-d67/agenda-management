@@ -6,7 +6,7 @@
 
 | 層 | 技術 | 說明 |
 |----|------|------|
-| 前端 | **Next.js 14**（App Router，`app/`） | 每個頁面一個 `app/<route>/page.js`；`middleware.js` 在 edge 驗登入 cookie |
+| 前端 | **Next.js 15** + React 19（App Router，`app/`） | 每個頁面一個 `app/<route>/page.js`；`middleware.js` 在 edge 驗登入 cookie。`package.json` 的 `overrides` 把 Next 鎖死的 postcss／nanoid 拉到已修補的版本 |
 | 前端 → 後端 | `/svc/*` 代理（`app/svc/**`） | 瀏覽器只拿得到 httpOnly 的 `auth_token` cookie，代理在伺服器端把它轉成 `Authorization: Bearer` 送到 FastAPI。前端一律用 `lib/api.js` 的 `apiJson()` |
 | 後端 | **FastAPI**（`api/index.py`，單一檔案） | 所有 `/api/*`、OAuth 與 MCP 端點；Vercel 上是 Python serverless function |
 | 資料庫 | Neon PostgreSQL，**Alembic** 管 schema | 見「Database Migration」 |
