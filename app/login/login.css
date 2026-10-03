@@ -1,0 +1,122 @@
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft JhengHei",
+               "PingFang TC", sans-serif;
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 60%, #0f3460 100%);
+}
+
+.login-card {
+  background: #fff;
+  border-radius: 14px;
+  padding: 40px 36px 36px;
+  width: 360px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+  text-align: center;
+}
+
+.login-logo { margin-bottom: 12px; }
+.login-logo img { width: 64px; height: 64px; object-fit: contain; }
+
+.login-card h2 {
+  font-size: 17px;
+  font-weight: 700;
+  color: #1a1a2e;
+  margin-bottom: 4px;
+}
+
+.login-subtitle {
+  font-size: 12px;
+  color: #aaa;
+  margin-bottom: 24px;
+}
+
+.login-tabs {
+  display: flex;
+  border-radius: 7px;
+  overflow: hidden;
+  border: 1px solid #e0e0e0;
+  margin-bottom: 22px;
+}
+
+.login-tab {
+  flex: 1;
+  padding: 8px;
+  border: none;
+  background: #fafafa;
+  font-size: 13px;
+  cursor: pointer;
+  color: #666;
+  transition: background 0.15s, color 0.15s;
+}
+
+.login-tab.active {
+  background: #004165;
+  color: #fff;
+  font-weight: 600;
+}
+
+.login-field {
+  text-align: left;
+  margin-bottom: 14px;
+}
+
+.login-field label {
+  display: block;
+  font-size: 11px;
+  color: #666;
+  margin-bottom: 5px;
+}
+
+.login-field input {
+  width: 100%;
+  padding: 9px 11px;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  font-size: 13px;
+  transition: border-color 0.2s;
+}
+
+.login-field input:focus {
+  outline: none;
+  border-color: #004165;
+}
+
+.login-error {
+  font-size: 12px;
+  color: #e63946;
+  min-height: 20px;
+  margin-bottom: 10px;
+  text-align: left;
+}
+
+.btn-login-submit {
+  width: 100%;
+  padding: 11px;
+  background: #772432;
+  color: #fff;
+  border: none;
+  border-radius: 7px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.btn-login-submit:hover { background: #5a1a25; }
+.btn-login-submit:disabled { background: #a9b2b1; cursor: not-allowed; }
+
+.btn-login-submit .spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255,255,255,0.4);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  vertical-align: middle;
+  margin-right: 6px;
+}
+@keyframes spin { to { transform: rotate(360deg); } }

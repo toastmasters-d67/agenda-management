@@ -8,3 +8,7 @@ boto3
 aiofiles
 alembic
 sqlalchemy
+anthropic
+cryptography
+openai
+python-multipart

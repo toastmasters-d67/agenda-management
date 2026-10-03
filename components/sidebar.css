@@ -1,0 +1,170 @@
+/* Shared by home/club/admin/member — identical sidebar markup/behavior
+   that each legacy .html page pasted independently. */
+.sidebar {
+  width: 220px;
+  min-height: 100vh;
+  background: #0f172a;
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  position: fixed;
+  top: 0; left: 0; bottom: 0;
+  z-index: 100;
+}
+.sidebar-brand {
+  padding: 16px 16px 14px;
+  border-bottom: 1px solid #1e293b;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.sidebar-brand-logo { width: 36px; height: 36px; object-fit: contain; flex-shrink: 0; }
+.sidebar-brand-text { min-width: 0; }
+.sidebar-brand-name { font-size: 13px; font-weight: 700; color: #f8fafc; letter-spacing: 0.3px; line-height: 1.4; }
+.sidebar-brand-sub { font-size: 10px; color: #64748b; margin-top: 2px; }
+
+.sidebar-nav { padding: 12px 10px; flex: 1; }
+.nav-section-label {
+  font-size: 10px; font-weight: 600; color: #475569;
+  letter-spacing: 0.8px; text-transform: uppercase;
+  padding: 8px 10px 4px;
+}
+.nav-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 10px; border-radius: 8px;
+  color: #94a3b8; font-size: 13px; font-weight: 500;
+  cursor: pointer; transition: background 0.15s, color 0.15s;
+  text-decoration: none; margin-bottom: 2px;
+}
+.nav-item:hover { background: #1e293b; color: #f1f5f9; }
+.nav-item.active { background: #1e3a5f; color: #60a5fa; }
+.nav-item svg { flex-shrink: 0; opacity: 0.8; }
+.nav-item.active svg { opacity: 1; }
+
+.sidebar-toggle-tab { display: none; }
+.sidebar-backdrop { display: none; }
+
+.sidebar-footer { padding: 14px 10px; border-top: 1px solid #1e293b; }
+.sidebar-user { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 8px; }
+.user-avatar {
+  width: 30px; height: 30px; border-radius: 50%;
+  background: #1e3a5f;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 700; color: #60a5fa;
+  flex-shrink: 0;
+}
+.user-info { flex: 1; min-width: 0; }
+.user-name { font-size: 12px; font-weight: 600; color: #e2e8f0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.user-role { font-size: 10px; color: #64748b; }
+.btn-logout-sidebar {
+  background: none; border: none; color: #64748b;
+  cursor: pointer; padding: 4px; border-radius: 4px;
+  display: flex; align-items: center;
+  transition: color 0.15s; flex-shrink: 0;
+}
+.btn-logout-sidebar:hover { color: #f87171; }
+.btn-changepw-sidebar {
+  background: none; border: none; color: #64748b;
+  cursor: pointer; padding: 4px; border-radius: 4px;
+  display: flex; align-items: center;
+  transition: color 0.15s; flex-shrink: 0;
+}
+.btn-changepw-sidebar:hover { color: #60a5fa; }
+
+.main-area { margin-left: 220px; flex: 1; display: flex; flex-direction: column; min-height: 100vh; }
+
+/* Also shared verbatim across every dashboard page (home/club/admin/member) */
+.topbar {
+  height: 58px;
+  background: #fff;
+  border-bottom: 1px solid #e2e8f0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 28px;
+  flex-shrink: 0;
+  position: sticky;
+  top: 0;
+  z-index: 50;
+}
+.topbar-title { font-size: 16px; font-weight: 700; color: #0f172a; }
+.topbar-actions { display: flex; align-items: center; gap: 10px; }
+.btn-primary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 18px;
+  background: #772432;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+  white-space: nowrap;
+}
+.btn-primary:hover { background: #5a1a25; }
+.content { padding: 28px; flex: 1; }
+
+@media (max-width: 900px) {
+  .sidebar { width: 64px; }
+  .sidebar-brand-name, .sidebar-brand-sub,
+  .nav-section-label, .nav-item span,
+  .user-info { display: none; }
+  .nav-item { justify-content: center; padding: 10px; }
+  .sidebar-footer { padding: 10px 8px; }
+  .sidebar-user { padding: 6px; justify-content: center; }
+  .btn-logout-sidebar { display: none; }
+  .btn-changepw-sidebar { display: none; }
+  .main-area { margin-left: 64px; }
+  .topbar { padding: 0 20px; }
+  .content { padding: 20px; }
+}
+
+@media (max-width: 640px) {
+  html, body { overflow-x: hidden; max-width: 100%; }
+  .main-area { overflow-x: hidden; min-width: 0; }
+  .topbar { padding: 0 12px; height: 50px; }
+  .topbar-title { font-size: 13px; }
+  .btn-primary { padding: 6px 10px; font-size: 12px; gap: 4px; }
+  .content { padding: 12px; overflow-x: hidden; }
+  .sidebar {
+    width: 220px;
+    transform: translateX(-100%);
+    transition: transform 0.3s cubic-bezier(0.4,0,0.2,1);
+    z-index: 200;
+  }
+  .sidebar-brand-name, .sidebar-brand-sub,
+  .nav-section-label, .nav-item span,
+  .user-info { display: revert; }
+  .nav-item { justify-content: flex-start; padding: 9px 10px; }
+  .sidebar-footer { padding: 14px 10px; }
+  .sidebar-user { padding: 8px 10px; justify-content: flex-start; }
+  .btn-logout-sidebar { display: flex; }
+  .btn-changepw-sidebar { display: flex; }
+  .sidebar.sidebar-open { transform: translateX(0); }
+  .sidebar-toggle-tab {
+    display: flex;
+    position: fixed; left: 0; top: 50%;
+    transform: translateY(-50%);
+    width: 20px; height: 56px;
+    background: #0f172a;
+    border-radius: 0 8px 8px 0;
+    align-items: center; justify-content: center;
+    cursor: pointer; z-index: 201;
+    transition: left 0.3s cubic-bezier(0.4,0,0.2,1);
+    box-shadow: 2px 0 8px rgba(0,0,0,0.3);
+  }
+  .sidebar-toggle-tab.open { left: 220px; }
+  .sidebar-toggle-tab svg { color: #94a3b8; transition: transform 0.3s ease; }
+  .sidebar-toggle-tab.open svg { transform: rotate(180deg); }
+  .sidebar-backdrop {
+    display: block; position: fixed; inset: 0;
+    background: rgba(0,0,0,0.4); z-index: 199;
+    opacity: 0; pointer-events: none;
+    transition: opacity 0.3s ease;
+  }
+  .sidebar-backdrop.visible { opacity: 1; pointer-events: auto; }
+  .main-area { margin-left: 0; }
+}
