@@ -98,6 +98,7 @@ const TRANSLATIONS = {
     tmeClosing: 'Toastmaster of the Evening',
     awards: 'Awards Presentation',
     sharing: 'Sharing & Feedback',
+    meetingEnd: 'Meeting Ends',
     adjournment: '— Meeting Adjournment —',
     thTime: 'Time',
     thAgenda: 'Agenda (Program)',
@@ -141,6 +142,7 @@ const TRANSLATIONS = {
     tmeClosing: '總主持人',
     awards: '贈感謝狀',
     sharing: '會後分享 & 來賓回饋',
+    meetingEnd: '會議結束',
     adjournment: '——— 會議圓滿 ———',
     thTime: '時間',
     thAgenda: '議程表',
@@ -709,13 +711,15 @@ function calcTimes(spList) {
   const evalStart = getTime('evalStart', addMins(topicsStart, topicsMins));
   const closingStart = getTime('closingStart', addMins(evalStart, evalMins));
   const sharingStart = getTime('sharingStart', addMins(closingStart, closingMins));
+  // When the last block actually ends — printed as the agenda's final row.
+  const meetingEnd = addMins(sharingStart, sharingMins);
 
   return {
     receptionStart, receptionMins, openingStart, endTime,
     openingMins, speechStart, varietyMins, preparedSpeechStart, speechMins,
     photoStart, photoMins, topicsStart, topicsMins,
     evalStart, evalMins, closingStart, closingMins, sharingStart, sharingMins,
-    intermissionMins,
+    intermissionMins, meetingEnd,
   };
 }
 
