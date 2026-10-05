@@ -3350,11 +3350,14 @@ def _public_origin(request: Request) -> str:
     resource URI has to match what the client sends in `resource`, and that is
     whatever host they typed — production, a preview deployment, or localhost.
 
-    The forwarded headers are trustworthy on Vercel, which overwrites them. On
-    a host that passes a client's X-Forwarded-Host through, set
-    MCP_PUBLIC_ORIGIN and the headers are not consulted at all.
+    The forwarded headers are trustworthy on Vercel, which overwrites them.
+    Elsewhere PUBLIC_BASE_URL pins it and the headers are not consulted at
+    all: on the Docker deployment the /svc proxy reaches us as
+    http://api:8001, and the app lives under a sub-path
+    (https://host/club-management). MCP_PUBLIC_ORIGIN is an older name for
+    the same setting.
     """
-    pinned = os.getenv("MCP_PUBLIC_ORIGIN", "").rstrip("/")
+    pinned = (os.getenv("PUBLIC_BASE_URL") or os.getenv("MCP_PUBLIC_ORIGIN") or "").rstrip("/")
     if pinned:
         return pinned
     host = request.headers.get("x-forwarded-host") or request.headers.get("host") or ""

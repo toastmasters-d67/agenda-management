@@ -69,10 +69,20 @@ async function ensureCjkFont() {
 
 async function launchBrowser() {
   const puppeteer = (await import('puppeteer-core')).default;
-  // Local development: point at an installed Chrome; the bundled Chromium is
-  // a Linux (Lambda) binary.
+  // Anywhere but Vercel: an installed Chrome/Chromium — local development, or
+  // a container image that ships one. The bundled Chromium is an Amazon
+  // Linux binary and does not run elsewhere (not on Alpine, not on Windows).
   if (process.env.CHROME_EXECUTABLE_PATH) {
-    return puppeteer.launch({ executablePath: process.env.CHROME_EXECUTABLE_PATH, headless: true });
+    return puppeteer.launch({
+      executablePath: process.env.CHROME_EXECUTABLE_PATH,
+      headless: true,
+      // Container defaults: no user namespaces for the sandbox, small /dev/shm.
+      args: ['--no-sandbox', '--disable-dev-shm-usage'],
+    });
+  }
+  if (!process.env.VERCEL) {
+    throw new Error('這個部署沒有可用的 Chromium，無法輸出議程。'
+      + '請在執行環境安裝 Chromium 與中文字型，並設定 CHROME_EXECUTABLE_PATH');
   }
   const chromium = (await import('@sparticuz/chromium')).default;
   chromium.setGraphicsMode = false;
@@ -134,8 +144,14 @@ export async function POST(request) {
   }
 
   // The page is always this deployment's own — never a host named in the
-  // request, which would hand the login token to whoever runs that host.
-  const origin = new URL(request.url).origin;
+  // request, which would hand the login token to whoever runs that host. On
+  // Vercel that is the URL this request came in on. In a container it is this
+  // same Next.js server on its own port: behind nginx, request.url carries
+  // the public host, and the app may sit under a sub-path (basePath).
+  const origin = process.env.VERCEL
+    ? new URL(request.url).origin
+    : (process.env.AGENDA_RENDER_PAGE_ORIGIN || `http://127.0.0.1:${process.env.PORT || 3000}`);
+  const base = process.env.NEXT_PUBLIC_BASE_PATH || '';
 
   let browser;
   try {
@@ -154,7 +170,7 @@ export async function POST(request) {
       httpOnly: true, secure: origin.startsWith('https:'), sameSite: 'Lax',
     });
 
-    await page.goto(`${origin}/agenda?id=${agendaId}`, { waitUntil: 'networkidle0', timeout: 30000 });
+    await page.goto(`${origin}${base}/agenda?id=${agendaId}`, { waitUntil: 'networkidle0', timeout: 30000 });
     await page.waitForFunction(
       () => window.__agendaExport && window.__agendaExport.ready
         && window.html2canvas && window.html2pdf,
@@ -162,7 +178,7 @@ export async function POST(request) {
     );
     const failure = await page.evaluate(() => window.__agendaExport.error || '');
     if (failure) throw new Error([failure, ...alerts].join('：'));
-    if (new URL(page.url()).pathname !== '/agenda') {
+    if (new URL(page.url()).pathname !== `${base}/agenda`) {
       // checkAuth() sends a must-change-password account elsewhere.
       throw new Error('帳號需要先到網站變更密碼');
     }

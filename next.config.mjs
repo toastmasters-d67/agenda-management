@@ -5,9 +5,13 @@ const nextConfig = {
   // external — and the binary files themselves are not imports, so they are
   // traced into that one function explicitly.
   serverExternalPackages: ['@sparticuz/chromium', 'puppeteer-core'],
-  outputFileTracingIncludes: {
-    '/svc/agenda-export': ['./node_modules/@sparticuz/chromium/bin/**'],
-  },
+  // Only Vercel uses the bundled binary (67 MB); a container image brings its
+  // own Chromium (CHROME_EXECUTABLE_PATH) and should not carry this one.
+  ...(process.env.VERCEL ? {
+    outputFileTracingIncludes: {
+      '/svc/agenda-export': ['./node_modules/@sparticuz/chromium/bin/**'],
+    },
+  } : {}),
   async headers() {
     // The OAuth consent screen must never render inside someone else's frame:
     // a page that overlays it could steer the "允許" click without the person
