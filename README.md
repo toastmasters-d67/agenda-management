@@ -829,7 +829,8 @@ https://<你的網域>/api/mcp
 
 | 工具 | scope | 說明 |
 |------|-------|------|
-| `list_meetings` | `posts:read` | 列出分會例會（最近的在前），回傳 `agendaId` |
+| `list_clubs` | `posts:read` | 列出可操作的分會與 `club_id`（系統管理員看到全部，其他人只看到自己的分會）。讓模型能把「Entrepreneur TM」這類名稱對應到 id |
+| `list_meetings` | `posts:read` | 列出分會例會（最近的在前），回傳 `agendaId`，每筆標明所屬分會 |
 | `get_meeting` | `posts:read` | 一場例會的日期、時間、地址、入場費、主題；缺宣傳必填欄位會指出 |
 | `list_posts` | `posts:read` | 列出貼文草稿與已發布貼文 |
 | `get_post` | `posts:read` | 一則貼文的完整內容（主文案、各平台版本、圖片、發布狀態） |
@@ -841,6 +842,7 @@ https://<你的網域>/api/mcp
 - **四個 scope 都公開宣告**（`scopes_supported` 與 401 挑戰都列出），所以客戶端會一起請求；但同意畫面上 `publish` 預設**不勾**，並標示「公開且無法收回」，要使用者自己勾。客戶端沒指定 scope 時給 `posts:read posts:write ai:generate`。
   - 早先的做法是連宣告都不宣告 `publish`、`tools/list` 也藏起 `publish_post`，結果模型看不到工具就不會呼叫，客戶端也不會請求這個 scope，同意畫面根本沒機會問——等於永遠拿不到。
 - 請求的 scope 全都不認得時回 400（`openid`、`offline_access` 這類 OIDC 慣用 scope 除外，忽略即可）。
+- **分會隔離**：`club_member` 與 `club_admin` 的 `club_id` 固定是自己的分會，帶別的一律 403；用 `post_id`／`agenda_id` 直接指也會先比對所屬分會。只有 `system_admin` 能跨分會，而它**不帶 `club_id` 時會拿到所有分會混在一起的結果**，所以清單每筆都標分會，工具說明也要求帶 `club_id`。
 - **scope 只會收窄、不會放寬權限。** 每支工具底下照跑網頁版用的同一套 helper 與角色檢查（`_social_scope`、分會管理員限制）；`club_member` 拿到 `posts:write` 也一樣寫不了。
 - `tools/list` **一律列出全部工具**，並帶 `annotations`（`readOnlyHint` / `destructiveHint` / `openWorldHint`），客戶端（例如 ChatGPT）據此決定哪些呼叫要先問使用者。呼叫沒 scope 的工具會收到 403 + `insufficient_scope` 挑戰，挑戰裡的 scope 是「現有的＋缺的」，客戶端補授權後不會掉掉原本的權限。
 - 工具層級的失敗（找不到貼文、平台未連接、缺欄位）回 `isError: true` 的結果讓模型自行修正，不回 JSON-RPC 錯誤。

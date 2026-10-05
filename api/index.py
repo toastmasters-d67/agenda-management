@@ -4162,6 +4162,33 @@ def _officer_only(caller: dict):
         raise HTTPException(status_code=403, detail="需要分會管理員以上權限")
 
 
+def _club_label(name, name_zh, name_en):
+    """Every name a person might call the club by, so a model can match any."""
+    names = [n for n in (name_zh, name, name_en) if n]
+    return " / ".join(dict.fromkeys(names)) or "（未命名）"
+
+
+def _club_labels(cur) -> dict:
+    cur.execute("SELECT id, name, name_zh, name_en FROM clubs")
+    return {r[0]: _club_label(r[1], r[2], r[3]) for r in cur.fetchall()}
+
+
+def _tool_list_clubs(caller, args):
+    # A system admin sees every club; anyone else sees only their own, which
+    # is the only one _social_scope would let them name anyway.
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            labels = _club_labels(cur)
+    if caller["role"] != "system_admin":
+        labels = {k: v for k, v in labels.items() if k == caller["club_id"]}
+    items = [{"clubId": k, "name": labels[k]} for k in sorted(labels)]
+    lines = [f"club_id={i['clubId']} · {i['name']}" for i in items] or ["（沒有分會）"]
+    if caller["role"] == "system_admin":
+        lines.append("\n你是系統管理員：其他工具不帶 club_id 時會混合所有分會，"
+                     "請帶上要操作的分會的 club_id。")
+    return _tool_text("\n".join(lines), {"clubs": items})
+
+
 def _tool_list_meetings(caller, args):
     cid = _social_scope(caller, args.get("club_id"))
     limit = min(int(args.get("limit") or 10), 50)
@@ -4169,14 +4196,19 @@ def _tool_list_meetings(caller, args):
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT id, data->>'meetingDate', data->>'meetingNo',"
-                " data->>'meetingTheme' FROM agendas"
+                " data->>'meetingTheme', club_id FROM agendas"
                 " WHERE (%s::int IS NULL OR club_id=%s)"
                 " ORDER BY data->>'meetingDate' DESC NULLS LAST LIMIT %s",
                 (cid, cid, limit))
             rows = cur.fetchall()
+            labels = _club_labels(cur)
+    # The club rides on every row: for a system admin with no club_id this
+    # list spans clubs, and unlabelled it reads as if it were all one club.
     items = [{"agendaId": r[0], "date": r[1] or "", "meetingNo": r[2] or "",
-              "theme": r[3] or ""} for r in rows]
-    lines = [f"{i['date']} 第{i['meetingNo']}次 · {i['theme']}（agendaId={i['agendaId']}）"
+              "theme": r[3] or "", "clubId": r[4], "club": labels.get(r[4], "")}
+             for r in rows]
+    lines = [f"{i['date']} 第{i['meetingNo']}次 · {i['theme']}"
+             f"（agendaId={i['agendaId']}，{i['club']}，club_id={i['clubId']}）"
              for i in items] or ["（沒有例會）"]
     return _tool_text("\n".join(lines), {"meetings": items})
 
@@ -4201,13 +4233,15 @@ def _tool_list_posts(caller, args):
                         " WHERE (%s::int IS NULL OR club_id=%s)"
                         " ORDER BY created_at DESC LIMIT 50", (cid, cid))
             rows = [_social_row(r) for r in cur.fetchall()]
+            labels = _club_labels(cur)
     items = [{"id": r["id"], "title": r["title"], "kind": r["kind"],
               "status": r["status"], "agendaId": r["agendaId"],
+              "clubId": r["clubId"], "club": labels.get(r["clubId"], ""),
               "images": len(r["images"]), "published": sorted(r["published"])}
              for r in rows]
     lines = [f"#{i['id']} [{i['kind']}/{i['status']}] {i['title'] or '(無標題)'}"
-             f" · 圖 {i['images']}" + (f" · 已發布 {'、'.join(i['published'])}"
-                                       if i["published"] else "")
+             f" · {i['club']} · 圖 {i['images']}"
+             + (f" · 已發布 {'、'.join(i['published'])}" if i["published"] else "")
              for i in items] or ["（沒有貼文）"]
     return _tool_text("\n".join(lines), {"posts": items})
 
@@ -4338,15 +4372,28 @@ def _tool_publish_post(caller, args):
 
 
 # ------------------------------------------------------------------ catalogue
+# Spelled out because a system admin's omitted club_id silently means "every
+# club", and a model that does not know that reads the mix as one club.
+_CLUB_ID_DOC = ("分會 id，從 list_clubs 取得。一般使用者可省略（固定是自己的分會）；"
+                "系統管理員省略時會混合所有分會的資料，請務必指定")
+
 # `annotations` are hints a client uses to decide what to confirm with the
 # person first (ChatGPT asks before any tool not marked readOnlyHint). They
 # are advice to the client, never a permission — scopes and role checks are.
 MCP_TOOLS = [
     {
+        "name": "list_clubs", "scope": "posts:read", "title": "列出分會",
+        "description": "列出可以操作的分會與 club_id。使用者用名稱指稱分會時（中文名、英文名或簡稱），"
+                       "先用這支找到 club_id，再傳給其他工具。一般使用者只會看到自己的分會。",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+        "handler": _tool_list_clubs,
+    },
+    {
         "name": "list_meetings", "scope": "posts:read", "title": "列出例會",
         "description": "列出分會的例會（議程），最近的在前。回傳 agendaId，其他工具用它指定例會。",
         "inputSchema": {"type": "object", "properties": {
-            "club_id": {"type": "integer", "description": "分會 id；系統管理員才需要指定"},
+            "club_id": {"type": "integer", "description": _CLUB_ID_DOC},
             "limit": {"type": "integer", "description": "最多幾筆，預設 10，上限 50"},
         }, "additionalProperties": False},
         "annotations": {"readOnlyHint": True, "openWorldHint": False},
@@ -4366,7 +4413,7 @@ MCP_TOOLS = [
         "name": "list_posts", "scope": "posts:read", "title": "列出貼文草稿",
         "description": "列出分會的社群貼文草稿與已發布貼文。",
         "inputSchema": {"type": "object", "properties": {
-            "club_id": {"type": "integer"},
+            "club_id": {"type": "integer", "description": _CLUB_ID_DOC},
         }, "additionalProperties": False},
         "annotations": {"readOnlyHint": True, "openWorldHint": False},
         "handler": _tool_list_posts,
@@ -4389,7 +4436,7 @@ MCP_TOOLS = [
             "kind": {"type": "string", "enum": ["promo", "recap", "other"]},
             "agenda_id": {"type": "integer"},
             "body": {"type": "string", "description": "主文案；留空稍後用 generate_copy 產生"},
-            "club_id": {"type": "integer"},
+            "club_id": {"type": "integer", "description": _CLUB_ID_DOC},
         }, "additionalProperties": False},
         "annotations": {"readOnlyHint": False, "destructiveHint": False,
                         "idempotentHint": False, "openWorldHint": False},
