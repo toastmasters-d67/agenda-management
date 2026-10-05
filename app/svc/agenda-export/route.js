@@ -65,7 +65,11 @@ async function launchBrowser() {
   // detaches the frame on the cross-origin navigation from about:blank to the
   // agenda page — "Navigating frame was detached". A Vercel function has the
   // memory to run Chromium normally.
-  const args = chromium.args.filter((a) => a !== '--single-process');
+  // Out of single-process mode the processes talk over shared memory, and the
+  // sandbox's /dev/shm is tiny — net::ERR_INSUFFICIENT_RESOURCES on the first
+  // request. --disable-dev-shm-usage moves that to /tmp.
+  const args = [...chromium.args.filter((a) => a !== '--single-process'),
+    '--disable-dev-shm-usage'];
   return puppeteer.launch({
     args: await puppeteer.defaultArgs({ args, headless: 'shell' }),
     executablePath: await chromium.executablePath(),
