@@ -3642,6 +3642,33 @@ def _client_host(client_id: str) -> str:
     return _host_of(client_id)
 
 
+def _redirect_registered(uri: str, registered: list) -> bool:
+    """
+    Whether `uri` is one of the client's redirect URIs.
+
+    Exact match, except that a loopback http URI matches regardless of port
+    (RFC 8252 §7.3). A desktop or CLI client opens whatever port is free at
+    login time, so the port it registered with is rarely the one it is
+    listening on now — Codex's login fails without this. The loopback names
+    are also treated as one: clients register "localhost" and then listen on
+    127.0.0.1 (or the reverse), and either way the code never leaves the
+    machine the person is sitting at.
+    """
+    import urllib.parse
+    if uri in registered:
+        return True
+    u = urllib.parse.urlparse(uri)
+    if u.scheme != "http" or u.hostname not in ("localhost", "127.0.0.1", "::1"):
+        return False
+    for r in registered:
+        v = urllib.parse.urlparse(r) if isinstance(r, str) else None
+        if (v and v.scheme == "http"
+                and v.hostname in ("localhost", "127.0.0.1", "::1")
+                and v.path == u.path and v.query == u.query):
+            return True
+    return False
+
+
 def _dcr_redirect_ok(uri: str) -> bool:
     import urllib.parse
     if not isinstance(uri, str) or len(uri) > 2000 or "#" in uri:
@@ -3744,8 +3771,13 @@ def _check_authorize(request: Request, client_id: str, redirect_uri: str,
     resource = _mcp_resource(request)
 
     meta = _fetch_client_metadata(client_id)
-    if redirect_uri not in meta["redirect_uris"]:
-        raise HTTPException(status_code=400, detail="redirect_uri 不在這個 client 的允許清單中")
+    if not _redirect_registered(redirect_uri, meta["redirect_uris"]):
+        # Both values are the client's own, public by nature, and the only way
+        # to tell which side has it wrong.
+        raise HTTPException(
+            status_code=400,
+            detail=f"redirect_uri 不在這個 client 的允許清單中（收到 {redirect_uri}，"
+                   f"允許 {'、'.join(map(str, meta['redirect_uris'][:5]))}）")
 
     asked = (scope or "").split()
     wanted = [x for x in asked if x in MCP_SCOPES]
