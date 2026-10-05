@@ -888,7 +888,7 @@ https://<你的網域>/api/mcp
 
 注意：
 - 只開**自己這個部署**的頁面（不看請求帶來的 host），上傳網址限定本帳號的 R2 網域——請求裡的 token 不會被送去別的地方。正式站從 Python 呼叫時用 `VERCEL_PROJECT_PRODUCTION_URL`，可用 `AGENDA_RENDER_URL` 覆寫。
-- Vercel 的 Chromium 沒有中文字型，第一次（每個暖機實例一次）會從 Google Fonts 下載 Noto Sans TC 到 `/tmp/fonts`。
+- Vercel 的 Chromium 沒有中文字型，第一次（每個暖機實例一次）會從 Google Fonts 下載 Noto Sans TC 與 Noto Emoji（黑白，給 ⏱ 這類符號）到 `/tmp/fonts`。**順序很重要**：`@sparticuz/chromium` 只在 `/tmp/fonts` 不存在時才解壓自帶的 `fonts.conf`，所以要先呼叫 `chromium.executablePath()` 再補字型；反過來 Chromium 會沒有字型設定，一導覽就斷線（`Navigating frame was detached`）。
 - 一次約 10～30 秒（冷啟動較久），都在 60 秒的 `maxDuration` 內。
 - 頁面用 `alert()` 報錯，route 會關掉對話框並把文字帶進錯誤訊息。
 - 本機開發：Chromium 套件是 Linux 版，設 `CHROME_EXECUTABLE_PATH` 指向本機的 Chrome。不帶 `uploads` 呼叫 route 時檔案以 data URL 直接回傳，不會寫入 R2。
