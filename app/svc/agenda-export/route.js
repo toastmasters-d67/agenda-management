@@ -61,8 +61,13 @@ async function launchBrowser() {
   const chromium = (await import('@sparticuz/chromium')).default;
   chromium.setGraphicsMode = false;
   await ensureCjkFont();
+  // --single-process (in the package's defaults, for tight Lambda memory)
+  // detaches the frame on the cross-origin navigation from about:blank to the
+  // agenda page — "Navigating frame was detached". A Vercel function has the
+  // memory to run Chromium normally.
+  const args = chromium.args.filter((a) => a !== '--single-process');
   return puppeteer.launch({
-    args: await puppeteer.defaultArgs({ args: chromium.args, headless: 'shell' }),
+    args: await puppeteer.defaultArgs({ args, headless: 'shell' }),
     executablePath: await chromium.executablePath(),
     headless: 'shell',
   });
@@ -122,7 +127,9 @@ export async function POST(request) {
   let browser;
   try {
     browser = await launchBrowser();
-    const page = await browser.newPage();
+    // Reuse the tab Chromium opened with rather than adding one: a second
+    // target is one more thing for a constrained runtime to lose track of.
+    const page = (await browser.pages())[0] || await browser.newPage();
     // The editor reports load failures with alert(), which would otherwise
     // hang a headless page until the timeout. Dismiss, but keep the text —
     // it is the actual reason ("找不到此議程", a 403, …).
@@ -172,6 +179,7 @@ export async function POST(request) {
     ].filter(Boolean));
     return NextResponse.json({ name: out.name, jpgPages: (out.jpg || []).length, pdf: !!out.pdf });
   } catch (e) {
+    console.error('agenda-export failed', e);
     return NextResponse.json({ detail: `議程輸出失敗：${e.message || e}` }, { status: 502 });
   } finally {
     if (browser) await browser.close().catch(() => {});
