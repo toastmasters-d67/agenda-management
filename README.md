@@ -855,23 +855,10 @@ https://<你的網域>/api/mcp
 | `update_club` | `clubs:write` | 修改分會欄位與版型設定，只改有給的；`settings` 給 `null` 刪除。**限系統管理員**（與 `PUT /api/clubs/{id}` 同規則） |
 | `create_club` | `clubs:write` | 建立分會。限系統管理員 |
 | `set_club_image` | `clubs:write` | 更換 Logo、各 QR code、第二頁圖片。限系統管理員 |
-| `delete_post` | `posts:write` | 刪除系統裡的貼文（草稿）。**不會**動到已發布在社群上的貼文；已發布過的會先拒絕，要先 `unpublish_post`，或帶 `keep_published_online: true` 確認只刪紀錄 |
-| `get_published_post` | `posts:read` | 從平台讀回已發布貼文的目前內容與連結（IG 另有按讚、留言數） |
-| `update_published_post` | `publish` | 修改已發布貼文的文字並同步回系統的版本。**只有 Facebook**：Instagram、Threads 的 API 不能修改，只能下架後重發 |
-| `unpublish_post` | `publish` | 從指定平台刪除已發布的貼文（按讚、留言一起消失）。草稿保留，全部平台都下架後狀態從 `posted` 改回 `ready` |
 
 - **所有 scope 都公開宣告**（`scopes_supported` 與 401 挑戰都列出），所以客戶端會一起請求；但同意畫面上 `publish` 預設**不勾**，並標示「公開且無法收回」，要使用者自己勾。客戶端沒指定 scope 時給 `posts:read posts:write agendas:write ai:generate`。
   - `agendas:write`、`clubs:write` 是後來加的：在它之前授權的客戶端呼叫這些工具會收到 403 補授權挑戰。有些客戶端（例如 Codex）收到後不會自己帶使用者回同意畫面，重新加入伺服器也會沿用舊憑證——要在「設定 → 已授權的應用程式」撤銷舊授權，客戶端下次呼叫拿到 401 才會重新走授權。
 - **分會管理工具只開放系統管理員**，與網頁一致（分會管理頁、`/api/clubs` 寫入都限 `system_admin`）。能改的欄位是分會管理頁會編輯的那些：分會本身的欄位，加上各版型 manifest（`lib/agendaTemplates.js` 的 `settings`）宣告的設定。`clubs.settings` 裡的其他鍵（Meta／Threads app id）屬於其他畫面，不讀也不寫。刪除分會沒有開放給 MCP。
-- **草稿與已發布的貼文分開處理**：刪草稿不會下架、下架不會刪草稿，兩者都不會因為另一個動作順便發生。下架與修改已發布貼文是以分會身分公開動作，所以和發布一樣需要 `publish` scope。
-
-  | 平台 | 讀取 | 修改文字 | 刪除（下架） |
-  |------|------|----------|--------------|
-  | Facebook | ✅ | ✅（`message`；影片貼文是 `description`） | ✅ |
-  | Instagram | ✅ | ❌ API 不支援 | ✅ |
-  | Threads | ✅ | ❌ API 不支援 | ✅ 需要 `threads_delete` 權限 |
-
-  Threads 的 `threads_delete` 要先在 Meta 開發者後台為 App 開啟，再設 `THREADS_ENABLE_DELETE=1`，各分會**重新連接 Threads** 後才有效。沒開啟就預設不請求這個權限——向 Meta 請求 App 沒有的權限會讓整個 Threads 連接流程失敗。
 - **角色安排工具**讀寫的就是 `agendas.data`（角色安排頁本來就沒有獨立的儲存），角色 id 與規則和頁面相同；`assign_roles` 只收角色欄位與場次／主題，日期、地點請用 `update_agenda`。
   - 早先的做法是連宣告都不宣告 `publish`、`tools/list` 也藏起 `publish_post`，結果模型看不到工具就不會呼叫，客戶端也不會請求這個 scope，同意畫面根本沒機會問——等於永遠拿不到。
 - 請求的 scope 全都不認得時回 400（`openid`、`offline_access` 這類 OIDC 慣用 scope 除外，忽略即可）。
@@ -990,7 +977,6 @@ https://<你的網域>/api/mcp
 | `CREDENTIALS_SECRET_KEY` | 加密 AI 金鑰與 Meta App Secret 的主密鑰（`openssl rand -base64 32`）。**未設定時儲存金鑰會直接失敗**，不會以明文落地 |
 | `MS_CLIENT_ID` / `MS_CLIENT_SECRET` | Microsoft 登入用的 Entra App（見「Microsoft 帳號登入」）。**選填**：沒設就不顯示 Microsoft 按鈕 |
 | `MCP_TOKEN_SECRET` | 簽 MCP access token 的密鑰（`python -c "import secrets; print(secrets.token_urlsafe(48))"`）。**必須和 `JWT_SECRET` 不同**；正式站與預覽站建議各用一把。未設定時 MCP 與 OAuth 端點回 503，其他功能不受影響 |
-| `THREADS_ENABLE_DELETE` | 選填，設 `1` 時連接 Threads 會多請求 `threads_delete`（下架 Threads 貼文用）。**先在 Meta 後台為 App 開啟該權限再設**，否則 Threads 連接會失敗 |
 | `AGENDA_RENDER_URL` | 選填。`export_agenda` 呼叫議程輸出服務的網址（Next 那一側，例如本機 `http://localhost:3000`）。正式站不用設 |
 | `CHROME_EXECUTABLE_PATH` | 只有本機開發要設：本機 Chrome 執行檔路徑，給 `/svc/agenda-export` 用 |
 | `MCP_PUBLIC_ORIGIN` | 選填。寫死對外網址（例如 `https://agenda.example.com`），MCP 的 resource／issuer 就不再從 `X-Forwarded-Host` 推算。Vercel 上不用設 |
