@@ -37,7 +37,11 @@ const FORMATS = ['jpg', 'pdf'];
 // Creating the folder first leaves Chromium with no fonts.conf, and it dies
 // on its first navigation ("Navigating frame was detached").
 const FONT_DIR = '/tmp/fonts';
-const FONT_CSS = 'https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;700';
+// Noto Emoji (monochrome) covers the symbols the templates use, such as the
+// ⏱ in front of 學習路徑, which would otherwise also draw as a box.
+const FONT_CSS = 'https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;700&family=Noto+Emoji';
+// Bump when FONT_CSS changes, so a warm instance fetches the new set.
+const FONT_TAG = 'web2-';
 
 /** A /tmp/fonts without fonts.conf (made by an older build) blocks unpacking; clear it. */
 async function clearBrokenFontDir() {
@@ -53,13 +57,13 @@ async function ensureCjkFont() {
   const fs = await import('node:fs/promises');
   const path = await import('node:path');
   const have = await fs.readdir(FONT_DIR);
-  if (have.some((f) => f.startsWith('NotoSansTC'))) return;
+  if (have.some((f) => f.startsWith(FONT_TAG))) return;
   const css = await (await fetch(FONT_CSS, { headers: { 'User-Agent': 'curl/8' } })).text();
   const urls = [...css.matchAll(/url\((https:[^)]+\.ttf)\)/g)].map((m) => m[1]);
   if (!urls.length) throw new Error('無法取得中文字型');
   await Promise.all(urls.map(async (u, i) => {
     const buf = Buffer.from(await (await fetch(u)).arrayBuffer());
-    await fs.writeFile(path.join(FONT_DIR, `NotoSansTC-${i}.ttf`), buf);
+    await fs.writeFile(path.join(FONT_DIR, `${FONT_TAG}${i}.ttf`), buf);
   }));
 }
 
