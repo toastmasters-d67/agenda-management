@@ -3314,9 +3314,10 @@ _JOB_RUNNERS["publish"] = _run_publish_job
 #
 # The scopes exist to make one particular thing a user decision rather than a
 # line of code: publishing is public and cannot be taken back, so `publish` is
-# NOT in the default set and NOT in `scopes_supported`. A client that wants it
-# has to be challenged for it, which puts "allow this to post as the club" on
-# the consent screen where someone can refuse it.
+# offered on the consent screen but arrives UNTICKED — a person has to turn it
+# on by hand. It is advertised (scopes_supported, the 401 challenge) like the
+# others: a scope a client never hears of is one it never asks for, and then
+# the consent screen never gets to put the question at all.
 #
 # A scope never widens what a person may do. It narrows what a token may do on
 # their behalf — the role checks (`require_club_admin_or_above`, `_social_scope`)
@@ -3331,17 +3332,17 @@ MCP_REFRESH_TTL  = timedelta(days=60)
 MCP_CODE_TTL     = timedelta(minutes=5)
 
 MCP_SCOPES = {
-    "posts:read":  "讀取例會資料與貼文草稿",
-    "posts:write": "建立與修改貼文草稿",
-    "ai:generate": "用你的 AI 帳號產生文案與圖片（會消耗你的 API 額度）",
-    "publish":     "代表分會公開發文到 Facebook／Instagram／Threads",
+    "posts:read":    "讀取分會、例會議程與貼文，並匯出議程 PDF／JPG",
+    "posts:write":   "建立與修改貼文草稿、加入或移除貼文圖片",
+    "agendas:write": "建立與修改議程、安排角色（含從角色試算表帶入）",
+    "clubs:write":   "修改分會設定與圖片（名稱、版型、地點、QR code；限系統管理員）",
+    "ai:generate":   "用你的 AI 帳號產生文案與圖片（會消耗你的 API 額度）",
+    "publish":       "代表分會公開發文到 Facebook／Instagram／Threads",
 }
-# What a client gets without asking for more. `publish` is deliberately absent:
-# see the note above.
-MCP_DEFAULT_SCOPES = ("posts:read", "posts:write", "ai:generate")
-
-PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
-
+# What a client gets when it asks for nothing in particular. `publish` is
+# absent: it is only ever granted by someone ticking it.
+MCP_DEFAULT_SCOPES = ("posts:read", "posts:write", "agendas:write", "clubs:write",
+                      "ai:generate")
 
 def _public_origin(request: Request) -> str:
     """
@@ -3351,12 +3352,16 @@ def _public_origin(request: Request) -> str:
     resource URI has to match what the client sends in `resource`, and that is
     whatever host they typed — production, a preview deployment, or localhost.
 
-    PUBLIC_BASE_URL overrides that when the headers can't be trusted to say it:
-    on the Docker deployment the /svc proxy reaches us as http://api:8001, and
-    the app lives under a sub-path (https://host/club-management).
+    The forwarded headers are trustworthy on Vercel, which overwrites them.
+    Elsewhere PUBLIC_BASE_URL pins it and the headers are not consulted at
+    all: on the Docker deployment the /svc proxy reaches us as
+    http://api:8001, and the app lives under a sub-path
+    (https://host/club-management). MCP_PUBLIC_ORIGIN is an older name for
+    the same setting.
     """
-    if PUBLIC_BASE_URL:
-        return PUBLIC_BASE_URL
+    pinned = (os.getenv("PUBLIC_BASE_URL") or os.getenv("MCP_PUBLIC_ORIGIN") or "").rstrip("/")
+    if pinned:
+        return pinned
     host = request.headers.get("x-forwarded-host") or request.headers.get("host") or ""
     proto = request.headers.get("x-forwarded-proto") or request.url.scheme or "https"
     return f"{proto}://{host}"
@@ -3383,11 +3388,11 @@ def _mcp_secret() -> str:
 def _mint_access_token(username: str, client_id: str, scope: str,
                        resource: str, grant: str) -> tuple:
     """
-    `grant` is the hash of the refresh token this access token descends from.
-    It ties a self-contained JWT back to a row that can be revoked — without
-    it, revoking a grant would leave its access tokens working until expiry.
-    It is a hash of a random 256-bit value, so carrying it in a signed (not
-    encrypted) token reveals nothing usable.
+    `grant` is the `grant_id` of the authorization this access token descends
+    from. It ties a self-contained JWT back to a row that can be revoked —
+    without it, revoking a grant would leave its access tokens working until
+    expiry. It stays fixed while the refresh token under it rotates, and it is
+    not a credential: knowing it lets nobody mint or refresh anything.
     """
     now = datetime.now(timezone.utc)
     payload = {
@@ -3441,7 +3446,7 @@ def mcp_caller(request: Request) -> dict:
     """
     auth = request.headers.get("authorization") or ""
     if not auth.lower().startswith("bearer "):
-        raise _unauthorized(request, scope=" ".join(MCP_DEFAULT_SCOPES))
+        raise _unauthorized(request, scope=" ".join(MCP_SCOPES))
     claims = _verify_access_token(request, auth[7:].strip())
 
     # The grant has to still be live, checked on every call. This is what makes
@@ -3453,7 +3458,7 @@ def mcp_caller(request: Request) -> dict:
             cur.execute(
                 "SELECT u.username, u.role, u.club_id, u.status,"
                 " EXISTS (SELECT 1 FROM oauth_refresh_tokens t"
-                "         WHERE t.token_hash=%s AND t.username=u.username"
+                "         WHERE t.grant_id=%s AND t.username=u.username"
                 "           AND t.revoked_at IS NULL"
                 "           AND (t.expires_at IS NULL OR t.expires_at > NOW()))"
                 " FROM users u WHERE u.username=%s",
@@ -3464,18 +3469,30 @@ def mcp_caller(request: Request) -> dict:
 
     return {"username": row[0], "role": row[1], "club_id": row[2],
             "scopes": set((claims.get("scope") or "").split()),
-            "client_id": claims.get("client_id", "")}
+            "client_id": claims.get("client_id", ""),
+            "grant": claims.get("grant") or "",
+            # Tools that call back into this deployment (export_agenda) need
+            # to know where it is; handlers do not otherwise see the request.
+            "origin": _public_origin(request)}
 
 
 def require_scope(caller: dict, scope: str, request: Request):
-    """403 + a challenge naming exactly what is missing (RFC 6750 §3.1)."""
+    """
+    403 + a challenge for step-up authorization (RFC 6750 §3.1).
+
+    The challenge names what the token already has *plus* what is missing.
+    Clients re-authorize with exactly the scope in the challenge, so naming
+    only the missing one would trade the old token for one that can publish
+    but no longer read.
+    """
     if scope in caller["scopes"]:
         return
+    want = [s for s in MCP_SCOPES if s in caller["scopes"] or s == scope]
     raise HTTPException(
         status_code=403,
         detail=f"這個授權沒有包含「{MCP_SCOPES.get(scope, scope)}」",
         headers={"WWW-Authenticate":
-                 f'Bearer error="insufficient_scope", scope="{scope}", '
+                 f'Bearer error="insufficient_scope", scope="{" ".join(want)}", '
                  f'resource_metadata="{_prm_url(request)}"'},
     )
 
@@ -3488,14 +3505,14 @@ def protected_resource_metadata(request: Request):
     so this endpoint must stay unauthenticated, and middleware.js excludes
     /.well-known for that reason.
 
-    `scopes_supported` is the minimum for basic functionality, which is why
-    `publish` is not in it.
+    `scopes_supported` lists every scope, `publish` included — see the note
+    at the top of this section on why hiding it defeated its own purpose.
     """
     origin = _public_origin(request)
     return {
         "resource": f"{origin}/api/mcp",
         "authorization_servers": [origin],
-        "scopes_supported": list(MCP_DEFAULT_SCOPES),
+        "scopes_supported": list(MCP_SCOPES),
         "bearer_methods_supported": ["header"],
     }
 
@@ -3508,9 +3525,31 @@ def protected_resource_metadata(request: Request):
 
 _CIMD_MAX_BYTES = 64 * 1024
 _CIMD_TIMEOUT   = 8
-_PRIVATE_HOST_RE = re.compile(
-    r"^(localhost$|127\.|10\.|192\.168\.|169\.254\.|0\.|\[?::1\]?$|"
-    r"172\.(1[6-9]|2\d|3[01])\.)", re.I)
+
+
+def _host_is_internal(host: str) -> bool:
+    """
+    Whether any address `host` resolves to is one we must not fetch from.
+
+    Checked on the resolved addresses rather than the spelling, so a public
+    name pointing at 10.0.0.5 — or a decimal/IPv6 spelling of 127.0.0.1 — is
+    caught too. An unresolvable host counts as internal: refusing it costs
+    nothing, since the fetch would fail anyway.
+    """
+    import ipaddress
+    import socket
+    if not host or host.lower() == "localhost":
+        return True
+    try:
+        infos = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
+    except OSError:
+        return True
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0].split("%", 1)[0])
+        if (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+            return True
+    return False
 
 
 def _fetch_client_metadata(client_id: str) -> dict:
@@ -3519,10 +3558,9 @@ def _fetch_client_metadata(client_id: str) -> dict:
 
     This fetches a URL supplied by whoever started the authorization request,
     which is an SSRF primitive if left open. Hence: https only, a path
-    component required, obvious internal hosts refused, a byte cap, and a
-    timeout. A server on a private network should additionally keep this
-    egress behind an allow-list — the host check below is a floor, not a
-    guarantee.
+    component required, internal addresses refused after DNS resolution,
+    redirects not followed (a public URL answering 302 → 169.254.169.254 is
+    the classic way round a host check), a byte cap, and a timeout.
     """
     import urllib.error
     import urllib.parse
@@ -3535,8 +3573,15 @@ def _fetch_client_metadata(client_id: str) -> dict:
     if u.scheme != "https" or not u.netloc or u.path in ("", "/"):
         raise HTTPException(status_code=400,
                             detail="client_id 必須是帶路徑的 https 網址")
-    if _PRIVATE_HOST_RE.match(u.hostname or ""):
+    if _host_is_internal(u.hostname or ""):
         raise HTTPException(status_code=400, detail="client_id 指向內部位址")
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        # A CIMD document lives at the URL that is its own id (the client_id
+        # check below would reject a moved one anyway), so a redirect is never
+        # legitimate here — and following one would skip the host check.
+        def redirect_request(self, *a, **kw):
+            return None
 
     try:
         # A User-Agent is required in practice: Claude's document sits behind
@@ -3546,7 +3591,8 @@ def _fetch_client_metadata(client_id: str) -> dict:
             "Accept": "application/json",
             "User-Agent": "Mozilla/5.0 (compatible; entrepreneur-agenda-mcp/1.0)",
         })
-        with urllib.request.urlopen(req, timeout=_CIMD_TIMEOUT) as res:
+        opener = urllib.request.build_opener(_NoRedirect)
+        with opener.open(req, timeout=_CIMD_TIMEOUT) as res:
             raw = res.read(_CIMD_MAX_BYTES + 1)
     except urllib.error.HTTPError as e:
         raise HTTPException(status_code=400,
@@ -3606,6 +3652,33 @@ def _client_host(client_id: str) -> str:
         except HTTPException:
             return "MCP 客戶端"
     return _host_of(client_id)
+
+
+def _redirect_registered(uri: str, registered: list) -> bool:
+    """
+    Whether `uri` is one of the client's redirect URIs.
+
+    Exact match, except that a loopback http URI matches regardless of port
+    (RFC 8252 §7.3). A desktop or CLI client opens whatever port is free at
+    login time, so the port it registered with is rarely the one it is
+    listening on now — Codex's login fails without this. The loopback names
+    are also treated as one: clients register "localhost" and then listen on
+    127.0.0.1 (or the reverse), and either way the code never leaves the
+    machine the person is sitting at.
+    """
+    import urllib.parse
+    if uri in registered:
+        return True
+    u = urllib.parse.urlparse(uri)
+    if u.scheme != "http" or u.hostname not in ("localhost", "127.0.0.1", "::1"):
+        return False
+    for r in registered:
+        v = urllib.parse.urlparse(r) if isinstance(r, str) else None
+        if (v and v.scheme == "http"
+                and v.hostname in ("localhost", "127.0.0.1", "::1")
+                and v.path == u.path and v.query == u.query):
+            return True
+    return False
 
 
 def _dcr_redirect_ok(uri: str) -> bool:
@@ -3697,19 +3770,37 @@ def authorization_server_metadata(request: Request):
 def _check_authorize(request: Request, client_id: str, redirect_uri: str,
                      code_challenge: str, code_challenge_method: str,
                      resource: str, scope: str) -> tuple:
+    """Returns (client metadata, granted scopes, canonical resource)."""
     if code_challenge_method != "S256" or not code_challenge:
         raise HTTPException(status_code=400, detail="需要 PKCE（S256）")
-    if resource != _mcp_resource(request):
-        # RFC 8707: the token must be minted for the server the client named,
-        # and that has to be this one.
+    # RFC 8707: the token must be minted for the server the client named, and
+    # that has to be this one. A client that names none (several OAuth
+    # libraries predate resource indicators) gets this one — the only resource
+    # this server issues tokens for, so there is nothing to confuse it with.
+    resource = resource or _mcp_resource(request)
+    if resource.rstrip("/") != _mcp_resource(request):
         raise HTTPException(status_code=400, detail="resource 與本伺服器不符")
+    resource = _mcp_resource(request)
 
     meta = _fetch_client_metadata(client_id)
-    if redirect_uri not in meta["redirect_uris"]:
-        raise HTTPException(status_code=400, detail="redirect_uri 不在這個 client 的允許清單中")
+    if not _redirect_registered(redirect_uri, meta["redirect_uris"]):
+        # Both values are the client's own, public by nature, and the only way
+        # to tell which side has it wrong.
+        raise HTTPException(
+            status_code=400,
+            detail=f"redirect_uri 不在這個 client 的允許清單中（收到 {redirect_uri}，"
+                   f"允許 {'、'.join(map(str, meta['redirect_uris'][:5]))}）")
 
-    wanted = [x for x in (scope or "").split() if x in MCP_SCOPES]
-    return meta, (wanted or list(MCP_DEFAULT_SCOPES))
+    asked = (scope or "").split()
+    wanted = [x for x in asked if x in MCP_SCOPES]
+    # Generic OIDC-flavoured scopes some clients add by habit. Not ours, but
+    # not a reason to fail either; anything else unrecognised is.
+    harmless = {"openid", "profile", "email", "offline_access"}
+    if asked and not wanted and any(x not in harmless for x in asked):
+        raise HTTPException(status_code=400,
+                            detail="請求的 scope 都不是本伺服器提供的："
+                                   + " ".join(asked))
+    return meta, (wanted or list(MCP_DEFAULT_SCOPES)), resource
 
 
 class AuthorizeRequest(BaseModel):
@@ -3717,7 +3808,7 @@ class AuthorizeRequest(BaseModel):
     redirect_uri:          str
     code_challenge:        str
     code_challenge_method: str = "S256"
-    resource:              str
+    resource:              str = ""
     scope:                 str = ""
     state:                 str = ""
 
@@ -3725,13 +3816,13 @@ class AuthorizeRequest(BaseModel):
 @app.get("/api/oauth/authorize-info")
 def authorize_info(request: Request,
                    client_id: str = Query(...), redirect_uri: str = Query(...),
-                   code_challenge: str = Query(...), resource: str = Query(...),
+                   code_challenge: str = Query(...), resource: str = Query(default=""),
                    code_challenge_method: str = Query(default="S256"),
                    scope: str = Query(default=""),
                    user: dict = Depends(get_current_user)):
     """What the consent screen needs to show. Validates before anything is drawn."""
-    meta, wanted = _check_authorize(request, client_id, redirect_uri, code_challenge,
-                                    code_challenge_method, resource, scope)
+    meta, wanted, _ = _check_authorize(request, client_id, redirect_uri, code_challenge,
+                                       code_challenge_method, resource, scope)
     return {
         "clientName": meta["client_name"],
         "clientUri":  meta.get("client_uri", ""),
@@ -3754,9 +3845,9 @@ def authorize_grant(request: Request, req: AuthorizeRequest,
     Only the hash is stored, and the redirect is returned rather than issued
     as a 302 so the consent page can navigate itself.
     """
-    meta, wanted = _check_authorize(request, req.client_id, req.redirect_uri,
-                                    req.code_challenge, req.code_challenge_method,
-                                    req.resource, req.scope)
+    meta, wanted, resource = _check_authorize(
+        request, req.client_id, req.redirect_uri, req.code_challenge,
+        req.code_challenge_method, req.resource, req.scope)
     import hashlib
     import urllib.parse
     code = uuid.uuid4().hex + uuid.uuid4().hex
@@ -3769,7 +3860,7 @@ def authorize_grant(request: Request, req: AuthorizeRequest,
                 " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (code_hash, req.client_id, str(meta["client_name"])[:200],
                  user["username"], req.redirect_uri,
-                 req.code_challenge, req.resource, " ".join(wanted),
+                 req.code_challenge, resource, " ".join(wanted),
                  datetime.now(timezone.utc) + MCP_CODE_TTL),
             )
     params = {"code": code, "iss": _public_origin(request)}
@@ -3789,19 +3880,26 @@ def _token_error(code: str, desc: str):
 
 def _issue_refresh(username: str, client_id: str, client_name: str, scope: str,
                    resource: str) -> tuple:
-    """Returns (token, token_hash); the hash doubles as the grant id."""
+    """
+    Start a grant. Returns (refresh_token, grant_id).
+
+    The grant_id is fixed for the grant's life; the refresh token under it is
+    replaced on every use (see the refresh branch of oauth_token).
+    """
     import hashlib
     token = uuid.uuid4().hex + uuid.uuid4().hex
     token_hash = hashlib.sha256(token.encode()).hexdigest()
+    grant_id = uuid.uuid4().hex
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO oauth_refresh_tokens (token_hash, client_id, client_name,"
-                " username, scope, resource, expires_at) VALUES (%s,%s,%s,%s,%s,%s,%s)",
-                (token_hash, client_id, client_name, username,
+                "INSERT INTO oauth_refresh_tokens (token_hash, grant_id, client_id,"
+                " client_name, username, scope, resource, expires_at)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                (token_hash, grant_id, client_id, client_name, username,
                  scope, resource, datetime.now(timezone.utc) + MCP_REFRESH_TTL),
             )
-    return token, token_hash
+    return token, grant_id
 
 
 @app.post("/api/oauth/token")
@@ -3851,32 +3949,42 @@ async def oauth_token(request: Request):
             return _token_error("invalid_grant", "PKCE 驗證失敗")
 
         username, resource, scope, client_name = row[1], row[4], row[5], row[7]
-        grant_id = None           # minted below, after the account check
+        grant_id = refresh = None   # minted below, after the account check
 
     elif grant == "refresh_token":
         rt = form.get("refresh_token") or ""
         client_id = form.get("client_id") or ""
-        grant_id = hashlib.sha256(rt.encode()).hexdigest()
+        old_hash = hashlib.sha256(rt.encode()).hexdigest()
+        # Rotation (OAuth 2.1 §4.3.1, required for public clients): the token
+        # presented is retired and a new one takes its place. Done as a single
+        # UPDATE on the old hash so two concurrent uses cannot both succeed.
+        # The expiry slides with it — a grant in regular use stays alive; one
+        # left idle for MCP_REFRESH_TTL does not.
+        refresh = uuid.uuid4().hex + uuid.uuid4().hex
         with get_db() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT client_id, username, scope, resource, expires_at, revoked_at"
-                    " FROM oauth_refresh_tokens WHERE token_hash=%s",
-                    (grant_id,),
+                    "UPDATE oauth_refresh_tokens SET token_hash=%s, prev_token_hash=%s,"
+                    " last_used_at=NOW(), expires_at=%s"
+                    " WHERE token_hash=%s AND revoked_at IS NULL"
+                    " AND (expires_at IS NULL OR expires_at > NOW())"
+                    " AND (%s='' OR client_id=%s)"
+                    " RETURNING grant_id, client_id, username, scope, resource",
+                    (hashlib.sha256(refresh.encode()).hexdigest(), old_hash,
+                     datetime.now(timezone.utc) + MCP_REFRESH_TTL,
+                     old_hash, client_id, client_id),
                 )
                 row = cur.fetchone()
-        if row is None or row[5] is not None:
-            return _token_error("invalid_grant", "refresh token 無效或已撤銷")
-        if row[4] and row[4] < datetime.now(timezone.utc):
-            return _token_error("invalid_grant", "refresh token 已過期")
-        if client_id and not hmac.compare_digest(row[0], client_id):
-            return _token_error("invalid_grant", "client_id 不符")
-        username, scope, resource = row[1], row[2], row[3]
-        client_id = row[0]
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("UPDATE oauth_refresh_tokens SET last_used_at=NOW()"
-                            " WHERE token_hash=%s", (grant_id,))
+                if row is None:
+                    # A token that was already rotated away, presented again:
+                    # someone besides the client holds it. Which copy is the
+                    # thief's cannot be told, so the whole grant goes.
+                    cur.execute(
+                        "UPDATE oauth_refresh_tokens SET revoked_at=NOW()"
+                        " WHERE prev_token_hash=%s AND revoked_at IS NULL", (old_hash,))
+        if row is None:
+            return _token_error("invalid_grant", "refresh token 無效、已過期或已撤銷")
+        grant_id, client_id, username, scope, resource = row
     else:
         return _token_error("unsupported_grant_type", "只支援 authorization_code 與 refresh_token")
 
@@ -3888,7 +3996,6 @@ async def oauth_token(request: Request):
     if not u or u[0] == "pending":
         return _token_error("invalid_grant", "帳號已停用")
 
-    refresh = None
     if grant == "authorization_code":
         refresh, grant_id = _issue_refresh(username, client_id, client_name,
                                            scope, resource)
@@ -3908,7 +4015,7 @@ def _revoke_grant(grant_id: str, username: Optional[str] = None) -> bool:
         with conn.cursor() as cur:
             cur.execute(
                 "UPDATE oauth_refresh_tokens SET revoked_at=NOW()"
-                " WHERE token_hash=%s AND revoked_at IS NULL"
+                " WHERE grant_id=%s AND revoked_at IS NULL"
                 " AND (%s::text IS NULL OR username=%s)",
                 (grant_id, username, username))
             return cur.rowcount > 0
@@ -3931,12 +4038,13 @@ async def oauth_revoke(request: Request):
     token = form.get("token") or ""
     client_id = form.get("client_id") or ""
 
-    grant_id = hashlib.sha256(token.encode()).hexdigest()
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT client_id FROM oauth_refresh_tokens WHERE token_hash=%s",
-                        (grant_id,))
+            cur.execute("SELECT client_id, grant_id FROM oauth_refresh_tokens"
+                        " WHERE token_hash=%s",
+                        (hashlib.sha256(token.encode()).hexdigest(),))
             row = cur.fetchone()
+    grant_id = row[1] if row else ""
     if row is None:
         try:
             claims = jwt.decode(token, _mcp_secret(), algorithms=[JWT_ALGORITHM],
@@ -3964,7 +4072,7 @@ def list_my_grants(user: dict = Depends(get_current_user)):
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT token_hash, client_id, client_name, scope, created_at,"
+                "SELECT grant_id, client_id, client_name, scope, created_at,"
                 " last_used_at, expires_at FROM oauth_refresh_tokens"
                 " WHERE username=%s AND revoked_at IS NULL"
                 " AND (expires_at IS NULL OR expires_at > NOW())"
@@ -4066,6 +4174,33 @@ def _officer_only(caller: dict):
         raise HTTPException(status_code=403, detail="需要分會管理員以上權限")
 
 
+def _club_label(name, name_zh, name_en):
+    """Every name a person might call the club by, so a model can match any."""
+    names = [n for n in (name_zh, name, name_en) if n]
+    return " / ".join(dict.fromkeys(names)) or "（未命名）"
+
+
+def _club_labels(cur) -> dict:
+    cur.execute("SELECT id, name, name_zh, name_en FROM clubs")
+    return {r[0]: _club_label(r[1], r[2], r[3]) for r in cur.fetchall()}
+
+
+def _tool_list_clubs(caller, args):
+    # A system admin sees every club; anyone else sees only their own, which
+    # is the only one _social_scope would let them name anyway.
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            labels = _club_labels(cur)
+    if caller["role"] != "system_admin":
+        labels = {k: v for k, v in labels.items() if k == caller["club_id"]}
+    items = [{"clubId": k, "name": labels[k]} for k in sorted(labels)]
+    lines = [f"club_id={i['clubId']} · {i['name']}" for i in items] or ["（沒有分會）"]
+    if caller["role"] == "system_admin":
+        lines.append("\n你是系統管理員：其他工具不帶 club_id 時會混合所有分會，"
+                     "請帶上要操作的分會的 club_id。")
+    return _tool_text("\n".join(lines), {"clubs": items})
+
+
 def _tool_list_meetings(caller, args):
     cid = _social_scope(caller, args.get("club_id"))
     limit = min(int(args.get("limit") or 10), 50)
@@ -4073,14 +4208,19 @@ def _tool_list_meetings(caller, args):
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT id, data->>'meetingDate', data->>'meetingNo',"
-                " data->>'meetingTheme' FROM agendas"
+                " data->>'meetingTheme', club_id FROM agendas"
                 " WHERE (%s::int IS NULL OR club_id=%s)"
                 " ORDER BY data->>'meetingDate' DESC NULLS LAST LIMIT %s",
                 (cid, cid, limit))
             rows = cur.fetchall()
+            labels = _club_labels(cur)
+    # The club rides on every row: for a system admin with no club_id this
+    # list spans clubs, and unlabelled it reads as if it were all one club.
     items = [{"agendaId": r[0], "date": r[1] or "", "meetingNo": r[2] or "",
-              "theme": r[3] or ""} for r in rows]
-    lines = [f"{i['date']} 第{i['meetingNo']}次 · {i['theme']}（agendaId={i['agendaId']}）"
+              "theme": r[3] or "", "clubId": r[4], "club": labels.get(r[4], "")}
+             for r in rows]
+    lines = [f"{i['date']} 第{i['meetingNo']}次 · {i['theme']}"
+             f"（agendaId={i['agendaId']}，{i['club']}，club_id={i['clubId']}）"
              for i in items] or ["（沒有例會）"]
     return _tool_text("\n".join(lines), {"meetings": items})
 
@@ -4105,13 +4245,15 @@ def _tool_list_posts(caller, args):
                         " WHERE (%s::int IS NULL OR club_id=%s)"
                         " ORDER BY created_at DESC LIMIT 50", (cid, cid))
             rows = [_social_row(r) for r in cur.fetchall()]
+            labels = _club_labels(cur)
     items = [{"id": r["id"], "title": r["title"], "kind": r["kind"],
               "status": r["status"], "agendaId": r["agendaId"],
+              "clubId": r["clubId"], "club": labels.get(r["clubId"], ""),
               "images": len(r["images"]), "published": sorted(r["published"])}
              for r in rows]
     lines = [f"#{i['id']} [{i['kind']}/{i['status']}] {i['title'] or '(無標題)'}"
-             f" · 圖 {i['images']}" + (f" · 已發布 {'、'.join(i['published'])}"
-                                       if i["published"] else "")
+             f" · {i['club']} · 圖 {i['images']}"
+             + (f" · 已發布 {'、'.join(i['published'])}" if i["published"] else "")
              for i in items] or ["（沒有貼文）"]
     return _tool_text("\n".join(lines), {"posts": items})
 
@@ -4127,14 +4269,17 @@ def _tool_create_post(caller, args):
     _officer_only(caller)
     cid = _social_scope(caller, args.get("club_id"))
     kind = args.get("kind") if args.get("kind") in _POST_KINDS else "promo"
+    # One empty slot per platform, the shape the browser creates a post with
+    # (app/social/page.js). Code downstream fills slots that exist.
+    variants = {p: {"text": "", "enabled": True} for p in SOCIAL_PLATFORMS}
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO social_posts (club_id, agenda_id, kind, title, status,"
-                " body, variants, images) VALUES (%s,%s,%s,%s,'draft',%s,'{}'::jsonb,"
+                " body, variants, images) VALUES (%s,%s,%s,%s,'draft',%s,%s::jsonb,"
                 "'[]'::jsonb) RETURNING id",
                 (cid, args.get("agenda_id"), kind, (args.get("title") or "")[:200],
-                 args.get("body") or ""))
+                 args.get("body") or "", json.dumps(variants)))
             new_id = cur.fetchone()[0]
     return _tool_text(f"已建立草稿 #{new_id}（{kind}）", {"postId": new_id, "kind": kind})
 
@@ -4150,14 +4295,18 @@ def _tool_update_post(caller, args):
                 if k in SOCIAL_PLATFORMS:
                     variants[k] = {"text": v if isinstance(v, str) else v.get("text", ""),
                                    "enabled": True}
+            # A key sent as null means "not changing it", same as leaving it
+            # out — models send nulls for optional fields routinely.
+            def given(k, current):
+                return current if args.get(k) is None else args[k]
             cur.execute(
                 "UPDATE social_posts SET title=%s, body=%s, kind=%s, status=%s,"
                 " agenda_id=%s, variants=%s::jsonb, updated_at=NOW() WHERE id=%s",
-                (args.get("title", row["title"])[:200],
-                 args.get("body", row["body"]),
+                (str(given("title", row["title"]) or "")[:200],
+                 str(given("body", row["body"]) or ""),
                  args.get("kind") if args.get("kind") in _POST_KINDS else row["kind"],
                  args.get("status") if args.get("status") in _STATUSES else row["status"],
-                 args.get("agenda_id", row["agendaId"]),
+                 given("agenda_id", row["agendaId"]),
                  json.dumps(variants), post_id))
     return _tool_text(f"已更新貼文 #{post_id}", {"postId": post_id})
 
@@ -4179,8 +4328,11 @@ def _tool_generate_copy(caller, args):
     with get_db() as conn:
         with conn.cursor() as cur:
             variants = row["variants"]
+            # Every platform that came back is kept, slot or no slot — a post
+            # whose variants are missing a platform would otherwise drop that
+            # platform's copy and quietly publish the generic body instead.
             for k, v in (out.get("variants") or {}).items():
-                if k in variants:
+                if k in SOCIAL_PLATFORMS:
                     variants[k] = {"text": v.get("text", ""),
                                    "enabled": v.get("enabled", True)}
             cur.execute("UPDATE social_posts SET title=COALESCE(NULLIF(title,''),%s),"
@@ -4204,26 +4356,1291 @@ def _tool_publish_post(caller, args):
         with conn.cursor() as cur:
             row = _social_row(_load_social_post(cur, post_id, caller))
     cid = _social_scope(caller, row["clubId"])
+
+    # A model retries; a person says "post it again" meaning the one that
+    # failed. Neither should put a second public copy on a platform that
+    # already has one, so those are skipped unless asked for by name.
+    done = [p for p in platforms if p in row["published"]]
+    if done and not args.get("republish"):
+        platforms = [p for p in platforms if p not in done]
+        if not platforms:
+            return _tool_text(
+                "這則貼文已經發布到 " + "、".join(done) + "，沒有重複發布。"
+                "若確定要再發一次（會出現第二則公開貼文），請帶 republish: true。",
+                {"skipped": done}, is_error=True)
     out = _run_publish_job(caller["username"], cid,
                            {"post_id": post_id, "platforms": platforms})
     results = out.get("results", {})
-    lines = [f"{p}: " + ("已發布 " + (r.get("url") or "") if r.get("ok")
+    if done and not args.get("republish"):
+        results.update({p: {"ok": True, "skipped": True,
+                            "url": (row["published"].get(p) or {}).get("url", "")}
+                        for p in done})
+    lines = [f"{p}: " + ("先前已發布，略過 " + (r.get("url") or "") if r.get("skipped")
+                         else "已發布 " + (r.get("url") or "") if r.get("ok")
                          else "失敗 — " + (r.get("error") or ""))
              for p, r in results.items()]
     return _tool_text("\n".join(lines), {"results": results},
                       is_error=not any(r.get("ok") for r in results.values()))
 
 
+# ------------------------------------------------------------------ agendas
+# The schema the editor writes (app/agenda/page.js collectData) and the roles
+# matrix reads and writes (app/roles/page.js). A tool sets only the fields it
+# is given and leaves the rest of `data` alone, so whatever else the editor
+# stores — signals, time overrides, theme image — survives an MCP edit.
+
+_AGENDA_TEXT_FIELDS = {
+    "meetingDate":         "例會日期，YYYY-MM-DD",
+    "meetingNo":           "場次編號",
+    "meetingTheme":        "例會主題",
+    "themeQuestion":       "主題題目（Chill Hi High 版型）",
+    "timeRange":           "例會時間，例如 19:10 ~ 21:00",
+    "venueInfo":           "地點，可多行",
+    "receptionHost":       "報到接待",
+    "callingToOrder":      "宣布例會開始",
+    "welcomeTME":          "會長致歡迎詞",
+    "tme":                 "總主持人",
+    "timer":               "計時員",
+    "timerAssistant":      "計時員幫手（Chill Hi High 版型）",
+    "ahCounter":           "贅語記錄員",
+    "boardWriter":         "板書（Chill Hi High 版型）",
+    "photographer":        "攝影（Chill Hi High 版型）",
+    "voteCounter":         "計票員（China 版型）",
+    "tableTopicsMaster":   "即席問答主持人",
+    "tableTopicsQuestion": "即席問答題目",
+    "wordOfTheDay":        "每日一字（China 版型）",
+    "quizHost":            "問答遊戲主持（China 版型）",
+    "generalEvaluator":    "總講評",
+    "langEvaluator":       "語言講評",
+    "awardsPresenter":     "贈感謝狀",
+    "sharingFeedback":     "會後分享 & 來賓回饋",
+}
+_SPEECH_KEYS = ("speaker", "title", "duration", "speechLang",
+                "pathwayCode", "pathwayLevel", "pathwayProject")
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _blank_speech() -> dict:
+    """The shape app/agenda/page.js and app/roles/page.js both create."""
+    return {"title": "", "speaker": "", "duration": "5'-7'", "speechLang": "en",
+            "pathwayCode": "", "pathwayLevel": "", "pathwayProject": ""}
+
+
+def _merge_slots(current, given, blank):
+    """Index-wise merge: an entry given as null leaves that slot as it was."""
+    out = list(current) if isinstance(current, list) else []
+    for i, v in enumerate(given):
+        while len(out) <= i:
+            out.append(blank())
+        if v is not None:
+            out[i] = v
+    return out
+
+
+def _apply_agenda_fields(data: dict, fields: dict) -> list:
+    """Merge MCP-supplied fields into `data`. Returns the keys it changed."""
+    lists = ("speeches", "evaluators", "evalEvaluators", "varietySession", "lang")
+    unknown = [k for k in fields if k not in _AGENDA_TEXT_FIELDS and k not in lists]
+    if unknown:
+        raise HTTPException(status_code=400, detail="不認得的議程欄位：" + "、".join(unknown))
+
+    touched = []
+    for k, v in fields.items():
+        if v is None:
+            continue
+        if k in _AGENDA_TEXT_FIELDS:
+            v = str(v)
+            if k == "meetingDate" and not _DATE_RE.match(v):
+                raise HTTPException(status_code=400, detail="meetingDate 格式要是 YYYY-MM-DD")
+            data[k] = v
+        elif k == "lang":
+            if v not in ("zh", "en"):
+                raise HTTPException(status_code=400, detail="lang 只能是 zh 或 en")
+            data[k] = v
+        elif k == "speeches":
+            if not isinstance(v, list):
+                raise HTTPException(status_code=400, detail="speeches 要是陣列")
+            cur = data.get("speeches") if isinstance(data.get("speeches"), list) else []
+            merged = _merge_slots(cur, [None] * len(v), _blank_speech)
+            for i, item in enumerate(v):
+                if item is None:
+                    continue
+                if not isinstance(item, dict):
+                    raise HTTPException(status_code=400, detail="speeches 的每一項要是物件")
+                for sk, sv in item.items():
+                    if sk in _SPEECH_KEYS and sv is not None:
+                        merged[i][sk] = str(sv)
+            data["speeches"] = merged
+        elif k in ("evaluators", "evalEvaluators"):
+            if not isinstance(v, list):
+                raise HTTPException(status_code=400, detail=f"{k} 要是陣列")
+            data[k] = _merge_slots(data.get(k), [None if x is None else str(x) for x in v],
+                                   lambda: "")
+        elif k == "varietySession":
+            if not isinstance(v, dict):
+                raise HTTPException(status_code=400, detail="varietySession 要是物件")
+            vs = dict(data.get("varietySession") or {"enabled": False, "duration": 15, "host": ""})
+            if v.get("enabled") is not None:
+                vs["enabled"] = bool(v["enabled"])
+            if v.get("duration") is not None:
+                vs["duration"] = int(v["duration"])
+            if v.get("host") is not None:
+                vs["host"] = str(v["host"])
+            data[k] = vs
+        touched.append(k)
+    return touched
+
+
+def _trim_slots(data: dict, args: dict) -> list:
+    """`speech_count` / `evaluator_count`: the one way to remove a slot."""
+    touched = []
+    for arg, key, blank in (("speech_count", "speeches", _blank_speech),
+                            ("evaluator_count", "evaluators", lambda: "")):
+        n = args.get(arg)
+        if n is None:
+            continue
+        n = max(0, min(int(n), 10))
+        cur = data.get(key) if isinstance(data.get(key), list) else []
+        data[key] = (cur + [blank() for _ in range(n)])[:n]
+        touched.append(key)
+    return touched
+
+
+# --- the club's Google Sheet role plan --------------------------------------
+# A port of lib/rolesSheet.js + the import half of app/roles/page.js, so an
+# MCP import lands exactly what the 角色 page's 匯入 would. Kept as a port
+# rather than shared code because the two run in different languages; the
+# tables below are copied verbatim and must change together with those files.
+
+_SHEET_DATE_ROW = "會議時間"
+_SHEET_PERSON_ROWS = {
+    "總主持人": "tme", "計時員": "timer", "計時員幫手": "timerAssistant",
+    "贅字/笑聲記錄員": "ahCounter", "白板記錄員": "boardWriter", "攝影師": "photographer",
+    "暖場活動主持人": "varietyHost", "即席問答主持人": "tableTopicsMaster",
+    "總講評員": "generalEvaluator", "語言/幽默講評員": "langEvaluator",
+    "講評員講評": "evalEvaluator1",
+}
+_SHEET_META_ROWS = {"會議編號": "meetingNo", "會議主題": "meetingTheme", "主題題目": "themeQuestion"}
+_SHEET_IGNORED_ROWS = {"特別單元", "無法參加的成員"}
+_SHEET_INDEXED_ROWS = [
+    (re.compile(r"^演講者\s*(\d+)$"),     "speech{}",          True),
+    (re.compile(r"^個別講評員\s*(\d+)$"), "evaluator{}",       True),
+    (re.compile(r"^講評員講評\s*(\d+)$"), "evalEvaluator{}",   True),
+    (re.compile(r"^標題\s*(\d+)$"),       "speech{}_title",    False),
+    (re.compile(r"^單元號\s*(\d+)$"),     "speech{}_pathway",  False),
+    (re.compile(r"^單元\s*(\d+)$"),       "speech{}_project",  False),
+]
+_SHEET_BLANKS = {"na", "n/a", "-", "—", "–", "tbd", "待定", "未定", "?", "？"}
+# Roles only some templates have (ROLE_GROUPS / META_FIELDS `templates`). On
+# any other template the 角色 page locks the row, and the import skips it.
+_ROLE_TEMPLATES = {
+    "callingToOrder": {"standard", "compact", "entrepreneur", "china"},
+    "timerAssistant": {"chillhihigh"}, "boardWriter": {"chillhihigh"},
+    "photographer": {"chillhihigh"}, "voteCounter": {"china"},
+    "varietyHost": {"standard", "compact", "entrepreneur", "chillhihigh"},
+    "wordOfTheDay": {"china"}, "quizHost": {"china"},
+}
+_SPEECH_SUBFIELDS = {"title": "title", "pwcode": "pathwayCode",
+                     "pwlevel": "pathwayLevel", "project": "pathwayProject"}
+_SLOT_RE = re.compile(r"^(speech|evaluator|evalEvaluator)(\d+)(?:_(title|pwcode|pwlevel|project))?$")
+
+
+def _sheet_clean(v) -> str:
+    return re.sub(r"\s+", " ", str(v or "")).strip()
+
+
+def _sheet_iso_date(raw: str) -> str:
+    m = re.match(r"^(\d{4})[/.\-](\d{1,2})[/.\-](\d{1,2})$", _sheet_clean(raw))
+    return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}" if m else ""
+
+
+def _sheet_is_person(rid: str) -> bool:
+    return rid not in _SHEET_META_ROWS.values() and \
+        not re.search(r"_(title|pwcode|pwlevel|project)$", rid)
+
+
+def _parse_roles_sheet(csv_text: str, pathway_codes: set) -> dict:
+    """CSV → {iso date: {role id: value}}, as parseRolesSheet does."""
+    import csv
+    import io
+    grid = list(csv.reader(io.StringIO(csv_text.lstrip("﻿"))))
+    date_row = next((r for r in grid if r and _sheet_clean(r[0]) == _SHEET_DATE_ROW), None)
+    if date_row is None:
+        raise HTTPException(status_code=400,
+                            detail=f"試算表找不到「{_SHEET_DATE_ROW}」這一列，請確認分頁與欄位格式")
+    cols = {c: _sheet_iso_date(v) for c, v in enumerate(date_row) if c and _sheet_iso_date(v)}
+    out = {d: {} for d in cols.values()}
+
+    for row in grid:
+        label = _sheet_clean(row[0]) if row else ""
+        if not label or label == _SHEET_DATE_ROW or label in _SHEET_IGNORED_ROWS:
+            continue
+        rid = _SHEET_PERSON_ROWS.get(label) or _SHEET_META_ROWS.get(label)
+        person = _sheet_is_person(rid) if rid else False
+        if not rid:
+            for rx, fmt, is_person in _SHEET_INDEXED_ROWS:
+                m = rx.match(label)
+                if m:
+                    rid, person = fmt.format(m.group(1)), is_person
+                    break
+        if not rid:
+            continue
+        for c, date in cols.items():
+            raw = _sheet_clean(row[c]) if c < len(row) else ""
+            if not raw or (person and raw.lower() in _SHEET_BLANKS):
+                continue
+            if rid.endswith("_pathway"):
+                # One cell (`PM 4-1`) feeds two fields, as splitPathway does.
+                m = re.match(r"^([A-Za-z]{2,4})\b[\s-]*(.*)$", raw)
+                code, level = ("", raw)
+                if m and m.group(1).upper() in pathway_codes:
+                    code, level = m.group(1).upper(), _sheet_clean(m.group(2))
+                base = rid[: -len("_pathway")]
+                if code:
+                    out[date][f"{base}_pwcode"] = code
+                if level:
+                    out[date][f"{base}_pwlevel"] = level
+            else:
+                out[date][rid] = raw
+    return out
+
+
+def _role_get(data: dict, rid: str) -> str:
+    m = _SLOT_RE.match(rid)
+    if m:
+        kind, idx, sub = m.group(1), int(m.group(2)) - 1, m.group(3)
+        if kind == "speech":
+            sp = (data.get("speeches") or [])[idx:idx + 1]
+            return (sp[0] or {}).get(_SPEECH_SUBFIELDS[sub] if sub else "speaker", "") if sp else ""
+        lst = data.get(kind + "s") or []
+        return lst[idx] if idx < len(lst) else ""
+    if rid == "varietyHost":
+        return (data.get("varietySession") or {}).get("host", "")
+    return data.get(rid) or ""
+
+
+def _role_set(data: dict, rid: str, value: str):
+    """roleSet in app/roles/page.js — including its slot growth."""
+    m = _SLOT_RE.match(rid)
+    if m:
+        kind, idx, sub = m.group(1), int(m.group(2)) - 1, m.group(3)
+        if kind == "speech":
+            data["speeches"] = _merge_slots(data.get("speeches"), [None] * (idx + 1), _blank_speech)
+            data["speeches"][idx][_SPEECH_SUBFIELDS[sub] if sub else "speaker"] = value
+        else:
+            key = kind + "s"
+            data[key] = _merge_slots(data.get(key), [None] * (idx + 1), lambda: "")
+            data[key][idx] = value
+    elif rid == "varietyHost":
+        vs = dict(data.get("varietySession") or {"enabled": False, "duration": 15, "host": ""})
+        vs["host"] = value
+        if value:
+            vs["enabled"] = True
+        data["varietySession"] = vs
+    else:
+        data[rid] = value
+
+
+def _role_label(rid: str) -> str:
+    """`tme` → 總主持人, `speech2_title` → 第 2 篇演講的講題 — for messages."""
+    m = _SLOT_RE.match(rid)
+    if m:
+        noun = {"speech": "演講者", "evaluator": "個別講評員", "evalEvaluator": "講評員講評"}[m.group(1)]
+        sub = {"title": "講題", "pwcode": "學習路徑", "pwlevel": "等級", "project": "專案"}
+        return f"{noun} #{m.group(2)}" + (f" {sub[m.group(3)]}" if m.group(3) else "")
+    if rid == "varietyHost":
+        return "多元單元主持人"
+    return _AGENDA_TEXT_FIELDS.get(rid, rid).split("，")[0].split("（")[0]
+
+
+def _resolve_member(raw: str, roster, lang: str):
+    """
+    resolveMemberName in lib/rolesSheet.js: a name in any of the forms people
+    write it (`Leah Kao 高莉雅`, `高莉雅`, `Leah Kao, DTM`) → the roster's
+    canonical `Name, LEVEL` in the agenda's language. Returns (value, matched);
+    a name not on the roster — a guest — is kept as written.
+    """
+    v = _sheet_clean(raw)
+    key = v.lower()
+    eq = lambda s: _sheet_clean(s).lower() == key
+    for en, zh, level in roster:
+        if (eq(en) or eq(zh) or eq(f"{en} {zh}") or eq(f"{zh} {en}")
+                or (level and (eq(f"{en}, {level}") or eq(f"{zh}, {level}")))):
+            name = (zh if lang == "zh" else en) or en or zh or ""
+            return (f"{name}, {level}" if level else name), True
+    return v, False
+
+
+def _club_role_context(club_id: int) -> dict:
+    """What placing a role on this club's agendas depends on."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT code FROM pathways")
+            codes = {r[0].upper() for r in cur.fetchall()}
+            cur.execute("SELECT template_key FROM clubs WHERE id=%s", (club_id,))
+            tmpl = ((cur.fetchone() or [None])[0]) or "compact"
+            cur.execute("SELECT name_en, name_zh, level FROM users WHERE club_id=%s", (club_id,))
+            roster = cur.fetchall()
+    return {"codes": codes, "template": tmpl, "roster": roster}
+
+
+def _apply_role_values(data: dict, values: dict, ctx: dict, overwrite: bool) -> dict:
+    """
+    Put {role id: value} onto one agenda's data, the way the 角色 page does:
+    roles the club's template lacks are skipped, person cells are resolved
+    against the roster, and — without `overwrite` — a cell already holding a
+    different value is left alone and reported. That last rule is the
+    distinction the page's import preview draws between filling a blank and
+    undoing someone's edit.
+    """
+    lang = "zh" if data.get("lang") == "zh" else "en"
+    out = {"applied": 0, "kept": [], "unmatched": [], "locked": []}
+    for rid, raw in values.items():
+        allow = _ROLE_TEMPLATES.get(rid)
+        if allow and ctx["template"] not in allow:
+            out["locked"].append(_role_label(rid))
+            continue
+        value = str(raw or "")
+        if value and _sheet_is_person(rid):
+            value, hit = _resolve_member(value, ctx["roster"], lang)
+            if not hit:
+                out["unmatched"].append(value)
+        before = str(_role_get(data, rid) or "")
+        if before == value:
+            continue
+        if before and not overwrite:
+            out["kept"].append(f"{_role_label(rid)}：保留「{before}」（新的是「{value}」）")
+            continue
+        _role_set(data, rid, value)
+        out["applied"] += 1
+    return out
+
+
+def _role_report(r: dict, what: str, overwrite_hint: str) -> list:
+    lines = [f"{what} {r['applied']} 個欄位"]
+    if r["kept"]:
+        lines.append(f"已有內容、沒有覆蓋（要覆蓋請帶 {overwrite_hint}: true）：\n  "
+                     + "\n  ".join(r["kept"]))
+    if r["unmatched"]:
+        lines.append("不在會員名單、照原文填入：" + "、".join(dict.fromkeys(r["unmatched"])))
+    if r["locked"]:
+        lines.append("這個分會的版型沒有、略過：" + "、".join(dict.fromkeys(r["locked"])))
+    return lines
+
+
+def _sheet_values(caller: dict, club_id: int, ctx: dict) -> dict:
+    """The club's role sheet as {iso date: {role id: value}}."""
+    csv_text = fetch_roles_sheet(club_id, caller)["csv"]    # raises with the reason
+    return _parse_roles_sheet(csv_text, ctx["codes"])
+
+
+def _import_sheet_roles(caller: dict, club_id: int, data: dict, overwrite: bool) -> list:
+    """Fill one agenda from the sheet column for its date. Returns report lines."""
+    date = data.get("meetingDate") or ""
+    if not date:
+        return ["沒有例會日期，無法對應試算表的欄位"]
+    ctx = _club_role_context(club_id)
+    values = _sheet_values(caller, club_id, ctx).get(date)
+    if values is None:
+        return [f"角色試算表裡沒有 {date} 這一欄，角色沒有匯入"]
+    return _role_report(_apply_role_values(data, values, ctx, overwrite),
+                        "從角色試算表匯入", "overwrite_roles")
+
+
+def _agenda_for(cur, agenda_id: int, caller: dict):
+    cur.execute("SELECT data, club_id FROM agendas WHERE id=%s", (agenda_id,))
+    row = cur.fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="找不到這份議程")
+    if caller["role"] != "system_admin" and row[1] != caller["club_id"]:
+        raise HTTPException(status_code=403, detail="無權存取其他分會的資料")
+    return parse_jsonb(row[0]), row[1]
+
+
+def _agenda_summary(agenda_id: int, data: dict) -> str:
+    sp = [s.get("speaker") or "（未定）" for s in (data.get("speeches") or [])]
+    return (f"議程 #{agenda_id}：{data.get('meetingDate', '')} 第{data.get('meetingNo', '')}次"
+            f"「{data.get('meetingTheme', '')}」｜總主持 {data.get('tme') or '（未定）'}"
+            f"｜演講 {'、'.join(sp) or '無'}")
+
+
+def _tool_get_agenda(caller, args):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            data, cid = _agenda_for(cur, int(args["agenda_id"]), caller)
+    return _tool_text(json.dumps(data, ensure_ascii=False, indent=1),
+                      {"agendaId": int(args["agenda_id"]), "clubId": cid, "data": data})
+
+
+def _tool_create_agenda(caller, args):
+    _officer_only(caller)
+    cid = _social_scope(caller, args.get("club_id"))
+    if cid is None:
+        return _tool_text("系統管理員建立議程時請指定 club_id（用 list_clubs 查）", is_error=True)
+    fields = dict(args.get("fields") or {})
+    date = fields.get("meetingDate")
+    if not date:
+        return _tool_text("請在 fields 裡給 meetingDate（YYYY-MM-DD）", is_error=True)
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM agendas WHERE club_id=%s AND meeting_date=%s",
+                        (cid, date))
+            dup = cur.fetchone()
+            # Time and venue rarely change between meetings: take them from the
+            # club's latest agenda, then its standing settings — what the
+            # editor's own new-agenda defaults would show.
+            cur.execute("SELECT data FROM agendas WHERE club_id=%s"
+                        " ORDER BY meeting_date DESC NULLS LAST, id DESC LIMIT 1", (cid,))
+            prev = parse_jsonb((cur.fetchone() or [None])[0])
+            cur.execute("SELECT settings FROM clubs WHERE id=%s", (cid,))
+            st = parse_jsonb((cur.fetchone() or [None])[0])
+    if dup and not args.get("allow_duplicate"):
+        return _tool_text(f"這個分會 {date} 已經有議程 #{dup[0]}。要修改請用 update_agenda；"
+                          "確定要另建一份請帶 allow_duplicate: true。",
+                          {"existingAgendaId": dup[0]}, is_error=True)
+
+    data = {
+        "meetingDate": date,
+        "timeRange": prev.get("timeRange") or st.get("timeRange") or "",
+        "venueInfo": prev.get("venueInfo") or st.get("venue") or "",
+        "speeches": [_blank_speech() for _ in range(3)],
+        "evaluators": ["", "", ""],
+        "evalEvaluators": [],
+    }
+    if prev.get("lang"):
+        data["lang"] = prev["lang"]
+    _apply_agenda_fields(data, fields)
+    _trim_slots(data, args)
+    notes = _import_sheet_roles(caller, cid, data, overwrite=bool(args.get("overwrite_roles"))) \
+        if args.get("import_roles") else []
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO agendas (username, data, meeting_date, club_id)"
+                " VALUES (%s, %s::jsonb, %s, %s) RETURNING id",
+                (caller["username"], json.dumps(data), data["meetingDate"], cid))
+            new_id = cur.fetchone()[0]
+    return _tool_text("\n".join([f"已建立{_agenda_summary(new_id, data)}"] + notes),
+                      {"agendaId": new_id, "clubId": cid})
+
+
+def _tool_update_agenda(caller, args):
+    _officer_only(caller)
+    aid = int(args["agenda_id"])
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            data, cid = _agenda_for(cur, aid, caller)
+    touched = _apply_agenda_fields(data, args.get("fields") or {}) + _trim_slots(data, args)
+    notes = _import_sheet_roles(caller, cid, data, overwrite=bool(args.get("overwrite_roles"))) \
+        if args.get("import_roles") else []
+    if not touched and not args.get("import_roles"):
+        return _tool_text("沒有要修改的欄位", is_error=True)
+
+    # The sheet fetch above is a network call; the row is re-read nowhere in
+    # between, so the write is a plain replace — the same last-writer-wins the
+    # editor's own 儲存 has.
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE agendas SET data=%s::jsonb, meeting_date=%s, updated_at=NOW()"
+                        " WHERE id=%s", (json.dumps(data), data.get("meetingDate") or None, aid))
+    return _tool_text("\n".join([f"已更新{_agenda_summary(aid, data)}"] + notes),
+                      {"agendaId": aid, "changed": touched})
+
+
+def _render_origin(caller: dict) -> str:
+    """
+    Where app/svc/agenda-export lives. Production uses its stable domain
+    rather than the request's Host — the call carries a login token, so it
+    goes only to a host this deployment names itself.
+    """
+    if os.getenv("AGENDA_RENDER_URL"):
+        return os.getenv("AGENDA_RENDER_URL").rstrip("/")
+    prod = os.getenv("VERCEL_PROJECT_PRODUCTION_URL")
+    if os.getenv("VERCEL_ENV") == "production" and prod:
+        return f"https://{prod}"
+    return caller["origin"]
+
+
+_EXPORT_MAX_PAGES = 4
+
+
+def _tool_export_agenda(caller, args):
+    import urllib.error
+    import urllib.request
+    aid = int(args["agenda_id"])
+    formats = [f for f in (args.get("formats") or ["pdf", "jpg"]) if f in ("pdf", "jpg")]
+    if not formats:
+        return _tool_text("formats 要包含 pdf 或 jpg", is_error=True)
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            data, cid = _agenda_for(cur, aid, caller)
+
+    # Unguessable names: these URLs are public (the bucket serves anyone who
+    # has the link), like every other image this app publishes.
+    stem = f"Agenda_{data.get('meetingDate') or 'agenda'}_No{data.get('meetingNo') or ''}"
+    base = f"media/clubs/{cid}/agendas/{uuid.uuid4().hex[:12]}/{stem}"
+    client = _r2()
+
+    def presign(key, ctype):
+        return client.generate_presigned_url(
+            "put_object", Params={"Bucket": R2_BUCKET_NAME, "Key": key, "ContentType": ctype},
+            ExpiresIn=300)
+
+    keys = {"pdf": f"{base}.pdf",
+            "jpg": [f"{base}_p{i + 1}.jpg" for i in range(_EXPORT_MAX_PAGES)]}
+    uploads = {}
+    if "pdf" in formats:
+        uploads["pdf"] = presign(keys["pdf"], "application/pdf")
+    if "jpg" in formats:
+        uploads["jpg"] = [presign(k, "image/jpeg") for k in keys["jpg"]]
+
+    # A five-minute login token for this one render: the page is opened as the
+    # caller, so it can show only what they could open themselves.
+    token = jwt.encode({"sub": caller["username"],
+                        "exp": datetime.now(timezone.utc) + timedelta(minutes=5)},
+                       JWT_SECRET, algorithm=JWT_ALGORITHM)
+    req = urllib.request.Request(
+        f"{_render_origin(caller)}/svc/agenda-export",
+        data=json.dumps({"token": token, "agendaId": aid, "formats": formats,
+                         "uploads": uploads}).encode(),
+        headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=55) as res:
+            out = json.loads(res.read())
+    except urllib.error.HTTPError as e:
+        try:
+            detail = json.loads(e.read()).get("detail")
+        except Exception:
+            detail = None
+        return _tool_text(detail or f"議程輸出失敗（HTTP {e.code}）", is_error=True)
+    except Exception:
+        return _tool_text("議程輸出逾時或連線失敗，請稍後再試", is_error=True)
+
+    files = []
+    if out.get("pdf"):
+        files.append({"format": "pdf", "url": f"{R2_PUBLIC_URL}/{keys['pdf']}"})
+    for i in range(int(out.get("jpgPages") or 0)):
+        files.append({"format": "jpg", "page": i + 1,
+                      "url": f"{R2_PUBLIC_URL}/{keys['jpg'][i]}"})
+    lines = [f"{f['format'].upper()}{'（第 %d 頁）' % f['page'] if 'page' in f else ''}：{f['url']}"
+             for f in files]
+    return _tool_text("議程檔案（任何拿到連結的人都能開啟）：\n" + "\n".join(lines),
+                      {"agendaId": aid, "files": files})
+
+
+# ------------------------------------------------------------------ post images
+_IMAGE_MAX_BYTES = 15 * 1024 * 1024
+_IMAGE_EXT = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif"}
+
+
+def _sniff_image(raw: bytes) -> str:
+    if raw[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if raw[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        return "image/webp"
+    if raw[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    return ""
+
+
+def _download_image(url: str) -> bytes:
+    """
+    Fetch an image a client points us at. Same SSRF rules as the CIMD fetch,
+    except that redirects are followed — file hosts (ChatGPT's among them)
+    hand out a link that redirects to blob storage — with every hop's host
+    checked again, so a redirect cannot walk us into the internal network.
+    """
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    class _Manual(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **kw):
+            return None
+
+    opener = urllib.request.build_opener(_Manual)
+    for _ in range(4):
+        u = urllib.parse.urlparse(url)
+        if u.scheme != "https" or _host_is_internal(u.hostname or ""):
+            raise HTTPException(status_code=400, detail="圖片網址必須是公開的 https 網址")
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (compatible; entrepreneur-agenda-mcp/1.0)"})
+        try:
+            with opener.open(req, timeout=20) as res:
+                raw = res.read(_IMAGE_MAX_BYTES + 1)
+            break
+        except urllib.error.HTTPError as e:
+            if e.code in (301, 302, 303, 307, 308) and e.headers.get("Location"):
+                url = urllib.parse.urljoin(url, e.headers["Location"])
+                continue
+            raise HTTPException(status_code=400, detail=f"下載圖片失敗（HTTP {e.code}）")
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=400, detail="下載圖片失敗（連線失敗）")
+    else:
+        raise HTTPException(status_code=400, detail="圖片網址轉址次數過多")
+    if len(raw) > _IMAGE_MAX_BYTES:
+        raise HTTPException(status_code=400, detail="圖片超過 15 MB")
+    return raw
+
+
+def _attach_post_image(post_row: dict, item: dict) -> int:
+    """Append one stored image to a post. Returns its 1-based position."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE social_posts SET images = COALESCE(images,'[]'::jsonb) || %s::jsonb,"
+                        " updated_at=NOW() WHERE id=%s"
+                        " RETURNING jsonb_array_length(images)",
+                        (json.dumps([item]), post_row["id"]))
+            return cur.fetchone()[0]
+
+
+def _tool_add_post_image(caller, args):
+    import base64
+    _officer_only(caller)
+    post_id = int(args["post_id"])
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            row = _social_row(_load_social_post(cur, post_id, caller))
+
+    # Three ways in, whichever the client can manage: a ChatGPT file
+    # parameter ({download_url}), any public URL, or the bytes themselves.
+    f = args.get("image") if isinstance(args.get("image"), dict) else {}
+    url = f.get("download_url") or args.get("image_url")
+    if url:
+        raw = _download_image(str(url))
+    elif args.get("image_base64"):
+        b64 = str(args["image_base64"])
+        try:
+            raw = base64.b64decode(b64[b64.find(",") + 1:] if b64.startswith("data:") else b64,
+                                   validate=False)
+        except Exception:
+            return _tool_text("image_base64 不是有效的 base64", is_error=True)
+        if len(raw) > _IMAGE_MAX_BYTES:
+            return _tool_text("圖片超過 15 MB", is_error=True)
+    else:
+        return _tool_text("請提供 image（檔案）、image_url 或 image_base64 其中一個", is_error=True)
+
+    ctype = _sniff_image(raw)
+    if not ctype:
+        return _tool_text("這不是支援的圖片格式（JPG、PNG、WebP、GIF）", is_error=True)
+
+    cid = row["clubId"]
+    base = f"media/clubs/{cid}/social" if cid else "media/social"
+    key = f"{base}/{uuid.uuid4()}.{_IMAGE_EXT[ctype]}"
+    try:
+        _r2().put_object(Bucket=R2_BUCKET_NAME, Key=key, Body=raw, ContentType=ctype)
+    except Exception:
+        return _tool_text("圖片上傳雲端失敗，請稍後再試", is_error=True)
+    item = {"url": f"{R2_PUBLIC_URL}/{key}", "type": "image",
+            "name": str(args.get("name") or f.get("name") or "MCP 上傳圖片")[:200]}
+    n = _attach_post_image(row, item)
+    note = "" if ctype == "image/jpeg" else \
+        "（提醒：Instagram 只接受 JPG，這張若要發 IG 可能會失敗）"
+    return _tool_text(f"已加到貼文 #{post_id}，目前第 {n} 張{note}：{item['url']}",
+                      {"postId": post_id, "position": n, "image": item})
+
+
+def _tool_remove_post_image(caller, args):
+    _officer_only(caller)
+    post_id, pos = int(args["post_id"]), int(args["position"])
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            row = _social_row(_load_social_post(cur, post_id, caller))
+            imgs = list(row["images"])
+            if not 1 <= pos <= len(imgs):
+                return _tool_text(f"貼文 #{post_id} 只有 {len(imgs)} 張圖", is_error=True)
+            gone = imgs.pop(pos - 1)
+            cur.execute("UPDATE social_posts SET images=%s::jsonb, updated_at=NOW() WHERE id=%s",
+                        (json.dumps(imgs), post_id))
+    return _tool_text(f"已從貼文 #{post_id} 移除第 {pos} 張圖（剩 {len(imgs)} 張）",
+                      {"postId": post_id, "removed": gone, "remaining": len(imgs)})
+
+
+def _tool_generate_post_image(caller, args):
+    _officer_only(caller)
+    post_id = int(args["post_id"])
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            row = _social_row(_load_social_post(cur, post_id, caller))
+    # The same generator the 生圖 button uses, billed to the same account.
+    item = _generate_image(caller["username"], row["clubId"], {
+        "prompt": args.get("prompt") or "",
+        "size": args.get("size") or "1024x1024",
+        "quality": args.get("quality"),
+        "model": args.get("model"),
+    })
+    n = _attach_post_image(row, item)
+    return _tool_text(f"已產生圖片並加到貼文 #{post_id}，目前第 {n} 張：{item['url']}",
+                      {"postId": post_id, "position": n, "image": item})
+
+
+# ------------------------------------------------------------------ roles (角色安排)
+# The 角色安排 page is a view over agendas.data — there is no separate role
+# store — so these tools read and write the same fields, with the same role
+# ids (app/roles/page.js ROLE_GROUPS) and the same rules as the page.
+
+_ROLE_IDS_DOC = (
+    "角色 id：receptionHost 報到接待、callingToOrder 宣布例會開始、welcomeTME 會長致歡迎詞、"
+    "tme 總主持人、timer 計時員、timerAssistant 計時員幫手、ahCounter 贅語記錄員、"
+    "boardWriter 板書、photographer 攝影、voteCounter 計票員、varietyHost 多元單元主持人、"
+    "tableTopicsMaster 即席問答主持人、wordOfTheDay 每日一字、quizHost 問答遊戲主持、"
+    "langEvaluator 語言講評、generalEvaluator 總講評、awardsPresenter 贈感謝狀、"
+    "sharingFeedback 會後分享、meetingNo 場次、meetingTheme 主題、themeQuestion 主題題目；"
+    "第 N 篇演講：speechN（演講者）、speechN_title、speechN_pwcode、speechN_pwlevel、"
+    "speechN_project；evaluatorN 第 N 位個別講評員；evalEvaluatorN 講評員講評")
+
+# Rows of the matrix, in the page's order, for get_roles' summary.
+_ROLE_ROWS = ("receptionHost", "callingToOrder", "welcomeTME", "tme", "timer",
+              "timerAssistant", "ahCounter", "boardWriter", "photographer", "voteCounter",
+              "varietyHost", "tableTopicsMaster", "wordOfTheDay", "quizHost",
+              "langEvaluator", "generalEvaluator", "awardsPresenter", "sharingFeedback")
+
+
+def _meeting_roles(data: dict, template: str) -> dict:
+    """Every filled role on one agenda as {role id: value}, slots expanded."""
+    out = {}
+    for rid in _ROLE_ROWS:
+        allow = _ROLE_TEMPLATES.get(rid)
+        if allow and template not in allow:
+            continue
+        v = _role_get(data, rid)
+        if v:
+            out[rid] = v
+    for i, sp in enumerate(data.get("speeches") or []):
+        for sub, field in (("", "speaker"), ("_title", "title"),
+                           ("_pwcode", "pathwayCode"), ("_pwlevel", "pathwayLevel"),
+                           ("_project", "pathwayProject")):
+            if (sp or {}).get(field):
+                out[f"speech{i + 1}{sub}"] = sp[field]
+    for key, pre in (("evaluators", "evaluator"), ("evalEvaluators", "evalEvaluator")):
+        for i, v in enumerate(data.get(key) or []):
+            if v:
+                out[f"{pre}{i + 1}"] = v
+    return out
+
+
+def _tool_get_roles(caller, args):
+    cid = _social_scope(caller, args.get("club_id"))
+    if cid is None:
+        return _tool_text("系統管理員請指定 club_id（用 list_clubs 查）", is_error=True)
+    date_from = args.get("date_from") or datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+    date_to = args.get("date_to")
+    limit = min(int(args.get("limit") or 8), 30)
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT template_key FROM clubs WHERE id=%s", (cid,))
+            tmpl = ((cur.fetchone() or [None])[0]) or "compact"
+            cur.execute(
+                "SELECT id, meeting_date, data FROM agendas WHERE club_id=%s"
+                " AND meeting_date >= %s AND (%s::date IS NULL OR meeting_date <= %s)"
+                " ORDER BY meeting_date LIMIT %s",
+                (cid, date_from, date_to, date_to, limit))
+            rows = cur.fetchall()
+    meetings = []
+    lines = []
+    for aid, date, raw in rows:
+        data = parse_jsonb(raw)
+        roles = _meeting_roles(data, tmpl)
+        meetings.append({"agendaId": aid, "date": str(date), "meetingNo": data.get("meetingNo", ""),
+                         "theme": data.get("meetingTheme", ""), "roles": roles})
+        filled = "、".join(f"{_role_label(k)}={v}" for k, v in roles.items()) or "（尚未安排）"
+        lines.append(f"{date} 第{data.get('meetingNo', '')}次（agendaId={aid}）：{filled}")
+    return _tool_text("\n".join(lines) or f"{date_from} 之後沒有議程",
+                      {"clubId": cid, "template": tmpl, "meetings": meetings})
+
+
+def _tool_assign_roles(caller, args):
+    _officer_only(caller)
+    aid = int(args["agenda_id"])
+    roles = args.get("roles") or {}
+    if not isinstance(roles, dict) or not roles:
+        return _tool_text("roles 要是 {角色 id: 人名} 的物件", is_error=True)
+    # Role cells and the matrix's column-header fields only — a date or venue
+    # changed here would skip update_agenda's handling of them.
+    bad = [k for k in roles if not (k in _ROLE_ROWS or k in _SHEET_META_ROWS.values()
+                                    or _SLOT_RE.match(k))]
+    if bad:
+        return _tool_text("不認得的角色 id：" + "、".join(bad) + "。" + _ROLE_IDS_DOC, is_error=True)
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            data, cid = _agenda_for(cur, aid, caller)
+    report = _apply_role_values(data, {k: ("" if v is None else str(v)) for k, v in roles.items()},
+                                _club_role_context(cid), overwrite=args.get("overwrite", True))
+    if report["applied"]:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE agendas SET data=%s::jsonb, updated_at=NOW() WHERE id=%s",
+                            (json.dumps(data), aid))
+    return _tool_text("\n".join([_agenda_summary(aid, data)]
+                                + _role_report(report, "已安排", "overwrite")),
+                      {"agendaId": aid, "applied": report["applied"],
+                       "unmatched": report["unmatched"], "skipped": report["locked"]})
+
+
+def _tool_import_roles_sheet(caller, args):
+    """The 角色 page's 從 Google Sheet 匯入, for a whole date range at once."""
+    _officer_only(caller)
+    cid = _social_scope(caller, args.get("club_id"))
+    if cid is None:
+        return _tool_text("系統管理員請指定 club_id（用 list_clubs 查）", is_error=True)
+    ctx = _club_role_context(cid)
+    sheet = _sheet_values(caller, cid, ctx)
+    lo, hi = args.get("date_from") or "", args.get("date_to") or "9999-12-31"
+    dates = sorted(d for d in sheet if lo <= d <= hi)
+    if not dates:
+        return _tool_text("試算表在這個日期範圍沒有任何例會欄", is_error=True)
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, meeting_date, data FROM agendas"
+                        " WHERE club_id=%s AND meeting_date = ANY(%s::date[])", (cid, dates))
+            existing = {str(r[1]): (r[0], parse_jsonb(r[2])) for r in cur.fetchall()}
+
+    overwrite = bool(args.get("overwrite"))
+    lines, changed, created, skipped_new = [], [], 0, []
+    for d in dates:
+        values = sheet[d]
+        if d in existing:
+            aid, data = existing[d]
+        elif not any(k not in _SHEET_META_ROWS.values() for k in values):
+            # Columns holding only the season's pre-filled 會議編號 are empty
+            # slots, not planned meetings — the page's importer skips them too.
+            continue
+        elif args.get("create_missing"):
+            aid, data = None, {"meetingDate": d}
+        else:
+            skipped_new.append(d)
+            continue
+        report = _apply_role_values(data, values, ctx, overwrite)
+        if aid is None or report["applied"]:
+            changed.append((aid, d, data))
+        tag = "新建" if aid is None else f"#{aid}"
+        line = f"{d}（{tag}）：填入 {report['applied']} 個欄位"
+        if report["kept"]:
+            line += f"，{len(report['kept'])} 個已有內容沒覆蓋"
+        if report["unmatched"]:
+            line += "，不在名單：" + "、".join(dict.fromkeys(report["unmatched"]))
+        lines.append(line)
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            for aid, d, data in changed:
+                if aid is None:
+                    cur.execute("INSERT INTO agendas (username, data, meeting_date, club_id)"
+                                " VALUES (%s, %s::jsonb, %s, %s)",
+                                (caller["username"], json.dumps(data), d, cid))
+                    created += 1
+                else:
+                    cur.execute("UPDATE agendas SET data=%s::jsonb, updated_at=NOW()"
+                                " WHERE id=%s", (json.dumps(data), aid))
+    if skipped_new:
+        lines.append("系統裡還沒有議程、沒有建立（要建立請帶 create_missing: true）："
+                     + "、".join(skipped_new))
+    if not overwrite and any("沒覆蓋" in l for l in lines):
+        lines.append("要以試算表為準覆蓋已填的角色，請帶 overwrite: true")
+    return _tool_text("\n".join([f"已更新 {len(changed) - created} 份、新建 {created} 份議程"]
+                                + lines),
+                      {"clubId": cid, "updated": len(changed) - created, "created": created})
+
+
+def _tool_list_members(caller, args):
+    """The roster role names should be written from — names only."""
+    cid = _social_scope(caller, args.get("club_id"))
+    if cid is None:
+        return _tool_text("系統管理員請指定 club_id（用 list_clubs 查）", is_error=True)
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT name_en, name_zh, level, role FROM users"
+                        " WHERE club_id=%s AND status <> 'pending'"
+                        " ORDER BY name_en", (cid,))
+            rows = cur.fetchall()
+    items = [{"nameEn": r[0] or "", "nameZh": r[1] or "", "level": r[2] or "",
+              "role": r[3]} for r in rows]
+    lines = [f"{i['nameEn']} {i['nameZh']}" + (f", {i['level']}" if i["level"] else "")
+             for i in items] or ["（沒有會員）"]
+    return _tool_text("\n".join(lines), {"clubId": cid, "members": items})
+
+
+# ------------------------------------------------------------------ clubs (分會管理)
+# Same rule as PUT /api/clubs/{id}: system admins only. What can be edited is
+# what the 分會管理 page edits — the club's own columns plus the template
+# fields each template declares (lib/agendaTemplates.js `settings` manifests).
+# Other keys in clubs.settings (the Meta / Threads app ids) belong to other
+# screens and are neither shown nor writable here.
+
+_CLUB_COLUMNS = {
+    "name": "分會名稱（必填、不可重複）", "name_zh": "中文名稱", "name_en": "英文名稱",
+    "charter_no": "章程編號 / Club No.", "founded_date": "成立日", "fee": "入場費",
+    "template_key": "議程版型：standard、compact、chillhihigh、china、entrepreneur",
+}
+_CLUB_IMAGE_COLUMNS = {"logo_url": "Logo", "fb_qr_url": "Facebook QR", "line_qr_url": "LINE QR"}
+_CLUB_SETTINGS = {
+    "timeRange": "預設時間（議程可覆寫）", "venue": "預設地點（議程可覆寫）",
+    "scheduleZh": "會議日期行（中文）", "scheduleEn": "會議日期行（English）",
+    "scheduleText": "會議時間（China）", "slogan": "標語", "transit": "交通",
+    "closingLine": "結尾句", "upcomingMeetings": "近期例會", "specialEvent": "特別活動",
+    "membershipFee": "入會費用", "admissionFeeText": "入場費文字（China）",
+    "contactEmail": "聯絡 Email", "officerTeamYear": "幹部任期年度",
+    "officerTeam": "幹部名單（每行：職稱|Lead|Deputy）",
+    "upcomingEvents": "近期活動（每行：日期|活動）",
+    "roles_sheet_url": "角色表 Google Sheet 網址（需含 #gid=）",
+}
+_CLUB_IMAGE_SETTINGS = {
+    "ig_qr_url": "Instagram QR", "threads_qr_url": "Threads QR",
+    "evoting_qr_url": "E-Voting QR", "membership_qr_url": "入會登記 QR",
+    "page2_hero_url": "第二頁 圖1（我們是誰）", "page2_img2_url": "第二頁 圖2（招生／入會流程）",
+}
+_TEMPLATE_KEYS = ("standard", "compact", "chillhihigh", "china", "entrepreneur")
+
+
+def _system_admin_only(caller: dict):
+    if caller["role"] != "system_admin":
+        raise HTTPException(status_code=403, detail="分會設定只有系統管理員可以修改")
+
+
+def _club_view(cur, club_id: int) -> dict:
+    cur.execute(f"SELECT {_CLUB_COLS} FROM clubs WHERE id=%s", (club_id,))
+    row = cur.fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="找不到此分會")
+    c = _club_row_to_dict(row)
+    st = c.pop("settings") or {}
+    visible = {**_CLUB_SETTINGS, **_CLUB_IMAGE_SETTINGS}
+    c["settings"] = {k: v for k, v in st.items() if k in visible}
+    return c
+
+
+def _tool_get_club(caller, args):
+    cid = _social_scope(caller, args.get("club_id"))
+    if cid is None:
+        return _tool_text("系統管理員請指定 club_id（用 list_clubs 查）", is_error=True)
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            c = _club_view(cur, cid)
+    return _tool_text(json.dumps(c, ensure_ascii=False, indent=1, default=str), c)
+
+
+def _club_write(cur, club_id, columns: dict, settings: dict):
+    """Partial update: given columns replace, settings merge (null deletes)."""
+    if columns:
+        sets = ", ".join(f"{k}=%s" for k in columns)
+        cur.execute(f"UPDATE clubs SET {sets} WHERE id=%s", (*columns.values(), club_id))
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="找不到此分會")
+    if settings:
+        drop = [k for k, v in settings.items() if v is None]
+        keep = {k: v for k, v in settings.items() if v is not None}
+        cur.execute("UPDATE clubs SET settings = (COALESCE(settings,'{}'::jsonb) - %s::text[])"
+                    " || %s::jsonb WHERE id=%s", (drop, json.dumps(keep), club_id))
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="找不到此分會")
+
+
+def _club_changes(args: dict):
+    cols = {k: v for k, v in (args.get("fields") or {}).items()}
+    sets = dict(args.get("settings") or {})
+    bad = [k for k in cols if k not in _CLUB_COLUMNS and k not in _CLUB_IMAGE_COLUMNS] + \
+          [k for k in sets if k not in _CLUB_SETTINGS and k not in _CLUB_IMAGE_SETTINGS]
+    if bad:
+        raise HTTPException(status_code=400, detail="不能修改的欄位：" + "、".join(bad))
+    if "name" in cols and not str(cols["name"] or "").strip():
+        raise HTTPException(status_code=400, detail="分會名稱不得為空")
+    if cols.get("template_key") is not None and cols["template_key"] not in _TEMPLATE_KEYS:
+        raise HTTPException(status_code=400, detail="template_key 只能是 " + "、".join(_TEMPLATE_KEYS))
+    cols = {k: (None if v is None else str(v).strip() if k == "name" else str(v))
+            for k, v in cols.items()}
+    return cols, {k: (None if v is None else str(v)) for k, v in sets.items()}
+
+
+def _tool_update_club(caller, args):
+    _system_admin_only(caller)
+    cid = int(args["club_id"])
+    cols, sets = _club_changes(args)
+    if not cols and not sets:
+        return _tool_text("沒有要修改的欄位", is_error=True)
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                _club_write(cur, cid, cols, sets)
+                c = _club_view(cur, cid)
+    except psycopg2.errors.UniqueViolation:
+        return _tool_text("分會名稱已存在", is_error=True)
+    return _tool_text(f"已更新分會 #{cid}：" + "、".join(list(cols) + list(sets)), c)
+
+
+def _tool_create_club(caller, args):
+    _system_admin_only(caller)
+    cols, sets = _club_changes(args)
+    if not (cols.get("name") or "").strip():
+        return _tool_text("請在 fields 裡給 name", is_error=True)
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("INSERT INTO clubs (name, template_key, settings)"
+                            " VALUES (%s, %s, '{}'::jsonb) RETURNING id",
+                            (cols.pop("name"), cols.pop("template_key", None) or "standard"))
+                cid = cur.fetchone()[0]
+                _club_write(cur, cid, cols, sets)
+                c = _club_view(cur, cid)
+    except psycopg2.errors.UniqueViolation:
+        return _tool_text("分會名稱已存在", is_error=True)
+    return _tool_text(f"已建立分會 #{cid}「{c['name']}」", c)
+
+
+def _image_from_args(args: dict) -> tuple:
+    """(bytes, content type) from image / image_url / image_base64 — or raise."""
+    import base64
+    f = args.get("image") if isinstance(args.get("image"), dict) else {}
+    url = f.get("download_url") or args.get("image_url")
+    if url:
+        raw = _download_image(str(url))
+    elif args.get("image_base64"):
+        b64 = str(args["image_base64"])
+        try:
+            raw = base64.b64decode(b64[b64.find(",") + 1:] if b64.startswith("data:") else b64)
+        except Exception:
+            raise HTTPException(status_code=400, detail="image_base64 不是有效的 base64")
+        if len(raw) > _IMAGE_MAX_BYTES:
+            raise HTTPException(status_code=400, detail="圖片超過 15 MB")
+    else:
+        raise HTTPException(status_code=400,
+                            detail="請提供 image（檔案）、image_url 或 image_base64 其中一個")
+    ctype = _sniff_image(raw)
+    if not ctype:
+        raise HTTPException(status_code=400, detail="這不是支援的圖片格式（JPG、PNG、WebP、GIF）")
+    return raw, ctype
+
+
+def _store_image(raw: bytes, ctype: str, prefix: str) -> str:
+    key = f"{prefix}/{uuid.uuid4().hex}.{_IMAGE_EXT[ctype]}"
+    try:
+        _r2().put_object(Bucket=R2_BUCKET_NAME, Key=key, Body=raw, ContentType=ctype)
+    except Exception:
+        raise HTTPException(status_code=502, detail="圖片上傳雲端失敗，請稍後再試")
+    return f"{R2_PUBLIC_URL}/{key}"
+
+
+def _tool_set_club_image(caller, args):
+    _system_admin_only(caller)
+    cid, slot = int(args["club_id"]), args.get("slot") or ""
+    if slot not in _CLUB_IMAGE_COLUMNS and slot not in _CLUB_IMAGE_SETTINGS:
+        return _tool_text("slot 只能是 " + "、".join(list(_CLUB_IMAGE_COLUMNS)
+                                                     + list(_CLUB_IMAGE_SETTINGS)), is_error=True)
+    raw, ctype = _image_from_args(args)
+    url = _store_image(raw, ctype, f"media/clubs/{cid}")
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            if slot in _CLUB_IMAGE_COLUMNS:
+                _club_write(cur, cid, {slot: url}, {})
+            else:
+                _club_write(cur, cid, {}, {slot: url})
+    label = _CLUB_IMAGE_COLUMNS.get(slot) or _CLUB_IMAGE_SETTINGS[slot]
+    return _tool_text(f"已更新分會 #{cid} 的「{label}」：{url}",
+                      {"clubId": cid, "slot": slot, "url": url})
+
+
+# ------------------------------------------------------------------ agenda theme image
+# The per-meeting picture beside the header — `themeImgUrl` in agendas.data,
+# set by the editor's 主題圖片 upload. Only these templates draw it; on any
+# other a picture would be stored and never seen (and, generated, paid for).
+_THEME_IMG_TEMPLATES = {"standard", "entrepreneur"}
+
+
+def _theme_target(caller, agenda_id: int):
+    """(data, club id) for an agenda whose template shows a theme image."""
+    _officer_only(caller)
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            data, cid = _agenda_for(cur, agenda_id, caller)
+            cur.execute("SELECT template_key FROM clubs WHERE id=%s", (cid,))
+            tmpl = ((cur.fetchone() or [None])[0]) or "standard"
+    if tmpl not in _THEME_IMG_TEMPLATES:
+        raise HTTPException(status_code=400,
+                            detail=f"這個分會的版型（{tmpl}）沒有每場的主題圖，只有 "
+                                   + "、".join(sorted(_THEME_IMG_TEMPLATES)) + " 版型會顯示")
+    return data, cid
+
+
+def _save_theme(agenda_id: int, data: dict, url: str):
+    data["themeImgUrl"] = url
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE agendas SET data=%s::jsonb, updated_at=NOW() WHERE id=%s",
+                        (json.dumps(data), agenda_id))
+
+
+def _tool_set_agenda_theme_image(caller, args):
+    aid = int(args["agenda_id"])
+    data, cid = _theme_target(caller, aid)
+    if args.get("clear"):
+        data.pop("themeImgUrl", None)
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE agendas SET data=%s::jsonb, updated_at=NOW() WHERE id=%s",
+                            (json.dumps(data), aid))
+        return _tool_text(f"已移除議程 #{aid} 的主題圖", {"agendaId": aid})
+    raw, ctype = _image_from_args(args)
+    url = _store_image(raw, ctype, f"media/clubs/{cid}/agendas")
+    _save_theme(aid, data, url)
+    return _tool_text(f"已設定議程 #{aid} 的主題圖：{url}", {"agendaId": aid, "url": url})
+
+
+def _tool_generate_agenda_theme_image(caller, args):
+    aid = int(args["agenda_id"])
+    data, cid = _theme_target(caller, aid)          # checked before anything is paid for
+    theme = data.get("meetingTheme") or ""
+    prompt = args.get("prompt") or (
+        f"Toastmasters 演講會例會的主題插圖，主題是「{theme}」。溫暖、活潑的扁平插畫風格，"
+        "不要任何文字。" if theme else "")
+    if not prompt:
+        return _tool_text("這份議程沒有主題，請提供 prompt 描述想要的圖", is_error=True)
+    item = _generate_image(caller["username"], cid, {
+        "prompt": prompt, "size": args.get("size") or "1024x1024",
+        "quality": args.get("quality"), "model": args.get("model")})
+    _save_theme(aid, data, item["url"])
+    return _tool_text(f"已產生並設定議程 #{aid} 的主題圖：{item['url']}",
+                      {"agendaId": aid, "url": item["url"], "prompt": prompt})
+
+
+# ------------------------------------------------------------------ delete post
+# Removes the post from this system — draft or already published alike, as
+# DELETE /api/social-posts/{id} does for the web page. What publish_post put
+# on Facebook / Instagram / Threads is not touched; this app does not manage
+# posts once they are on the platforms.
+
+def _tool_delete_post(caller, args):
+    _officer_only(caller)
+    post_id = int(args["post_id"])
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            row = _social_row(_load_social_post(cur, post_id, caller))
+            cur.execute("DELETE FROM social_posts WHERE id=%s", (post_id,))
+    live = sorted(row["published"])
+    note = f"（已發布到 {'、'.join(live)} 的貼文不受影響，仍在社群上）" if live else ""
+    return _tool_text(f"已刪除貼文 #{post_id}「{row['title'] or '無標題'}」{note}",
+                      {"postId": post_id})
+
+
+# ------------------------------------------------------------------ whoami
+_ROLE_NAMES = {"system_admin": "系統管理員", "club_admin": "分會管理員", "club_member": "一般會員"}
+
+
+def _tool_whoami(caller, args):
+    """
+    Who this token acts as, and what it may do — read live, like every call:
+    the role and club come from the users row now, not from when the grant
+    was made, so this is also how to see a role change take effect.
+    """
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT u.name_en, u.name_zh, u.level, c.name, c.name_zh"
+                        " FROM users u LEFT JOIN clubs c ON c.id = u.club_id"
+                        " WHERE u.username=%s", (caller["username"],))
+            u = cur.fetchone() or (None,) * 5
+            cur.execute("SELECT client_name, created_at, expires_at FROM oauth_refresh_tokens"
+                        " WHERE grant_id=%s", (caller.get("grant") or "",))
+            gr = cur.fetchone() or (None, None, None)
+    club = _club_label(u[3], u[4], None) if u[3] or u[4] else ""
+    scopes = [s for s in MCP_SCOPES if s in caller["scopes"]]
+    iso = lambda d: d.isoformat() if d else ""
+    info = {
+        "username": caller["username"],
+        "nameEn": u[0] or "", "nameZh": u[1] or "", "level": u[2] or "",
+        "role": caller["role"], "roleName": _ROLE_NAMES.get(caller["role"], caller["role"]),
+        "clubId": caller["club_id"], "club": club,
+        "scopes": [{"key": s, "label": MCP_SCOPES[s]} for s in scopes],
+        "missingScopes": [s for s in MCP_SCOPES if s not in caller["scopes"]],
+        "client": gr[0] or "", "grantedAt": iso(gr[1]), "grantExpiresAt": iso(gr[2]),
+    }
+    name = " ".join(x for x in (info["nameEn"], info["nameZh"]) if x)
+    lines = [
+        f"帳號：{info['username']}" + (f"（{name}{', ' + info['level'] if info['level'] else ''}）" if name else ""),
+        f"角色：{info['roleName']}" + ("（可操作所有分會）" if caller["role"] == "system_admin"
+                                      else f"｜分會：{club or '未設定'}（club_id={caller['club_id']}）"),
+        f"客戶端：{info['client'] or '未知'}，授權於 {info['grantedAt'][:10] or '?'}",
+        "這個授權可以：" + "、".join(MCP_SCOPES[s] for s in scopes),
+    ]
+    if info["missingScopes"]:
+        lines.append("沒有授權：" + "、".join(MCP_SCOPES[s] for s in info["missingScopes"])
+                     + "（要用的話需重新授權）")
+    lines.append("實際能做的事仍以帳號角色為準：授權只會限縮、不會超過你在網站上的權限。")
+    return _tool_text("\n".join(lines), info)
+
+
 # ------------------------------------------------------------------ catalogue
-_OBJ = {"type": "object"}
+# Spelled out because a system admin's omitted club_id silently means "every
+# club", and a model that does not know that reads the mix as one club.
+_CLUB_ID_DOC = ("分會 id，從 list_clubs 取得。一般使用者可省略（固定是自己的分會）；"
+                "系統管理員省略時會混合所有分會的資料，請務必指定")
+
+_SPEECH_SCHEMA = {
+    "type": ["object", "null"], "additionalProperties": False,
+    "description": "一篇演講；null 表示這個位置不變",
+    "properties": {
+        "speaker":        {"type": "string", "description": "演講者"},
+        "title":          {"type": "string", "description": "講題"},
+        "duration":       {"type": "string", "description": "時間，例如 5'-7'"},
+        "speechLang":     {"type": "string", "enum": ["en", "zh"]},
+        "pathwayCode":    {"type": "string", "description": "學習路徑代碼，例如 PM、DL"},
+        "pathwayLevel":   {"type": "string", "description": "等級，例如 L3"},
+        "pathwayProject": {"type": "string", "description": "專案名稱（Pathways 目錄上的英文名稱）"},
+    },
+}
+_AGENDA_FIELDS_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "description": "議程欄位；只會寫入有給的欄位。人名照會員名單的寫法最好（例如 Leah Kao, DTM）",
+    "properties": {
+        **{k: {"type": "string", "description": d} for k, d in _AGENDA_TEXT_FIELDS.items()},
+        "lang": {"type": "string", "enum": ["zh", "en"],
+                 "description": "議程語言（影響試算表匯入時人名用中文或英文）"},
+        "speeches": {"type": "array", "items": _SPEECH_SCHEMA,
+                     "description": "指定演講，依序合併"},
+        "evaluators": {"type": "array", "items": {"type": ["string", "null"]},
+                       "description": "個別講評員，依序對應演講"},
+        "evalEvaluators": {"type": "array", "items": {"type": ["string", "null"]},
+                           "description": "講評員講評"},
+        "varietySession": {"type": "object", "additionalProperties": False,
+                           "description": "多元單元",
+                           "properties": {"enabled": {"type": "boolean"},
+                                          "duration": {"type": "integer", "description": "分鐘"},
+                                          "host": {"type": "string"}}},
+    },
+}
+
+# `annotations` are hints a client uses to decide what to confirm with the
+# person first (ChatGPT asks before any tool not marked readOnlyHint). They
+# are advice to the client, never a permission — scopes and role checks are.
 MCP_TOOLS = [
+    {
+        "name": "whoami", "scope": None, "title": "我是誰",
+        "description": "回傳目前操作 MCP 的身分：帳號、姓名、角色、所屬分會，以及這個授權允許與缺少的權限。"
+                       "不確定能做什麼、或使用者問「我是誰」時用這支。",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+        "handler": _tool_whoami,
+    },
+    {
+        "name": "list_clubs", "scope": "posts:read", "title": "列出分會",
+        "description": "列出可以操作的分會與 club_id。使用者用名稱指稱分會時（中文名、英文名或簡稱），"
+                       "先用這支找到 club_id，再傳給其他工具。一般使用者只會看到自己的分會。",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+        "handler": _tool_list_clubs,
+    },
     {
         "name": "list_meetings", "scope": "posts:read", "title": "列出例會",
         "description": "列出分會的例會（議程），最近的在前。回傳 agendaId，其他工具用它指定例會。",
         "inputSchema": {"type": "object", "properties": {
-            "club_id": {"type": "integer", "description": "分會 id；系統管理員才需要指定"},
+            "club_id": {"type": "integer", "description": _CLUB_ID_DOC},
             "limit": {"type": "integer", "description": "最多幾筆，預設 10，上限 50"},
         }, "additionalProperties": False},
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
         "handler": _tool_list_meetings,
     },
     {
@@ -4233,14 +5650,16 @@ MCP_TOOLS = [
         "inputSchema": {"type": "object", "properties": {
             "agenda_id": {"type": "integer", "description": "例會 id，來自 list_meetings"},
         }, "required": ["agenda_id"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
         "handler": _tool_get_meeting,
     },
     {
         "name": "list_posts", "scope": "posts:read", "title": "列出貼文草稿",
         "description": "列出分會的社群貼文草稿與已發布貼文。",
         "inputSchema": {"type": "object", "properties": {
-            "club_id": {"type": "integer"},
+            "club_id": {"type": "integer", "description": _CLUB_ID_DOC},
         }, "additionalProperties": False},
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
         "handler": _tool_list_posts,
     },
     {
@@ -4249,6 +5668,7 @@ MCP_TOOLS = [
         "inputSchema": {"type": "object", "properties": {
             "post_id": {"type": "integer"},
         }, "required": ["post_id"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
         "handler": _tool_get_post,
     },
     {
@@ -4260,8 +5680,10 @@ MCP_TOOLS = [
             "kind": {"type": "string", "enum": ["promo", "recap", "other"]},
             "agenda_id": {"type": "integer"},
             "body": {"type": "string", "description": "主文案；留空稍後用 generate_copy 產生"},
-            "club_id": {"type": "integer"},
+            "club_id": {"type": "integer", "description": _CLUB_ID_DOC},
         }, "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": False,
+                        "idempotentHint": False, "openWorldHint": False},
         "handler": _tool_create_post,
     },
     {
@@ -4277,6 +5699,8 @@ MCP_TOOLS = [
             "variants": {"type": "object",
                          "description": "各平台文案，例如 {\"threads\": \"...\"}"},
         }, "required": ["post_id"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True,
+                        "idempotentHint": True, "openWorldHint": False},
         "handler": _tool_update_post,
     },
     {
@@ -4291,18 +5715,300 @@ MCP_TOOLS = [
             "provider": {"type": "string", "enum": ["anthropic", "openai"]},
             "model": {"type": "string", "description": "留空用預設模型"},
         }, "required": ["post_id"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True,
+                        "idempotentHint": False, "openWorldHint": True},
         "handler": _tool_generate_copy,
     },
     {
         "name": "publish_post", "scope": "publish", "title": "發布貼文",
         "description": "把貼文發布到指定的社群平台。⚠️ 這是公開的，而且發出去無法透過這個系統收回；"
-                       "Instagram 一定要有圖片。發布前請先用 get_post 確認內容。",
+                       "Instagram 一定要有圖片。發布前請先用 get_post 確認內容，並取得使用者同意。"
+                       "已發布過的平台會自動略過。需要「發布」授權，沒有的話客戶端會請使用者補授權。",
         "inputSchema": {"type": "object", "properties": {
             "post_id": {"type": "integer"},
             "platforms": {"type": "array", "items": {
                 "type": "string", "enum": ["facebook", "instagram", "threads"]}},
+            "republish": {"type": "boolean",
+                          "description": "已發布過的平台預設會略過；設 true 才會再發一則新的公開貼文"},
         }, "required": ["post_id", "platforms"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True,
+                        "idempotentHint": False, "openWorldHint": True},
         "handler": _tool_publish_post,
+    },
+
+    # ---- agendas
+    {
+        "name": "get_agenda", "scope": "posts:read", "title": "取得議程",
+        "description": "取得一份議程的完整內容（所有角色、演講、講評員等），修改前先用這支看現況。",
+        "inputSchema": {"type": "object", "properties": {
+            "agenda_id": {"type": "integer", "description": "議程 id，來自 list_meetings"},
+        }, "required": ["agenda_id"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+        "handler": _tool_get_agenda,
+    },
+    {
+        "name": "create_agenda", "scope": "agendas:write", "title": "建立議程",
+        "description": "建立一場例會的議程。時間與地點預設沿用該分會上一份議程。"
+                       "可帶 import_roles: true 從分會設定的 Google Sheet 角色規劃表帶入那一天的角色。"
+                       "同一天已有議程時會拒絕並回傳既有的 id。",
+        "inputSchema": {"type": "object", "properties": {
+            "club_id": {"type": "integer", "description": _CLUB_ID_DOC},
+            "fields": _AGENDA_FIELDS_SCHEMA,
+            "import_roles": {"type": "boolean", "description": "從角色試算表帶入這一天的角色"},
+            "overwrite_roles": {"type": "boolean",
+                                "description": "試算表與 fields 衝突時以試算表為準（預設保留 fields）"},
+            "speech_count": {"type": "integer", "description": "演講篇數（預設 3）"},
+            "evaluator_count": {"type": "integer", "description": "個別講評員人數（預設 3）"},
+            "allow_duplicate": {"type": "boolean", "description": "同一天已有議程仍要另建一份"},
+        }, "required": ["fields"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": False,
+                        "idempotentHint": False, "openWorldHint": False},
+        "handler": _tool_create_agenda,
+    },
+    {
+        "name": "update_agenda", "scope": "agendas:write", "title": "修改議程",
+        "description": "修改議程的欄位，只會改有給的欄位。speeches／evaluators 依位置合併："
+                       "要改第 2 篇演講者就傳 [null, {\"speaker\": \"…\"}]。"
+                       "要刪減篇數用 speech_count／evaluator_count。"
+                       "import_roles: true 會從角色試算表補上空白的角色（overwrite_roles 才會覆蓋已填的）。",
+        "inputSchema": {"type": "object", "properties": {
+            "agenda_id": {"type": "integer"},
+            "fields": _AGENDA_FIELDS_SCHEMA,
+            "import_roles": {"type": "boolean", "description": "從角色試算表帶入這一天的角色"},
+            "overwrite_roles": {"type": "boolean", "description": "試算表的值覆蓋已填的角色"},
+            "speech_count": {"type": "integer", "description": "把演講篇數設為這個數字（多的刪掉）"},
+            "evaluator_count": {"type": "integer", "description": "把個別講評員人數設為這個數字"},
+        }, "required": ["agenda_id"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True,
+                        "idempotentHint": True, "openWorldHint": False},
+        "handler": _tool_update_agenda,
+    },
+    {
+        "name": "export_agenda", "scope": "posts:read", "title": "下載議程 PDF／JPG",
+        "description": "把議程輸出成 PDF 和／或 JPG（與網頁「下載」按鈕相同的檔案），回傳下載連結。"
+                       "多頁版型的 JPG 每頁一張。約需 10～30 秒。連結是公開的，拿到的人都能開。",
+        "inputSchema": {"type": "object", "properties": {
+            "agenda_id": {"type": "integer"},
+            "formats": {"type": "array", "items": {"type": "string", "enum": ["pdf", "jpg"]},
+                        "description": "預設兩種都要"},
+        }, "required": ["agenda_id"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+        "handler": _tool_export_agenda,
+    },
+
+    # ---- post images
+    {
+        "name": "add_post_image", "scope": "posts:write", "title": "加入貼文圖片",
+        "description": "把一張圖片加到貼文的圖片清單最後面。用你（AI）自己產生或使用者提供的圖："
+                       "給 image（檔案）、image_url（公開 https 網址）或 image_base64 其中一個。"
+                       "Instagram 只接受 JPG。",
+        "inputSchema": {"type": "object", "properties": {
+            "post_id": {"type": "integer"},
+            "image": {"type": "object", "description": "圖片檔案（支援檔案參數的客戶端使用）",
+                      "properties": {"download_url": {"type": "string"},
+                                     "file_id": {"type": "string"},
+                                     "name": {"type": "string"}}},
+            "image_url": {"type": "string", "description": "公開可下載的 https 圖片網址"},
+            "image_base64": {"type": "string", "description": "圖片內容的 base64（可含 data: 前綴）"},
+            "name": {"type": "string", "description": "圖片名稱，給管理者辨識"},
+        }, "required": ["post_id"], "additionalProperties": False},
+        # ChatGPT passes a file the user attached or the model made as
+        # {download_url, file_id} when a parameter is declared like this.
+        "_meta": {"openai/fileParams": ["image"]},
+        "annotations": {"readOnlyHint": False, "destructiveHint": False,
+                        "idempotentHint": False, "openWorldHint": True},
+        "handler": _tool_add_post_image,
+    },
+    {
+        "name": "remove_post_image", "scope": "posts:write", "title": "移除貼文圖片",
+        "description": "從貼文移除一張圖片。position 是 get_post 圖片清單裡的順序，從 1 開始。",
+        "inputSchema": {"type": "object", "properties": {
+            "post_id": {"type": "integer"},
+            "position": {"type": "integer", "description": "第幾張，從 1 開始"},
+        }, "required": ["post_id", "position"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True,
+                        "idempotentHint": False, "openWorldHint": False},
+        "handler": _tool_remove_post_image,
+    },
+    {
+        "name": "generate_post_image", "scope": "ai:generate", "title": "AI 產生貼文圖片",
+        "description": "用平台的 OpenAI 生圖（與網頁「生圖」相同）並加到貼文。"
+                       "⚠️ 會消耗呼叫者自己（或分會共用）的 OpenAI 額度。約需 10～40 秒。",
+        "inputSchema": {"type": "object", "properties": {
+            "post_id": {"type": "integer"},
+            "prompt": {"type": "string", "description": "圖片描述"},
+            "size": {"type": "string", "enum": list(_IMAGE_SIZES), "description": "預設 1024x1024"},
+            "quality": {"type": "string", "enum": list(IMAGE_QUALITIES),
+                        "description": "預設 low（最省）"},
+            "model": {"type": "string", "enum": [m["id"] for m in IMAGE_MODELS],
+                      "description": "留空用預設（最省）的模型"},
+        }, "required": ["post_id", "prompt"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": False,
+                        "idempotentHint": False, "openWorldHint": True},
+        "handler": _tool_generate_post_image,
+    },
+
+    # ---- agenda theme image
+    {
+        "name": "set_agenda_theme_image", "scope": "agendas:write", "title": "設定議程主題圖",
+        "description": "把一張圖設成議程的主題圖（議程表頁首旁的插圖）。用你（AI）自己產生或使用者提供的圖："
+                       "給 image（檔案）、image_url 或 image_base64 其中一個；clear: true 移除主題圖。"
+                       "只有 standard、entrepreneur 版型會顯示主題圖，其他版型會被拒絕。",
+        "inputSchema": {"type": "object", "properties": {
+            "agenda_id": {"type": "integer"},
+            "image": {"type": "object", "description": "圖片檔案（支援檔案參數的客戶端使用）",
+                      "properties": {"download_url": {"type": "string"},
+                                     "file_id": {"type": "string"}}},
+            "image_url": {"type": "string", "description": "公開可下載的 https 圖片網址"},
+            "image_base64": {"type": "string", "description": "圖片內容的 base64"},
+            "clear": {"type": "boolean", "description": "移除這場的主題圖"},
+        }, "required": ["agenda_id"], "additionalProperties": False},
+        "_meta": {"openai/fileParams": ["image"]},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True,
+                        "idempotentHint": True, "openWorldHint": True},
+        "handler": _tool_set_agenda_theme_image,
+    },
+    {
+        "name": "generate_agenda_theme_image", "scope": "ai:generate", "title": "AI 產生議程主題圖",
+        "description": "用平台的 OpenAI 生成議程主題圖並直接套用。沒給 prompt 時依例會主題產生。"
+                       "⚠️ 會消耗呼叫者自己（或分會共用）的 OpenAI 額度；版型不顯示主題圖時會先拒絕、不會花錢。",
+        "inputSchema": {"type": "object", "properties": {
+            "agenda_id": {"type": "integer"},
+            "prompt": {"type": "string", "description": "圖片描述；留空依例會主題自動產生"},
+            "size": {"type": "string", "enum": list(_IMAGE_SIZES)},
+            "quality": {"type": "string", "enum": list(IMAGE_QUALITIES), "description": "預設 low（最省）"},
+            "model": {"type": "string", "enum": [m["id"] for m in IMAGE_MODELS]},
+        }, "required": ["agenda_id"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True,
+                        "idempotentHint": False, "openWorldHint": True},
+        "handler": _tool_generate_agenda_theme_image,
+    },
+
+    # ---- roles (角色安排)
+    {
+        "name": "get_roles", "scope": "posts:read", "title": "查看角色安排",
+        "description": "角色安排表：列出分會接下來（或指定日期範圍）每場例會已安排的角色。",
+        "inputSchema": {"type": "object", "properties": {
+            "club_id": {"type": "integer", "description": _CLUB_ID_DOC},
+            "date_from": {"type": "string", "description": "YYYY-MM-DD，預設今天"},
+            "date_to": {"type": "string", "description": "YYYY-MM-DD"},
+            "limit": {"type": "integer", "description": "最多幾場，預設 8，上限 30"},
+        }, "additionalProperties": False},
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+        "handler": _tool_get_roles,
+    },
+    {
+        "name": "assign_roles", "scope": "agendas:write", "title": "安排角色",
+        "description": "為一場例會安排角色，例如 {\"tme\": \"高莉雅\", \"speech1\": \"Bob Lin\"}。"
+                       "人名會比對會員名單，自動改成名單上的寫法；給空字串表示清空。"
+                       "版型沒有的角色會略過。" + _ROLE_IDS_DOC,
+        "inputSchema": {"type": "object", "properties": {
+            "agenda_id": {"type": "integer"},
+            "roles": {"type": "object", "additionalProperties": {"type": ["string", "null"]},
+                      "description": "{角色 id: 人名或內容}"},
+            "overwrite": {"type": "boolean", "description": "已有人時是否覆蓋，預設 true"},
+        }, "required": ["agenda_id", "roles"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True,
+                        "idempotentHint": True, "openWorldHint": False},
+        "handler": _tool_assign_roles,
+    },
+    {
+        "name": "import_roles_sheet", "scope": "agendas:write", "title": "從角色試算表匯入整季",
+        "description": "把分會 Google Sheet 角色規劃表的內容匯入每一場議程（等同角色安排頁的「從 Google Sheet 匯入」）。"
+                       "預設只補空白欄位、不建立新議程；overwrite 以試算表覆蓋、create_missing 為試算表有但系統沒有的場次建立議程。",
+        "inputSchema": {"type": "object", "properties": {
+            "club_id": {"type": "integer", "description": _CLUB_ID_DOC},
+            "date_from": {"type": "string", "description": "YYYY-MM-DD，只匯入這天之後"},
+            "date_to": {"type": "string", "description": "YYYY-MM-DD，只匯入這天之前"},
+            "overwrite": {"type": "boolean", "description": "試算表的值覆蓋已填的角色"},
+            "create_missing": {"type": "boolean", "description": "為系統還沒有的場次建立議程"},
+        }, "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True,
+                        "idempotentHint": True, "openWorldHint": True},
+        "handler": _tool_import_roles_sheet,
+    },
+    {
+        "name": "list_members", "scope": "posts:read", "title": "列出會員",
+        "description": "分會會員名單（中英文名與教育等級），安排角色時用來對照正確的人名。",
+        "inputSchema": {"type": "object", "properties": {
+            "club_id": {"type": "integer", "description": _CLUB_ID_DOC},
+        }, "additionalProperties": False},
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+        "handler": _tool_list_members,
+    },
+
+    # ---- clubs (分會管理)
+    {
+        "name": "get_club", "scope": "posts:read", "title": "取得分會設定",
+        "description": "分會的名稱、版型、地點、時間、QR code 等議程用設定。",
+        "inputSchema": {"type": "object", "properties": {
+            "club_id": {"type": "integer", "description": _CLUB_ID_DOC},
+        }, "additionalProperties": False},
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+        "handler": _tool_get_club,
+    },
+    {
+        "name": "update_club", "scope": "clubs:write", "title": "修改分會設定",
+        "description": "修改分會設定，只會改有給的欄位；settings 裡的值給 null 表示刪除。限系統管理員。"
+                       "圖片（Logo、QR code、第二頁圖片）請用 set_club_image。",
+        "inputSchema": {"type": "object", "properties": {
+            "club_id": {"type": "integer"},
+            "fields": {"type": "object", "additionalProperties": False,
+                       "properties": {k: {"type": ["string", "null"], "description": d}
+                                      for k, d in _CLUB_COLUMNS.items()}},
+            "settings": {"type": "object", "additionalProperties": False,
+                         "properties": {k: {"type": ["string", "null"], "description": d}
+                                        for k, d in _CLUB_SETTINGS.items()}},
+        }, "required": ["club_id"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True,
+                        "idempotentHint": True, "openWorldHint": False},
+        "handler": _tool_update_club,
+    },
+    {
+        "name": "create_club", "scope": "clubs:write", "title": "建立分會",
+        "description": "建立新分會（fields.name 必填）。限系統管理員。",
+        "inputSchema": {"type": "object", "properties": {
+            "fields": {"type": "object", "additionalProperties": False,
+                       "properties": {k: {"type": ["string", "null"], "description": d}
+                                      for k, d in _CLUB_COLUMNS.items()}},
+            "settings": {"type": "object", "additionalProperties": False,
+                         "properties": {k: {"type": ["string", "null"], "description": d}
+                                        for k, d in _CLUB_SETTINGS.items()}},
+        }, "required": ["fields"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": False,
+                        "idempotentHint": False, "openWorldHint": False},
+        "handler": _tool_create_club,
+    },
+    {
+        "name": "set_club_image", "scope": "clubs:write", "title": "設定分會圖片",
+        "description": "更換分會的 Logo、QR code 或議程第二頁圖片。給 image（檔案）、image_url 或 image_base64 其中一個。限系統管理員。",
+        "inputSchema": {"type": "object", "properties": {
+            "club_id": {"type": "integer"},
+            "slot": {"type": "string",
+                     "enum": list(_CLUB_IMAGE_COLUMNS) + list(_CLUB_IMAGE_SETTINGS),
+                     "description": "、".join(f"{k}={v}" for k, v in
+                                              {**_CLUB_IMAGE_COLUMNS, **_CLUB_IMAGE_SETTINGS}.items())},
+            "image": {"type": "object", "description": "圖片檔案（支援檔案參數的客戶端使用）",
+                      "properties": {"download_url": {"type": "string"},
+                                     "file_id": {"type": "string"}}},
+            "image_url": {"type": "string"},
+            "image_base64": {"type": "string"},
+        }, "required": ["club_id", "slot"], "additionalProperties": False},
+        "_meta": {"openai/fileParams": ["image"]},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True,
+                        "idempotentHint": True, "openWorldHint": True},
+        "handler": _tool_set_club_image,
+    },
+    {
+        "name": "delete_post", "scope": "posts:write", "title": "刪除貼文",
+        "description": "從系統刪除一則貼文（草稿或已發布的都可以），無法復原，刪除前請先跟使用者確認。"
+                       "只刪系統裡的紀錄，已經發到 Facebook／Instagram／Threads 上的貼文不受影響。",
+        "inputSchema": {"type": "object", "properties": {
+            "post_id": {"type": "integer"},
+        }, "required": ["post_id"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True,
+                        "idempotentHint": True, "openWorldHint": False},
+        "handler": _tool_delete_post,
     },
 ]
 
@@ -4377,25 +6083,26 @@ async def mcp_endpoint(request: Request):
             if (request.headers.get("mcp-name") or "") != want:
                 return _rpc_error(req_id, -32020, "Mcp-Name 標頭與內容不符", status=400)
 
-    # The set of tools may vary by the authorization presented — scopes are
-    # per-request input, not connection state — so a token without `publish`
-    # simply does not see a publish tool.
-    allowed = [t for t in MCP_TOOLS if t["scope"] in caller["scopes"]]
-
+    # Every tool is listed, whatever the token's scopes. A model only calls
+    # tools it can see, so hiding publish_post from a token without `publish`
+    # meant the step-up challenge below could never fire and the scope could
+    # never be granted. Listed, the call gets a 403 naming the scope, and the
+    # client takes the person back to the consent screen to decide.
     if method == "tools/list":
         return _rpc_ok(req_id, {"tools": [
             {k: v for k, v in t.items() if k in
-             ("name", "title", "description", "inputSchema")}
-            for t in allowed]}, legacy=legacy)
+             ("name", "title", "description", "inputSchema", "annotations", "_meta")}
+            for t in MCP_TOOLS]}, legacy=legacy)
 
     if method == "tools/call":
         name = params.get("name")
         tool = next((t for t in MCP_TOOLS if t["name"] == name), None)
         if tool is None:
             return _rpc_error(req_id, -32602, f"沒有這個工具：{name}")
-        if tool["scope"] not in caller["scopes"]:
+        if tool["scope"] is not None and tool["scope"] not in caller["scopes"]:
             # A scope challenge, not a plain refusal: the client can ask the
-            # user to grant it and retry.
+            # user to grant it and retry. (scope None: any valid token — only
+            # whoami, which reads nothing but the caller's own identity.)
             require_scope(caller, tool["scope"], request)
         try:
             result = tool["handler"](caller, params.get("arguments") or {})
@@ -4408,7 +6115,8 @@ async def mcp_endpoint(request: Request):
             result = _tool_text("工具執行失敗，請稍後再試", is_error=True)
         return _rpc_ok(req_id, result, legacy=legacy)
 
-    return _rpc_error(req_id, -32601, f"不支援這個方法：{method}", status=404)
+    # A JSON-RPC error rides on a 200: the HTTP request itself was fine.
+    return _rpc_error(req_id, -32601, f"不支援這個方法：{method}")
 
 
 @app.get("/api/mcp")
