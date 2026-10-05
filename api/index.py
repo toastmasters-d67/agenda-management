@@ -3311,9 +3311,10 @@ _JOB_RUNNERS["publish"] = _run_publish_job
 #
 # The scopes exist to make one particular thing a user decision rather than a
 # line of code: publishing is public and cannot be taken back, so `publish` is
-# NOT in the default set and NOT in `scopes_supported`. A client that wants it
-# has to be challenged for it, which puts "allow this to post as the club" on
-# the consent screen where someone can refuse it.
+# offered on the consent screen but arrives UNTICKED — a person has to turn it
+# on by hand. It is advertised (scopes_supported, the 401 challenge) like the
+# others: a scope a client never hears of is one it never asks for, and then
+# the consent screen never gets to put the question at all.
 #
 # A scope never widens what a person may do. It narrows what a token may do on
 # their behalf — the role checks (`require_club_admin_or_above`, `_social_scope`)
@@ -3333,8 +3334,8 @@ MCP_SCOPES = {
     "ai:generate": "用你的 AI 帳號產生文案與圖片（會消耗你的 API 額度）",
     "publish":     "代表分會公開發文到 Facebook／Instagram／Threads",
 }
-# What a client gets without asking for more. `publish` is deliberately absent:
-# see the note above.
+# What a client gets when it asks for nothing in particular. `publish` is
+# absent: it is only ever granted by someone ticking it.
 MCP_DEFAULT_SCOPES = ("posts:read", "posts:write", "ai:generate")
 
 
@@ -3345,7 +3346,14 @@ def _public_origin(request: Request) -> str:
     Taken from the forwarded headers rather than hardcoded: the canonical
     resource URI has to match what the client sends in `resource`, and that is
     whatever host they typed — production, a preview deployment, or localhost.
+
+    The forwarded headers are trustworthy on Vercel, which overwrites them. On
+    a host that passes a client's X-Forwarded-Host through, set
+    MCP_PUBLIC_ORIGIN and the headers are not consulted at all.
     """
+    pinned = os.getenv("MCP_PUBLIC_ORIGIN", "").rstrip("/")
+    if pinned:
+        return pinned
     host = request.headers.get("x-forwarded-host") or request.headers.get("host") or ""
     proto = request.headers.get("x-forwarded-proto") or request.url.scheme or "https"
     return f"{proto}://{host}"
@@ -3372,11 +3380,11 @@ def _mcp_secret() -> str:
 def _mint_access_token(username: str, client_id: str, scope: str,
                        resource: str, grant: str) -> tuple:
     """
-    `grant` is the hash of the refresh token this access token descends from.
-    It ties a self-contained JWT back to a row that can be revoked — without
-    it, revoking a grant would leave its access tokens working until expiry.
-    It is a hash of a random 256-bit value, so carrying it in a signed (not
-    encrypted) token reveals nothing usable.
+    `grant` is the `grant_id` of the authorization this access token descends
+    from. It ties a self-contained JWT back to a row that can be revoked —
+    without it, revoking a grant would leave its access tokens working until
+    expiry. It stays fixed while the refresh token under it rotates, and it is
+    not a credential: knowing it lets nobody mint or refresh anything.
     """
     now = datetime.now(timezone.utc)
     payload = {
@@ -3430,7 +3438,7 @@ def mcp_caller(request: Request) -> dict:
     """
     auth = request.headers.get("authorization") or ""
     if not auth.lower().startswith("bearer "):
-        raise _unauthorized(request, scope=" ".join(MCP_DEFAULT_SCOPES))
+        raise _unauthorized(request, scope=" ".join(MCP_SCOPES))
     claims = _verify_access_token(request, auth[7:].strip())
 
     # The grant has to still be live, checked on every call. This is what makes
@@ -3442,7 +3450,7 @@ def mcp_caller(request: Request) -> dict:
             cur.execute(
                 "SELECT u.username, u.role, u.club_id, u.status,"
                 " EXISTS (SELECT 1 FROM oauth_refresh_tokens t"
-                "         WHERE t.token_hash=%s AND t.username=u.username"
+                "         WHERE t.grant_id=%s AND t.username=u.username"
                 "           AND t.revoked_at IS NULL"
                 "           AND (t.expires_at IS NULL OR t.expires_at > NOW()))"
                 " FROM users u WHERE u.username=%s",
@@ -3457,14 +3465,22 @@ def mcp_caller(request: Request) -> dict:
 
 
 def require_scope(caller: dict, scope: str, request: Request):
-    """403 + a challenge naming exactly what is missing (RFC 6750 §3.1)."""
+    """
+    403 + a challenge for step-up authorization (RFC 6750 §3.1).
+
+    The challenge names what the token already has *plus* what is missing.
+    Clients re-authorize with exactly the scope in the challenge, so naming
+    only the missing one would trade the old token for one that can publish
+    but no longer read.
+    """
     if scope in caller["scopes"]:
         return
+    want = [s for s in MCP_SCOPES if s in caller["scopes"] or s == scope]
     raise HTTPException(
         status_code=403,
         detail=f"這個授權沒有包含「{MCP_SCOPES.get(scope, scope)}」",
         headers={"WWW-Authenticate":
-                 f'Bearer error="insufficient_scope", scope="{scope}", '
+                 f'Bearer error="insufficient_scope", scope="{" ".join(want)}", '
                  f'resource_metadata="{_prm_url(request)}"'},
     )
 
@@ -3477,14 +3493,14 @@ def protected_resource_metadata(request: Request):
     so this endpoint must stay unauthenticated, and middleware.js excludes
     /.well-known for that reason.
 
-    `scopes_supported` is the minimum for basic functionality, which is why
-    `publish` is not in it.
+    `scopes_supported` lists every scope, `publish` included — see the note
+    at the top of this section on why hiding it defeated its own purpose.
     """
     origin = _public_origin(request)
     return {
         "resource": f"{origin}/api/mcp",
         "authorization_servers": [origin],
-        "scopes_supported": list(MCP_DEFAULT_SCOPES),
+        "scopes_supported": list(MCP_SCOPES),
         "bearer_methods_supported": ["header"],
     }
 
@@ -3497,9 +3513,31 @@ def protected_resource_metadata(request: Request):
 
 _CIMD_MAX_BYTES = 64 * 1024
 _CIMD_TIMEOUT   = 8
-_PRIVATE_HOST_RE = re.compile(
-    r"^(localhost$|127\.|10\.|192\.168\.|169\.254\.|0\.|\[?::1\]?$|"
-    r"172\.(1[6-9]|2\d|3[01])\.)", re.I)
+
+
+def _host_is_internal(host: str) -> bool:
+    """
+    Whether any address `host` resolves to is one we must not fetch from.
+
+    Checked on the resolved addresses rather than the spelling, so a public
+    name pointing at 10.0.0.5 — or a decimal/IPv6 spelling of 127.0.0.1 — is
+    caught too. An unresolvable host counts as internal: refusing it costs
+    nothing, since the fetch would fail anyway.
+    """
+    import ipaddress
+    import socket
+    if not host or host.lower() == "localhost":
+        return True
+    try:
+        infos = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
+    except OSError:
+        return True
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0].split("%", 1)[0])
+        if (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+            return True
+    return False
 
 
 def _fetch_client_metadata(client_id: str) -> dict:
@@ -3508,10 +3546,9 @@ def _fetch_client_metadata(client_id: str) -> dict:
 
     This fetches a URL supplied by whoever started the authorization request,
     which is an SSRF primitive if left open. Hence: https only, a path
-    component required, obvious internal hosts refused, a byte cap, and a
-    timeout. A server on a private network should additionally keep this
-    egress behind an allow-list — the host check below is a floor, not a
-    guarantee.
+    component required, internal addresses refused after DNS resolution,
+    redirects not followed (a public URL answering 302 → 169.254.169.254 is
+    the classic way round a host check), a byte cap, and a timeout.
     """
     import urllib.error
     import urllib.parse
@@ -3524,8 +3561,15 @@ def _fetch_client_metadata(client_id: str) -> dict:
     if u.scheme != "https" or not u.netloc or u.path in ("", "/"):
         raise HTTPException(status_code=400,
                             detail="client_id 必須是帶路徑的 https 網址")
-    if _PRIVATE_HOST_RE.match(u.hostname or ""):
+    if _host_is_internal(u.hostname or ""):
         raise HTTPException(status_code=400, detail="client_id 指向內部位址")
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        # A CIMD document lives at the URL that is its own id (the client_id
+        # check below would reject a moved one anyway), so a redirect is never
+        # legitimate here — and following one would skip the host check.
+        def redirect_request(self, *a, **kw):
+            return None
 
     try:
         # A User-Agent is required in practice: Claude's document sits behind
@@ -3535,7 +3579,8 @@ def _fetch_client_metadata(client_id: str) -> dict:
             "Accept": "application/json",
             "User-Agent": "Mozilla/5.0 (compatible; entrepreneur-agenda-mcp/1.0)",
         })
-        with urllib.request.urlopen(req, timeout=_CIMD_TIMEOUT) as res:
+        opener = urllib.request.build_opener(_NoRedirect)
+        with opener.open(req, timeout=_CIMD_TIMEOUT) as res:
             raw = res.read(_CIMD_MAX_BYTES + 1)
     except urllib.error.HTTPError as e:
         raise HTTPException(status_code=400,
@@ -3686,19 +3731,32 @@ def authorization_server_metadata(request: Request):
 def _check_authorize(request: Request, client_id: str, redirect_uri: str,
                      code_challenge: str, code_challenge_method: str,
                      resource: str, scope: str) -> tuple:
+    """Returns (client metadata, granted scopes, canonical resource)."""
     if code_challenge_method != "S256" or not code_challenge:
         raise HTTPException(status_code=400, detail="需要 PKCE（S256）")
-    if resource != _mcp_resource(request):
-        # RFC 8707: the token must be minted for the server the client named,
-        # and that has to be this one.
+    # RFC 8707: the token must be minted for the server the client named, and
+    # that has to be this one. A client that names none (several OAuth
+    # libraries predate resource indicators) gets this one — the only resource
+    # this server issues tokens for, so there is nothing to confuse it with.
+    resource = resource or _mcp_resource(request)
+    if resource.rstrip("/") != _mcp_resource(request):
         raise HTTPException(status_code=400, detail="resource 與本伺服器不符")
+    resource = _mcp_resource(request)
 
     meta = _fetch_client_metadata(client_id)
     if redirect_uri not in meta["redirect_uris"]:
         raise HTTPException(status_code=400, detail="redirect_uri 不在這個 client 的允許清單中")
 
-    wanted = [x for x in (scope or "").split() if x in MCP_SCOPES]
-    return meta, (wanted or list(MCP_DEFAULT_SCOPES))
+    asked = (scope or "").split()
+    wanted = [x for x in asked if x in MCP_SCOPES]
+    # Generic OIDC-flavoured scopes some clients add by habit. Not ours, but
+    # not a reason to fail either; anything else unrecognised is.
+    harmless = {"openid", "profile", "email", "offline_access"}
+    if asked and not wanted and any(x not in harmless for x in asked):
+        raise HTTPException(status_code=400,
+                            detail="請求的 scope 都不是本伺服器提供的："
+                                   + " ".join(asked))
+    return meta, (wanted or list(MCP_DEFAULT_SCOPES)), resource
 
 
 class AuthorizeRequest(BaseModel):
@@ -3706,7 +3764,7 @@ class AuthorizeRequest(BaseModel):
     redirect_uri:          str
     code_challenge:        str
     code_challenge_method: str = "S256"
-    resource:              str
+    resource:              str = ""
     scope:                 str = ""
     state:                 str = ""
 
@@ -3714,13 +3772,13 @@ class AuthorizeRequest(BaseModel):
 @app.get("/api/oauth/authorize-info")
 def authorize_info(request: Request,
                    client_id: str = Query(...), redirect_uri: str = Query(...),
-                   code_challenge: str = Query(...), resource: str = Query(...),
+                   code_challenge: str = Query(...), resource: str = Query(default=""),
                    code_challenge_method: str = Query(default="S256"),
                    scope: str = Query(default=""),
                    user: dict = Depends(get_current_user)):
     """What the consent screen needs to show. Validates before anything is drawn."""
-    meta, wanted = _check_authorize(request, client_id, redirect_uri, code_challenge,
-                                    code_challenge_method, resource, scope)
+    meta, wanted, _ = _check_authorize(request, client_id, redirect_uri, code_challenge,
+                                       code_challenge_method, resource, scope)
     return {
         "clientName": meta["client_name"],
         "clientUri":  meta.get("client_uri", ""),
@@ -3743,9 +3801,9 @@ def authorize_grant(request: Request, req: AuthorizeRequest,
     Only the hash is stored, and the redirect is returned rather than issued
     as a 302 so the consent page can navigate itself.
     """
-    meta, wanted = _check_authorize(request, req.client_id, req.redirect_uri,
-                                    req.code_challenge, req.code_challenge_method,
-                                    req.resource, req.scope)
+    meta, wanted, resource = _check_authorize(
+        request, req.client_id, req.redirect_uri, req.code_challenge,
+        req.code_challenge_method, req.resource, req.scope)
     import hashlib
     import urllib.parse
     code = uuid.uuid4().hex + uuid.uuid4().hex
@@ -3758,7 +3816,7 @@ def authorize_grant(request: Request, req: AuthorizeRequest,
                 " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (code_hash, req.client_id, str(meta["client_name"])[:200],
                  user["username"], req.redirect_uri,
-                 req.code_challenge, req.resource, " ".join(wanted),
+                 req.code_challenge, resource, " ".join(wanted),
                  datetime.now(timezone.utc) + MCP_CODE_TTL),
             )
     params = {"code": code, "iss": _public_origin(request)}
@@ -3778,19 +3836,26 @@ def _token_error(code: str, desc: str):
 
 def _issue_refresh(username: str, client_id: str, client_name: str, scope: str,
                    resource: str) -> tuple:
-    """Returns (token, token_hash); the hash doubles as the grant id."""
+    """
+    Start a grant. Returns (refresh_token, grant_id).
+
+    The grant_id is fixed for the grant's life; the refresh token under it is
+    replaced on every use (see the refresh branch of oauth_token).
+    """
     import hashlib
     token = uuid.uuid4().hex + uuid.uuid4().hex
     token_hash = hashlib.sha256(token.encode()).hexdigest()
+    grant_id = uuid.uuid4().hex
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO oauth_refresh_tokens (token_hash, client_id, client_name,"
-                " username, scope, resource, expires_at) VALUES (%s,%s,%s,%s,%s,%s,%s)",
-                (token_hash, client_id, client_name, username,
+                "INSERT INTO oauth_refresh_tokens (token_hash, grant_id, client_id,"
+                " client_name, username, scope, resource, expires_at)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                (token_hash, grant_id, client_id, client_name, username,
                  scope, resource, datetime.now(timezone.utc) + MCP_REFRESH_TTL),
             )
-    return token, token_hash
+    return token, grant_id
 
 
 @app.post("/api/oauth/token")
@@ -3840,32 +3905,42 @@ async def oauth_token(request: Request):
             return _token_error("invalid_grant", "PKCE 驗證失敗")
 
         username, resource, scope, client_name = row[1], row[4], row[5], row[7]
-        grant_id = None           # minted below, after the account check
+        grant_id = refresh = None   # minted below, after the account check
 
     elif grant == "refresh_token":
         rt = form.get("refresh_token") or ""
         client_id = form.get("client_id") or ""
-        grant_id = hashlib.sha256(rt.encode()).hexdigest()
+        old_hash = hashlib.sha256(rt.encode()).hexdigest()
+        # Rotation (OAuth 2.1 §4.3.1, required for public clients): the token
+        # presented is retired and a new one takes its place. Done as a single
+        # UPDATE on the old hash so two concurrent uses cannot both succeed.
+        # The expiry slides with it — a grant in regular use stays alive; one
+        # left idle for MCP_REFRESH_TTL does not.
+        refresh = uuid.uuid4().hex + uuid.uuid4().hex
         with get_db() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT client_id, username, scope, resource, expires_at, revoked_at"
-                    " FROM oauth_refresh_tokens WHERE token_hash=%s",
-                    (grant_id,),
+                    "UPDATE oauth_refresh_tokens SET token_hash=%s, prev_token_hash=%s,"
+                    " last_used_at=NOW(), expires_at=%s"
+                    " WHERE token_hash=%s AND revoked_at IS NULL"
+                    " AND (expires_at IS NULL OR expires_at > NOW())"
+                    " AND (%s='' OR client_id=%s)"
+                    " RETURNING grant_id, client_id, username, scope, resource",
+                    (hashlib.sha256(refresh.encode()).hexdigest(), old_hash,
+                     datetime.now(timezone.utc) + MCP_REFRESH_TTL,
+                     old_hash, client_id, client_id),
                 )
                 row = cur.fetchone()
-        if row is None or row[5] is not None:
-            return _token_error("invalid_grant", "refresh token 無效或已撤銷")
-        if row[4] and row[4] < datetime.now(timezone.utc):
-            return _token_error("invalid_grant", "refresh token 已過期")
-        if client_id and not hmac.compare_digest(row[0], client_id):
-            return _token_error("invalid_grant", "client_id 不符")
-        username, scope, resource = row[1], row[2], row[3]
-        client_id = row[0]
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("UPDATE oauth_refresh_tokens SET last_used_at=NOW()"
-                            " WHERE token_hash=%s", (grant_id,))
+                if row is None:
+                    # A token that was already rotated away, presented again:
+                    # someone besides the client holds it. Which copy is the
+                    # thief's cannot be told, so the whole grant goes.
+                    cur.execute(
+                        "UPDATE oauth_refresh_tokens SET revoked_at=NOW()"
+                        " WHERE prev_token_hash=%s AND revoked_at IS NULL", (old_hash,))
+        if row is None:
+            return _token_error("invalid_grant", "refresh token 無效、已過期或已撤銷")
+        grant_id, client_id, username, scope, resource = row
     else:
         return _token_error("unsupported_grant_type", "只支援 authorization_code 與 refresh_token")
 
@@ -3877,7 +3952,6 @@ async def oauth_token(request: Request):
     if not u or u[0] == "pending":
         return _token_error("invalid_grant", "帳號已停用")
 
-    refresh = None
     if grant == "authorization_code":
         refresh, grant_id = _issue_refresh(username, client_id, client_name,
                                            scope, resource)
@@ -3897,7 +3971,7 @@ def _revoke_grant(grant_id: str, username: Optional[str] = None) -> bool:
         with conn.cursor() as cur:
             cur.execute(
                 "UPDATE oauth_refresh_tokens SET revoked_at=NOW()"
-                " WHERE token_hash=%s AND revoked_at IS NULL"
+                " WHERE grant_id=%s AND revoked_at IS NULL"
                 " AND (%s::text IS NULL OR username=%s)",
                 (grant_id, username, username))
             return cur.rowcount > 0
@@ -3920,12 +3994,13 @@ async def oauth_revoke(request: Request):
     token = form.get("token") or ""
     client_id = form.get("client_id") or ""
 
-    grant_id = hashlib.sha256(token.encode()).hexdigest()
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT client_id FROM oauth_refresh_tokens WHERE token_hash=%s",
-                        (grant_id,))
+            cur.execute("SELECT client_id, grant_id FROM oauth_refresh_tokens"
+                        " WHERE token_hash=%s",
+                        (hashlib.sha256(token.encode()).hexdigest(),))
             row = cur.fetchone()
+    grant_id = row[1] if row else ""
     if row is None:
         try:
             claims = jwt.decode(token, _mcp_secret(), algorithms=[JWT_ALGORITHM],
@@ -3953,7 +4028,7 @@ def list_my_grants(user: dict = Depends(get_current_user)):
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT token_hash, client_id, client_name, scope, created_at,"
+                "SELECT grant_id, client_id, client_name, scope, created_at,"
                 " last_used_at, expires_at FROM oauth_refresh_tokens"
                 " WHERE username=%s AND revoked_at IS NULL"
                 " AND (expires_at IS NULL OR expires_at > NOW())"
@@ -4116,14 +4191,17 @@ def _tool_create_post(caller, args):
     _officer_only(caller)
     cid = _social_scope(caller, args.get("club_id"))
     kind = args.get("kind") if args.get("kind") in _POST_KINDS else "promo"
+    # One empty slot per platform, the shape the browser creates a post with
+    # (app/social/page.js). Code downstream fills slots that exist.
+    variants = {p: {"text": "", "enabled": True} for p in SOCIAL_PLATFORMS}
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO social_posts (club_id, agenda_id, kind, title, status,"
-                " body, variants, images) VALUES (%s,%s,%s,%s,'draft',%s,'{}'::jsonb,"
+                " body, variants, images) VALUES (%s,%s,%s,%s,'draft',%s,%s::jsonb,"
                 "'[]'::jsonb) RETURNING id",
                 (cid, args.get("agenda_id"), kind, (args.get("title") or "")[:200],
-                 args.get("body") or ""))
+                 args.get("body") or "", json.dumps(variants)))
             new_id = cur.fetchone()[0]
     return _tool_text(f"已建立草稿 #{new_id}（{kind}）", {"postId": new_id, "kind": kind})
 
@@ -4139,14 +4217,18 @@ def _tool_update_post(caller, args):
                 if k in SOCIAL_PLATFORMS:
                     variants[k] = {"text": v if isinstance(v, str) else v.get("text", ""),
                                    "enabled": True}
+            # A key sent as null means "not changing it", same as leaving it
+            # out — models send nulls for optional fields routinely.
+            def given(k, current):
+                return current if args.get(k) is None else args[k]
             cur.execute(
                 "UPDATE social_posts SET title=%s, body=%s, kind=%s, status=%s,"
                 " agenda_id=%s, variants=%s::jsonb, updated_at=NOW() WHERE id=%s",
-                (args.get("title", row["title"])[:200],
-                 args.get("body", row["body"]),
+                (str(given("title", row["title"]) or "")[:200],
+                 str(given("body", row["body"]) or ""),
                  args.get("kind") if args.get("kind") in _POST_KINDS else row["kind"],
                  args.get("status") if args.get("status") in _STATUSES else row["status"],
-                 args.get("agenda_id", row["agendaId"]),
+                 given("agenda_id", row["agendaId"]),
                  json.dumps(variants), post_id))
     return _tool_text(f"已更新貼文 #{post_id}", {"postId": post_id})
 
@@ -4168,8 +4250,11 @@ def _tool_generate_copy(caller, args):
     with get_db() as conn:
         with conn.cursor() as cur:
             variants = row["variants"]
+            # Every platform that came back is kept, slot or no slot — a post
+            # whose variants are missing a platform would otherwise drop that
+            # platform's copy and quietly publish the generic body instead.
             for k, v in (out.get("variants") or {}).items():
-                if k in variants:
+                if k in SOCIAL_PLATFORMS:
                     variants[k] = {"text": v.get("text", ""),
                                    "enabled": v.get("enabled", True)}
             cur.execute("UPDATE social_posts SET title=COALESCE(NULLIF(title,''),%s),"
@@ -4193,10 +4278,27 @@ def _tool_publish_post(caller, args):
         with conn.cursor() as cur:
             row = _social_row(_load_social_post(cur, post_id, caller))
     cid = _social_scope(caller, row["clubId"])
+
+    # A model retries; a person says "post it again" meaning the one that
+    # failed. Neither should put a second public copy on a platform that
+    # already has one, so those are skipped unless asked for by name.
+    done = [p for p in platforms if p in row["published"]]
+    if done and not args.get("republish"):
+        platforms = [p for p in platforms if p not in done]
+        if not platforms:
+            return _tool_text(
+                "這則貼文已經發布到 " + "、".join(done) + "，沒有重複發布。"
+                "若確定要再發一次（會出現第二則公開貼文），請帶 republish: true。",
+                {"skipped": done}, is_error=True)
     out = _run_publish_job(caller["username"], cid,
                            {"post_id": post_id, "platforms": platforms})
     results = out.get("results", {})
-    lines = [f"{p}: " + ("已發布 " + (r.get("url") or "") if r.get("ok")
+    if done and not args.get("republish"):
+        results.update({p: {"ok": True, "skipped": True,
+                            "url": (row["published"].get(p) or {}).get("url", "")}
+                        for p in done})
+    lines = [f"{p}: " + ("先前已發布，略過 " + (r.get("url") or "") if r.get("skipped")
+                         else "已發布 " + (r.get("url") or "") if r.get("ok")
                          else "失敗 — " + (r.get("error") or ""))
              for p, r in results.items()]
     return _tool_text("\n".join(lines), {"results": results},
@@ -4204,7 +4306,9 @@ def _tool_publish_post(caller, args):
 
 
 # ------------------------------------------------------------------ catalogue
-_OBJ = {"type": "object"}
+# `annotations` are hints a client uses to decide what to confirm with the
+# person first (ChatGPT asks before any tool not marked readOnlyHint). They
+# are advice to the client, never a permission — scopes and role checks are.
 MCP_TOOLS = [
     {
         "name": "list_meetings", "scope": "posts:read", "title": "列出例會",
@@ -4213,6 +4317,7 @@ MCP_TOOLS = [
             "club_id": {"type": "integer", "description": "分會 id；系統管理員才需要指定"},
             "limit": {"type": "integer", "description": "最多幾筆，預設 10，上限 50"},
         }, "additionalProperties": False},
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
         "handler": _tool_list_meetings,
     },
     {
@@ -4222,6 +4327,7 @@ MCP_TOOLS = [
         "inputSchema": {"type": "object", "properties": {
             "agenda_id": {"type": "integer", "description": "例會 id，來自 list_meetings"},
         }, "required": ["agenda_id"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
         "handler": _tool_get_meeting,
     },
     {
@@ -4230,6 +4336,7 @@ MCP_TOOLS = [
         "inputSchema": {"type": "object", "properties": {
             "club_id": {"type": "integer"},
         }, "additionalProperties": False},
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
         "handler": _tool_list_posts,
     },
     {
@@ -4238,6 +4345,7 @@ MCP_TOOLS = [
         "inputSchema": {"type": "object", "properties": {
             "post_id": {"type": "integer"},
         }, "required": ["post_id"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
         "handler": _tool_get_post,
     },
     {
@@ -4251,6 +4359,8 @@ MCP_TOOLS = [
             "body": {"type": "string", "description": "主文案；留空稍後用 generate_copy 產生"},
             "club_id": {"type": "integer"},
         }, "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": False,
+                        "idempotentHint": False, "openWorldHint": False},
         "handler": _tool_create_post,
     },
     {
@@ -4266,6 +4376,8 @@ MCP_TOOLS = [
             "variants": {"type": "object",
                          "description": "各平台文案，例如 {\"threads\": \"...\"}"},
         }, "required": ["post_id"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True,
+                        "idempotentHint": True, "openWorldHint": False},
         "handler": _tool_update_post,
     },
     {
@@ -4280,17 +4392,24 @@ MCP_TOOLS = [
             "provider": {"type": "string", "enum": ["anthropic", "openai"]},
             "model": {"type": "string", "description": "留空用預設模型"},
         }, "required": ["post_id"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True,
+                        "idempotentHint": False, "openWorldHint": True},
         "handler": _tool_generate_copy,
     },
     {
         "name": "publish_post", "scope": "publish", "title": "發布貼文",
         "description": "把貼文發布到指定的社群平台。⚠️ 這是公開的，而且發出去無法透過這個系統收回；"
-                       "Instagram 一定要有圖片。發布前請先用 get_post 確認內容。",
+                       "Instagram 一定要有圖片。發布前請先用 get_post 確認內容，並取得使用者同意。"
+                       "已發布過的平台會自動略過。需要「發布」授權，沒有的話客戶端會請使用者補授權。",
         "inputSchema": {"type": "object", "properties": {
             "post_id": {"type": "integer"},
             "platforms": {"type": "array", "items": {
                 "type": "string", "enum": ["facebook", "instagram", "threads"]}},
+            "republish": {"type": "boolean",
+                          "description": "已發布過的平台預設會略過；設 true 才會再發一則新的公開貼文"},
         }, "required": ["post_id", "platforms"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True,
+                        "idempotentHint": False, "openWorldHint": True},
         "handler": _tool_publish_post,
     },
 ]
@@ -4366,16 +4485,16 @@ async def mcp_endpoint(request: Request):
             if (request.headers.get("mcp-name") or "") != want:
                 return _rpc_error(req_id, -32020, "Mcp-Name 標頭與內容不符", status=400)
 
-    # The set of tools may vary by the authorization presented — scopes are
-    # per-request input, not connection state — so a token without `publish`
-    # simply does not see a publish tool.
-    allowed = [t for t in MCP_TOOLS if t["scope"] in caller["scopes"]]
-
+    # Every tool is listed, whatever the token's scopes. A model only calls
+    # tools it can see, so hiding publish_post from a token without `publish`
+    # meant the step-up challenge below could never fire and the scope could
+    # never be granted. Listed, the call gets a 403 naming the scope, and the
+    # client takes the person back to the consent screen to decide.
     if method == "tools/list":
         return _rpc_ok(req_id, {"tools": [
             {k: v for k, v in t.items() if k in
-             ("name", "title", "description", "inputSchema")}
-            for t in allowed]}, legacy=legacy)
+             ("name", "title", "description", "inputSchema", "annotations")}
+            for t in MCP_TOOLS]}, legacy=legacy)
 
     if method == "tools/call":
         name = params.get("name")
@@ -4397,7 +4516,8 @@ async def mcp_endpoint(request: Request):
             result = _tool_text("工具執行失敗，請稍後再試", is_error=True)
         return _rpc_ok(req_id, result, legacy=legacy)
 
-    return _rpc_error(req_id, -32601, f"不支援這個方法：{method}", status=404)
+    # A JSON-RPC error rides on a 200: the HTTP request itself was fine.
+    return _rpc_error(req_id, -32601, f"不支援這個方法：{method}")
 
 
 @app.get("/api/mcp")

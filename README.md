@@ -823,7 +823,7 @@ https://<你的網域>/api/mcp
 
 客戶端會自己走完 OAuth：讀 `/.well-known/...` → 把使用者帶到 `/oauth/authorize` 同意畫面（沒登入會先到 `/login`，登入後回到同意畫面）→ 換到 token。不需要事先在系統裡登記客戶端。
 
-前提：伺服器有設 `MCP_TOKEN_SECRET`，資料庫已跑到 migration `0016`。
+前提：伺服器有設 `MCP_TOKEN_SECRET`，資料庫已跑到 migration `0018`。
 
 ### 工具與 scope
 
@@ -836,26 +836,30 @@ https://<你的網域>/api/mcp
 | `create_post` | `posts:write` | 建立草稿（`promo` / `recap` / `other`） |
 | `update_post` | `posts:write` | 修改標題、文案、用途、狀態、綁定例會、各平台版本 |
 | `generate_copy` | `ai:generate` | 用 AI 產生文案並存進貼文，**消耗呼叫者（或分會共用）的 AI 額度** |
-| `publish_post` | `publish` | 發布到 Facebook／Instagram／Threads，**公開且無法透過本系統收回** |
+| `publish_post` | `publish` | 發布到 Facebook／Instagram／Threads，**公開且無法透過本系統收回**。已發布過的平台會略過，要再發一則得帶 `republish: true` |
 
-- **預設 scope** 是 `posts:read posts:write ai:generate`。`publish` 不在預設裡，也不在 `scopes_supported` 裡：客戶端要用就得另外請求，同意畫面上它預設**不勾**，並標示「公開且無法收回」。
+- **四個 scope 都公開宣告**（`scopes_supported` 與 401 挑戰都列出），所以客戶端會一起請求；但同意畫面上 `publish` 預設**不勾**，並標示「公開且無法收回」，要使用者自己勾。客戶端沒指定 scope 時給 `posts:read posts:write ai:generate`。
+  - 早先的做法是連宣告都不宣告 `publish`、`tools/list` 也藏起 `publish_post`，結果模型看不到工具就不會呼叫，客戶端也不會請求這個 scope，同意畫面根本沒機會問——等於永遠拿不到。
+- 請求的 scope 全都不認得時回 400（`openid`、`offline_access` 這類 OIDC 慣用 scope 除外，忽略即可）。
 - **scope 只會收窄、不會放寬權限。** 每支工具底下照跑網頁版用的同一套 helper 與角色檢查（`_social_scope`、分會管理員限制）；`club_member` 拿到 `posts:write` 也一樣寫不了。
-- `tools/list` 只列出這個 token 有 scope 的工具；呼叫沒 scope 的工具會收到 403 + `insufficient_scope` 挑戰，客戶端可以請使用者補授權。
+- `tools/list` **一律列出全部工具**，並帶 `annotations`（`readOnlyHint` / `destructiveHint` / `openWorldHint`），客戶端（例如 ChatGPT）據此決定哪些呼叫要先問使用者。呼叫沒 scope 的工具會收到 403 + `insufficient_scope` 挑戰，挑戰裡的 scope 是「現有的＋缺的」，客戶端補授權後不會掉掉原本的權限。
 - 工具層級的失敗（找不到貼文、平台未連接、缺欄位）回 `isError: true` 的結果讓模型自行修正，不回 JSON-RPC 錯誤。
 
 ### 授權伺服器的設計
 
 | 項目 | 做法 |
 |------|------|
-| 客戶端註冊（CIMD） | **Client ID Metadata Documents**：`client_id` 本身是 https 網址，伺服器去抓、驗證 `client_id` 與網址相符、`redirect_uri` 在清單內。抓取限 https、擋內部位址、64 KB 上限、8 秒逾時 |
+| 客戶端註冊（CIMD） | **Client ID Metadata Documents**：`client_id` 本身是 https 網址，伺服器去抓、驗證 `client_id` 與網址相符、`redirect_uri` 在清單內。抓取限 https、**DNS 解析後**擋內部位址（私有、loopback、link-local 等）、**不跟隨轉址**、64 KB 上限、8 秒逾時 |
 | 客戶端註冊（DCR） | 給還不支援 CIMD 的客戶端（例如 Claude Desktop 的 connector）：`POST /api/oauth/register`（RFC 7591）。**不存資料表**：`client_id` 是 `dcr:` 加上用 `MCP_TOKEN_SECRET` 簽的 JWT，內含 redirect_uris 與名稱，改了就驗不過。redirect_uri 限 https，或 localhost 的 http（CLI 類客戶端）。任何人都能註冊、名稱可以亂取，所以同意畫面會另外顯示「授權後會導回哪個網域」 |
 | PKCE | 必填，只收 `S256` |
 | 授權碼 | 5 分鐘有效，只存 SHA-256 雜湊，`DELETE … RETURNING` 保證只能用一次 |
 | access token | JWT（`MCP_TOKEN_SECRET` 簽），**1 小時**；`aud` 綁定 `https://<host>/api/mcp`，別的伺服器發的 token 一律拒絕 |
-| refresh token | **60 天**，只存雜湊（`oauth_refresh_tokens`）。每一筆就是一個「授權」，可撤銷 |
-| 撤銷 | access token 帶 `grant` claim（指向它來自的 refresh token），MCP 端點**每次呼叫都檢查該授權仍有效**，所以撤銷立即生效，不用等 access token 過期 |
+| refresh token | 只存雜湊（`oauth_refresh_tokens`），每一列就是一個「授權」，以固定的 `grant_id` 識別。**每次使用都輪換**：舊的作廢、發新的，有效期限從這次起再算 **60 天**（持續使用就不會過期，閒置 60 天才失效）。已輪換掉的舊 token 再被拿來用，代表有人複製了它，**整個授權直接撤銷** |
+| 撤銷 | access token 帶 `grant` claim（授權的 `grant_id`），MCP 端點**每次呼叫都檢查該授權仍有效**，所以撤銷立即生效，不用等 access token 過期 |
+| resource | 依 RFC 8707 檢查 `resource` 必須是本伺服器；客戶端沒帶（不少 OAuth 函式庫還不支援）時視為本伺服器 |
+| 同意畫面 | `/oauth/*` 與 `/login` 帶 `X-Frame-Options: DENY` 與 `frame-ancestors 'none'`，不能被別的網站嵌在 iframe 裡誘導點擊 |
 | 帳號狀態 | 換 token 與每次呼叫都會重查 `users`，帳號被刪或變回 `pending` 立即失效 |
-| 網域 | resource URI 依請求的 host 算，不寫死：正式站、預覽站、本機各自獨立，token 不能跨站用 |
+| 網域 | resource URI 依請求的 host 算，不寫死：正式站、預覽站、本機各自獨立，token 不能跨站用。Vercel 會覆寫 `X-Forwarded-Host` 所以可信；部署到會轉傳客戶端標頭的平台時，設 `MCP_PUBLIC_ORIGIN` 寫死 |
 
 ### 協定
 
@@ -873,7 +877,8 @@ https://<你的網域>/api/mcp
 
 ### 其他注意事項
 
-- 輪換 `MCP_TOKEN_SECRET` 會讓所有 access token 立刻失效（refresh token 不受影響，客戶端會用它換新的 access token）。refresh token 換 access token 時不會輪換，同一把用到過期或被撤銷為止。
+- 輪換 `MCP_TOKEN_SECRET` 會讓所有 access token 立刻失效（refresh token 不受影響，客戶端會用它換新的 access token）。
+- refresh token 輪換的代價：客戶端換 token 時若網路斷掉、沒收到新的 refresh token，下次拿舊的來換會被當成重複使用而撤銷，使用者需要重新連線授權一次。
 
 ---
 
@@ -931,6 +936,7 @@ https://<你的網域>/api/mcp
 | `CREDENTIALS_SECRET_KEY` | 加密 AI 金鑰與 Meta App Secret 的主密鑰（`openssl rand -base64 32`）。**未設定時儲存金鑰會直接失敗**，不會以明文落地 |
 | `MS_CLIENT_ID` / `MS_CLIENT_SECRET` | Microsoft 登入用的 Entra App（見「Microsoft 帳號登入」）。**選填**：沒設就不顯示 Microsoft 按鈕 |
 | `MCP_TOKEN_SECRET` | 簽 MCP access token 的密鑰（`python -c "import secrets; print(secrets.token_urlsafe(48))"`）。**必須和 `JWT_SECRET` 不同**；正式站與預覽站建議各用一把。未設定時 MCP 與 OAuth 端點回 503，其他功能不受影響 |
+| `MCP_PUBLIC_ORIGIN` | 選填。寫死對外網址（例如 `https://agenda.example.com`），MCP 的 resource／issuer 就不再從 `X-Forwarded-Host` 推算。Vercel 上不用設 |
 
 > `JWT_SECRET` 同時被 FastAPI（簽發）與 Next.js `middleware.js`（驗證登入 cookie）讀取，Vercel 上設一次兩邊都拿得到。
 
@@ -1073,6 +1079,7 @@ alembic upgrade head
 15. `0015` — 建立 `oauth_codes`、`oauth_refresh_tokens`（MCP 的 OAuth 授權）
 16. `0016` — 兩張 OAuth 表加 `client_name`（同意當下記下客戶端名稱，給「已授權的應用程式」顯示）
 17. `0017` — `users` 加 `email`（不分大小寫唯一）與 `ms_sub`（綁定的 Microsoft 身分，唯一）
+18. `0018` — `oauth_refresh_tokens` 加 `grant_id`（授權的固定識別碼，回填為原 `token_hash`，已發出的 access token 不受影響）與 `prev_token_hash`（refresh token 輪換與重複使用偵測）
 
 ### 常用指令
 
@@ -1383,7 +1390,7 @@ CREATE TABLE agendas (
 | `club_social_accounts` | `0012` | 分會已連接的 FB 粉專／IG／Threads，長效 token 加密存，`expires_at` 用來提前警告；`(club_id, platform)` 唯一 |
 | `pathways`、`pathway_projects`、`pathway_required`、`pathway_electives` | `0013` | Pathways 目錄，見「Pathways 路徑管理」 |
 | `oauth_codes` | `0015`、`0016` | MCP 授權碼（只存雜湊，5 分鐘） |
-| `oauth_refresh_tokens` | `0015`、`0016` | MCP refresh token，也就是「授權」本身（只存雜湊，60 天）。`client_name` 同意時的客戶端名稱、`revoked_at` 撤銷時間、`last_used_at` 最後使用時間 |
+| `oauth_refresh_tokens` | `0015`、`0016`、`0018` | MCP 的「授權」本身。`grant_id` 固定識別碼；`token_hash` 目前這把 refresh token 的雜湊（每次使用輪換）、`prev_token_hash` 上一把（用來偵測重複使用）；`client_name` 同意時的客戶端名稱、`revoked_at` 撤銷時間、`last_used_at` 最後使用時間、`expires_at` 閒置到期（60 天，每次使用往後延） |
 
 ### users 欄位說明
 

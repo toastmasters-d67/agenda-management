@@ -1,5 +1,19 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  async headers() {
+    // The OAuth consent screen must never render inside someone else's frame:
+    // a page that overlays it could steer the "允許" click without the person
+    // seeing what they are agreeing to. The login page is covered too, since
+    // an unauthenticated consent flow passes through it.
+    const noFraming = [
+      { key: 'X-Frame-Options', value: 'DENY' },
+      { key: 'Content-Security-Policy', value: "frame-ancestors 'none'" },
+    ];
+    return [
+      { source: '/oauth/:path*', headers: noFraming },
+      { source: '/login', headers: noFraming },
+    ];
+  },
   async redirects() {
     return [
       { source: '/', destination: '/login', permanent: false },
