@@ -1531,6 +1531,26 @@ function exportBaseName() {
 }
 
 /**
+ * Resolve once every <img> under `root` has loaded (or failed). html2canvas
+ * draws an image that is still loading as nothing, and updatePreview()
+ * rebuilds the pages' innerHTML — so right after a render every image is
+ * fresh. The cross-origin swap above waits for the images it touches;
+ * same-origin ones (the bundled template art, e.g. Chill Hi High's page-2
+ * hero and QR codes) have to be waited for here, or a capture taken right
+ * after a render comes out with blank boxes where they belong.
+ */
+function waitForImages(root, timeoutMs = 15000) {
+  const pending = [...root.querySelectorAll('img')].filter((img) => !img.complete);
+  if (!pending.length) return Promise.resolve();
+  const all = Promise.all(pending.map((img) => new Promise((resolve) => {
+    img.addEventListener('load', resolve, { once: true });
+    img.addEventListener('error', resolve, { once: true });
+  })));
+  // Never hang the download on one slow image: capture what has arrived.
+  return Promise.race([all, new Promise((r) => setTimeout(r, timeoutMs))]);
+}
+
+/**
  * Put the preview into capture shape and return the function that undoes it:
  * unscaled, and with cross-origin images inlined so html2canvas does not
  * taint the canvas.
@@ -1556,6 +1576,7 @@ async function prepareCapture(element, { forPdf = false } = {}) {
 
   const restoreTheme = await swapThemeImgForCapture(element);
   const restoreImgs = await swapCrossOriginImagesForCapture(element);
+  await waitForImages(element);
   return () => {
     Object.assign(element.style, saved);
     restoreTheme();
@@ -2091,7 +2112,7 @@ export default function AgendaIndexPage() {
           rerender: () => new Promise((resolve) => {
             updatePreview();
             requestAnimationFrame(() => requestAnimationFrame(resolve));
-          }),
+          }).then(() => waitForImages(document.getElementById('agendaPages'))),
           jpg: captureJPGs,
           pdf: capturePDF,
         };
