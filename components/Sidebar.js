@@ -5,12 +5,8 @@ import './sidebar.css';
 
 const NAV_ITEMS = [
   {
-    key: 'home', href: '/home', label: '總覽', systemAdminOnly: false,
+    key: 'home', href: '/home', label: '議程管理', systemAdminOnly: false,
     icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>,
-  },
-  {
-    key: 'index', href: '/index', label: '新建議程', systemAdminOnly: false,
-    icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5v14M5 12h14"/></svg>,
   },
   {
     key: 'roles', href: '/roles', label: '角色安排', systemAdminOnly: false,
@@ -49,8 +45,7 @@ function toggleSidebar() {
 
 // `active`: one of NAV_ITEMS[].key — which nav item to highlight.
 // `navOverrides`: optional { [key]: () => void } — when a nav item's key has
-// an override, clicking it runs the handler instead of a plain navigation
-// (used by /home to carry the selected club through to "新建議程").
+// an override, clicking it runs the handler instead of a plain navigation.
 export default function Sidebar({ active, navOverrides = {} }) {
   return (
     <>
