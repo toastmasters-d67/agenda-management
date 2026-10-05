@@ -3465,6 +3465,7 @@ def mcp_caller(request: Request) -> dict:
     return {"username": row[0], "role": row[1], "club_id": row[2],
             "scopes": set((claims.get("scope") or "").split()),
             "client_id": claims.get("client_id", ""),
+            "grant": claims.get("grant") or "",
             # Tools that call back into this deployment (export_agenda) need
             # to know where it is; handlers do not otherwise see the request.
             "origin": _public_origin(request)}
@@ -5521,6 +5522,52 @@ def _tool_delete_post(caller, args):
                       {"postId": post_id})
 
 
+# ------------------------------------------------------------------ whoami
+_ROLE_NAMES = {"system_admin": "系統管理員", "club_admin": "分會管理員", "club_member": "一般會員"}
+
+
+def _tool_whoami(caller, args):
+    """
+    Who this token acts as, and what it may do — read live, like every call:
+    the role and club come from the users row now, not from when the grant
+    was made, so this is also how to see a role change take effect.
+    """
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT u.name_en, u.name_zh, u.level, c.name, c.name_zh"
+                        " FROM users u LEFT JOIN clubs c ON c.id = u.club_id"
+                        " WHERE u.username=%s", (caller["username"],))
+            u = cur.fetchone() or (None,) * 5
+            cur.execute("SELECT client_name, created_at, expires_at FROM oauth_refresh_tokens"
+                        " WHERE grant_id=%s", (caller.get("grant") or "",))
+            gr = cur.fetchone() or (None, None, None)
+    club = _club_label(u[3], u[4], None) if u[3] or u[4] else ""
+    scopes = [s for s in MCP_SCOPES if s in caller["scopes"]]
+    iso = lambda d: d.isoformat() if d else ""
+    info = {
+        "username": caller["username"],
+        "nameEn": u[0] or "", "nameZh": u[1] or "", "level": u[2] or "",
+        "role": caller["role"], "roleName": _ROLE_NAMES.get(caller["role"], caller["role"]),
+        "clubId": caller["club_id"], "club": club,
+        "scopes": [{"key": s, "label": MCP_SCOPES[s]} for s in scopes],
+        "missingScopes": [s for s in MCP_SCOPES if s not in caller["scopes"]],
+        "client": gr[0] or "", "grantedAt": iso(gr[1]), "grantExpiresAt": iso(gr[2]),
+    }
+    name = " ".join(x for x in (info["nameEn"], info["nameZh"]) if x)
+    lines = [
+        f"帳號：{info['username']}" + (f"（{name}{', ' + info['level'] if info['level'] else ''}）" if name else ""),
+        f"角色：{info['roleName']}" + ("（可操作所有分會）" if caller["role"] == "system_admin"
+                                      else f"｜分會：{club or '未設定'}（club_id={caller['club_id']}）"),
+        f"客戶端：{info['client'] or '未知'}，授權於 {info['grantedAt'][:10] or '?'}",
+        "這個授權可以：" + "、".join(MCP_SCOPES[s] for s in scopes),
+    ]
+    if info["missingScopes"]:
+        lines.append("沒有授權：" + "、".join(MCP_SCOPES[s] for s in info["missingScopes"])
+                     + "（要用的話需重新授權）")
+    lines.append("實際能做的事仍以帳號角色為準：授權只會限縮、不會超過你在網站上的權限。")
+    return _tool_text("\n".join(lines), info)
+
+
 # ------------------------------------------------------------------ catalogue
 # Spelled out because a system admin's omitted club_id silently means "every
 # club", and a model that does not know that reads the mix as one club.
@@ -5565,6 +5612,14 @@ _AGENDA_FIELDS_SCHEMA = {
 # person first (ChatGPT asks before any tool not marked readOnlyHint). They
 # are advice to the client, never a permission — scopes and role checks are.
 MCP_TOOLS = [
+    {
+        "name": "whoami", "scope": None, "title": "我是誰",
+        "description": "回傳目前操作 MCP 的身分：帳號、姓名、角色、所屬分會，以及這個授權允許與缺少的權限。"
+                       "不確定能做什麼、或使用者問「我是誰」時用這支。",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+        "handler": _tool_whoami,
+    },
     {
         "name": "list_clubs", "scope": "posts:read", "title": "列出分會",
         "description": "列出可以操作的分會與 club_id。使用者用名稱指稱分會時（中文名、英文名或簡稱），"
@@ -6039,9 +6094,10 @@ async def mcp_endpoint(request: Request):
         tool = next((t for t in MCP_TOOLS if t["name"] == name), None)
         if tool is None:
             return _rpc_error(req_id, -32602, f"沒有這個工具：{name}")
-        if tool["scope"] not in caller["scopes"]:
+        if tool["scope"] is not None and tool["scope"] not in caller["scopes"]:
             # A scope challenge, not a plain refusal: the client can ask the
-            # user to grant it and retry.
+            # user to grant it and retry. (scope None: any valid token — only
+            # whoami, which reads nothing but the caller's own identity.)
             require_scope(caller, tool["scope"], request)
         try:
             result = tool["handler"](caller, params.get("arguments") or {})

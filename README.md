@@ -829,6 +829,7 @@ https://<你的網域>/api/mcp
 
 | 工具 | scope | 說明 |
 |------|-------|------|
+| `whoami` | （不需要） | 目前操作 MCP 的身分：帳號、姓名、角色、所屬分會、客戶端，以及這個授權有／沒有哪些 scope。角色與分會是當下從 `users` 查的。任何有效 token 都能呼叫——它只讀呼叫者自己的資料 |
 | `list_clubs` | `posts:read` | 列出可操作的分會與 `club_id`（系統管理員看到全部，其他人只看到自己的分會）。讓模型能把「Entrepreneur TM」這類名稱對應到 id |
 | `list_meetings` | `posts:read` | 列出分會例會（最近的在前），回傳 `agendaId`，每筆標明所屬分會 |
 | `get_meeting` | `posts:read` | 一場例會的日期、時間、地址、入場費、主題；缺宣傳必填欄位會指出 |
