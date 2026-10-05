@@ -28,20 +28,32 @@ export const maxDuration = 60;
 const FORMATS = ['jpg', 'pdf'];
 
 // Chromium on Vercel ships with no CJK font at all, so every 中文 glyph would
-// render as an empty box. fontconfig there also reads /tmp/fonts (see
-// @sparticuz/chromium's fonts.conf), so the font is fetched into it once per
-// warm instance. Google Fonts answers a non-browser client with plain TTF.
+// render as an empty box. @sparticuz/chromium unpacks its fonts.tar.br —
+// fonts.conf included — into /tmp/fonts and points fontconfig there, so the
+// CJK font is added to that same folder once per warm instance. Google Fonts
+// answers a non-browser client with plain TTF.
+//
+// Order matters: the package skips unpacking if /tmp/fonts already exists.
+// Creating the folder first leaves Chromium with no fonts.conf, and it dies
+// on its first navigation ("Navigating frame was detached").
 const FONT_DIR = '/tmp/fonts';
 const FONT_CSS = 'https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;700';
 
+/** A /tmp/fonts without fonts.conf (made by an older build) blocks unpacking; clear it. */
+async function clearBrokenFontDir() {
+  const fs = await import('node:fs/promises');
+  try {
+    const have = await fs.readdir(FONT_DIR);
+    if (!have.includes('fonts.conf')) await fs.rm(FONT_DIR, { recursive: true, force: true });
+  } catch { /* not there — nothing to clear */ }
+}
+
+/** Runs after chromium.executablePath(), which is what unpacks fonts.conf. */
 async function ensureCjkFont() {
   const fs = await import('node:fs/promises');
   const path = await import('node:path');
-  try {
-    const have = await fs.readdir(FONT_DIR);
-    if (have.some((f) => f.startsWith('NotoSansTC'))) return;
-  } catch { /* not there yet */ }
-  await fs.mkdir(FONT_DIR, { recursive: true });
+  const have = await fs.readdir(FONT_DIR);
+  if (have.some((f) => f.startsWith('NotoSansTC'))) return;
   const css = await (await fetch(FONT_CSS, { headers: { 'User-Agent': 'curl/8' } })).text();
   const urls = [...css.matchAll(/url\((https:[^)]+\.ttf)\)/g)].map((m) => m[1]);
   if (!urls.length) throw new Error('無法取得中文字型');
@@ -51,7 +63,7 @@ async function ensureCjkFont() {
   }));
 }
 
-async function launchBrowser(diag = {}) {
+async function launchBrowser() {
   const puppeteer = (await import('puppeteer-core')).default;
   // Local development: point at an installed Chrome; the bundled Chromium is
   // a Linux (Lambda) binary.
@@ -60,20 +72,12 @@ async function launchBrowser(diag = {}) {
   }
   const chromium = (await import('@sparticuz/chromium')).default;
   chromium.setGraphicsMode = false;
-  if (diag.font !== false) await ensureCjkFont();
-  // --single-process (in the package's defaults, for tight Lambda memory)
-  // detaches the frame on the cross-origin navigation from about:blank to the
-  // agenda page — "Navigating frame was detached". A Vercel function has the
-  // memory to run Chromium normally.
-  // Out of single-process mode the processes talk over shared memory, and the
-  // sandbox's /dev/shm is tiny — net::ERR_INSUFFICIENT_RESOURCES on the first
-  // request. --disable-dev-shm-usage moves that to /tmp.
-  const args = diag.single
-    ? chromium.args
-    : [...chromium.args.filter((a) => a !== '--single-process'), '--disable-dev-shm-usage'];
+  await clearBrokenFontDir();
+  const executablePath = await chromium.executablePath();   // unpacks /tmp/fonts
+  await ensureCjkFont();
   return puppeteer.launch({
-    args: await puppeteer.defaultArgs({ args, headless: 'shell' }),
-    executablePath: await chromium.executablePath(),
+    args: await puppeteer.defaultArgs({ args: chromium.args, headless: 'shell' }),
+    executablePath,
     headless: 'shell',
   });
 }
@@ -131,24 +135,13 @@ export async function POST(request) {
 
   let browser;
   try {
-    // TEMP diagnostics (removed once production rendering is confirmed).
-    const diag = body.diag || {};
-    browser = await launchBrowser(diag);
-    // Reuse the tab Chromium opened with rather than adding one: a second
-    // target is one more thing for a constrained runtime to lose track of.
-    const page = (await browser.pages())[0] || await browser.newPage();
+    browser = await launchBrowser();
+    const page = await browser.newPage();
     // The editor reports load failures with alert(), which would otherwise
     // hang a headless page until the timeout. Dismiss, but keep the text —
     // it is the actual reason ("找不到此議程", a 403, …).
     const alerts = [];
     page.on('dialog', (d) => { alerts.push(d.message()); d.dismiss().catch(() => {}); });
-    const events = [];
-    page.on('error', (e) => events.push(`crash: ${e.message}`));
-    page.on('pageerror', (e) => events.length < 8 && events.push(`js: ${String(e.message).slice(0, 160)}`));
-    page.on('requestfailed', (r) => events.length < 8 && events.push(`req: ${r.url().slice(0, 100)} ${r.failure()?.errorText}`));
-    browser.on('disconnected', () => events.push('browser disconnected'));
-    request.signal?.addEventListener?.('abort', () => {});
-    globalThis.__exportEvents = events;
     // A4 at the editor's layout width; scale stays 1 so the preview is not
     // shrunk (applyPreviewScale only scales down for narrow screens).
     await page.setViewport({ width: 1400, height: 1200, deviceScaleFactor: 1 });
@@ -157,11 +150,6 @@ export async function POST(request) {
       httpOnly: true, secure: origin.startsWith('https:'), sameSite: 'Lax',
     });
 
-    const path = typeof diag.path === 'string' && diag.path.startsWith('/') ? diag.path : `/agenda?id=${agendaId}`;
-    if (diag.path) {
-      await page.goto(`${origin}${path}`, { waitUntil: 'networkidle0', timeout: 30000 });
-      return NextResponse.json({ ok: true, url: page.url(), title: await page.title(), events });
-    }
     await page.goto(`${origin}/agenda?id=${agendaId}`, { waitUntil: 'networkidle0', timeout: 30000 });
     await page.waitForFunction(
       () => window.__agendaExport && window.__agendaExport.ready
@@ -199,8 +187,7 @@ export async function POST(request) {
     return NextResponse.json({ name: out.name, jpgPages: (out.jpg || []).length, pdf: !!out.pdf });
   } catch (e) {
     console.error('agenda-export failed', e);
-    const ev = (globalThis.__exportEvents || []).join(' | ');
-    return NextResponse.json({ detail: `議程輸出失敗：${e.message || e}${ev ? `（${ev}）` : ''}` }, { status: 502 });
+    return NextResponse.json({ detail: `議程輸出失敗：${e.message || e}` }, { status: 502 });
   } finally {
     if (browser) await browser.close().catch(() => {});
   }
