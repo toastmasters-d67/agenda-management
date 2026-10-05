@@ -16,7 +16,8 @@ import './authorize.css';
 // public and cannot be undone, so it arrives unticked and has to be turned on
 // by hand — see MCP_SCOPES in api/index.py.
 
-const REQUIRED_PARAMS = ['client_id', 'redirect_uri', 'code_challenge', 'resource'];
+// `resource` is optional: a client that omits it gets this server (see _check_authorize).
+const REQUIRED_PARAMS = ['client_id', 'redirect_uri', 'code_challenge'];
 
 export default function AuthorizePage() {
   const [state, setState] = useState({ phase: 'loading' });
@@ -62,7 +63,7 @@ export default function AuthorizePage() {
           redirect_uri: q.get('redirect_uri'),
           code_challenge: q.get('code_challenge'),
           code_challenge_method: q.get('code_challenge_method') || 'S256',
-          resource: q.get('resource'),
+          resource: q.get('resource') || '',
           state: q.get('state') || '',
           scope: Object.entries(granted).filter(([, on]) => on).map(([k]) => k).join(' '),
         },

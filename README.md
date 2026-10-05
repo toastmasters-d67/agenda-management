@@ -343,7 +343,7 @@ const META_FIELDS = [
 | 快捷鍵 | `Ctrl/Cmd + S` 儲存全部；有未儲存變更時離開頁面會提示 |
 | 權限 | `club_member` 唯讀（欄位 disabled、寫入按鈕隱藏）；`club_admin` 以上可儲存 |
 
-> 例會必須**先有議程**才會出現在此頁。要規劃新的一場，請先用「新建議程」建立該場次。
+> 例會必須**先有議程**才會出現在此頁。要規劃新的一場，請先在「議程管理」頁按「新建議程」建立該場次（或用矩陣最右邊的「＋」）。
 
 ---
 
@@ -823,39 +823,67 @@ https://<你的網域>/api/mcp
 
 客戶端會自己走完 OAuth：讀 `/.well-known/...` → 把使用者帶到 `/oauth/authorize` 同意畫面（沒登入會先到 `/login`，登入後回到同意畫面）→ 換到 token。不需要事先在系統裡登記客戶端。
 
-前提：伺服器有設 `MCP_TOKEN_SECRET`，資料庫已跑到 migration `0016`。
+前提：伺服器有設 `MCP_TOKEN_SECRET`，資料庫已跑到 migration `0018`。
 
 ### 工具與 scope
 
 | 工具 | scope | 說明 |
 |------|-------|------|
-| `list_meetings` | `posts:read` | 列出分會例會（最近的在前），回傳 `agendaId` |
+| `whoami` | （不需要） | 目前操作 MCP 的身分：帳號、姓名、角色、所屬分會、客戶端，以及這個授權有／沒有哪些 scope。角色與分會是當下從 `users` 查的。任何有效 token 都能呼叫——它只讀呼叫者自己的資料 |
+| `list_clubs` | `posts:read` | 列出可操作的分會與 `club_id`（系統管理員看到全部，其他人只看到自己的分會）。讓模型能把「Entrepreneur TM」這類名稱對應到 id |
+| `list_meetings` | `posts:read` | 列出分會例會（最近的在前），回傳 `agendaId`，每筆標明所屬分會 |
 | `get_meeting` | `posts:read` | 一場例會的日期、時間、地址、入場費、主題；缺宣傳必填欄位會指出 |
 | `list_posts` | `posts:read` | 列出貼文草稿與已發布貼文 |
 | `get_post` | `posts:read` | 一則貼文的完整內容（主文案、各平台版本、圖片、發布狀態） |
 | `create_post` | `posts:write` | 建立草稿（`promo` / `recap` / `other`） |
 | `update_post` | `posts:write` | 修改標題、文案、用途、狀態、綁定例會、各平台版本 |
 | `generate_copy` | `ai:generate` | 用 AI 產生文案並存進貼文，**消耗呼叫者（或分會共用）的 AI 額度** |
-| `publish_post` | `publish` | 發布到 Facebook／Instagram／Threads，**公開且無法透過本系統收回** |
+| `publish_post` | `publish` | 發布到 Facebook／Instagram／Threads，**公開且無法透過本系統收回**。已發布過的平台會略過，要再發一則得帶 `republish: true` |
+| `add_post_image` | `posts:write` | 把 AI 客戶端自己做的圖（或任何圖）加到貼文：`image`（ChatGPT 的檔案參數，`_meta["openai/fileParams"]`）、`image_url`（公開 https）或 `image_base64`。存到 R2，15 MB 上限，只收 JPG／PNG／WebP／GIF（看檔頭判斷，不信副檔名） |
+| `remove_post_image` | `posts:write` | 依順序（從 1 開始）移除貼文的一張圖 |
+| `generate_post_image` | `ai:generate` | 用平台的 OpenAI 生圖並加到貼文，與網頁「生圖」同一個函式（`_generate_image`），**消耗呼叫者（或分會共用）的 OpenAI 額度** |
+| `get_agenda` | `posts:read` | 一份議程的完整 `data` |
+| `create_agenda` | `agendas:write` | 建立議程。時間地點沿用該分會上一份議程（再退到分會設定）；同一天已有議程時拒絕並回傳既有 id。`import_roles: true` 從角色試算表帶入 |
+| `update_agenda` | `agendas:write` | 只改有給的欄位；`speeches`／`evaluators` 依位置合併（`null` 表示該位置不變），刪減篇數用 `speech_count`／`evaluator_count`。`import_roles` 只補空白的角色，`overwrite_roles` 才覆蓋 |
+| `export_agenda` | `posts:read` | 議程輸出 PDF／JPG（每頁一張），回傳 R2 公開連結。見下方「議程輸出」 |
+| `set_agenda_theme_image` | `agendas:write` | 設定（或 `clear` 移除）議程的主題圖 `themeImgUrl`，圖片來源同 `add_post_image`。只有 `standard`、`entrepreneur` 版型會顯示主題圖，其他版型直接拒絕 |
+| `generate_agenda_theme_image` | `ai:generate` | 用平台 OpenAI 生成主題圖並套用；沒給 prompt 時依例會主題產生。版型不顯示主題圖時**先拒絕、不花錢** |
+| `get_roles` | `posts:read` | 角色安排表：分會接下來（或指定範圍）每場已安排的角色 |
+| `assign_roles` | `agendas:write` | 用角色安排頁的角色 id（`tme`、`speech2`、`evaluator1`…）安排一場的角色。人名比對會員名單改成名單寫法，版型沒有的角色略過，`""` 清空 |
+| `import_roles_sheet` | `agendas:write` | 角色安排頁的「從 Google Sheet 匯入」，一次匯整個日期範圍。預設只補空白、不建立議程；`overwrite`、`create_missing` 開啟對應行為；只有會議編號的欄視為空檔跳過 |
+| `list_members` | `posts:read` | 分會會員的中英文名與等級（不含帳號、Email），安排角色時對照人名用 |
+| `get_club` | `posts:read` | 分會設定（只回傳議程用欄位；`meta_app_id` 等其他設定不回傳） |
+| `update_club` | `clubs:write` | 修改分會欄位與版型設定，只改有給的；`settings` 給 `null` 刪除。**限系統管理員**（與 `PUT /api/clubs/{id}` 同規則） |
+| `create_club` | `clubs:write` | 建立分會。限系統管理員 |
+| `set_club_image` | `clubs:write` | 更換 Logo、各 QR code、第二頁圖片。限系統管理員 |
+| `delete_post` | `posts:write` | 從系統刪除一則貼文（草稿或已發布的都可以），與網頁的刪除相同。只刪系統紀錄，已發到社群平台上的貼文不受影響——本系統不管理發布之後的社群貼文 |
 
-- **預設 scope** 是 `posts:read posts:write ai:generate`。`publish` 不在預設裡，也不在 `scopes_supported` 裡：客戶端要用就得另外請求，同意畫面上它預設**不勾**，並標示「公開且無法收回」。
+- **所有 scope 都公開宣告**（`scopes_supported` 與 401 挑戰都列出），所以客戶端會一起請求；但同意畫面上 `publish` 預設**不勾**，並標示「公開且無法收回」，要使用者自己勾。客戶端沒指定 scope 時給 `posts:read posts:write agendas:write ai:generate`。
+  - `agendas:write`、`clubs:write` 是後來加的：在它之前授權的客戶端呼叫這些工具會收到 403 補授權挑戰。有些客戶端（例如 Codex）收到後不會自己帶使用者回同意畫面，重新加入伺服器也會沿用舊憑證——要在「設定 → 已授權的應用程式」撤銷舊授權，客戶端下次呼叫拿到 401 才會重新走授權。
+- **分會管理工具只開放系統管理員**，與網頁一致（分會管理頁、`/api/clubs` 寫入都限 `system_admin`）。能改的欄位是分會管理頁會編輯的那些：分會本身的欄位，加上各版型 manifest（`lib/agendaTemplates.js` 的 `settings`）宣告的設定。`clubs.settings` 裡的其他鍵（Meta／Threads app id）屬於其他畫面，不讀也不寫。刪除分會沒有開放給 MCP。
+- **角色安排工具**讀寫的就是 `agendas.data`（角色安排頁本來就沒有獨立的儲存），角色 id 與規則和頁面相同；`assign_roles` 只收角色欄位與場次／主題，日期、地點請用 `update_agenda`。
+  - 早先的做法是連宣告都不宣告 `publish`、`tools/list` 也藏起 `publish_post`，結果模型看不到工具就不會呼叫，客戶端也不會請求這個 scope，同意畫面根本沒機會問——等於永遠拿不到。
+- 請求的 scope 全都不認得時回 400（`openid`、`offline_access` 這類 OIDC 慣用 scope 除外，忽略即可）。
+- **分會隔離**：`club_member` 與 `club_admin` 的 `club_id` 固定是自己的分會，帶別的一律 403；用 `post_id`／`agenda_id` 直接指也會先比對所屬分會。只有 `system_admin` 能跨分會，而它**不帶 `club_id` 時會拿到所有分會混在一起的結果**，所以清單每筆都標分會，工具說明也要求帶 `club_id`。
 - **scope 只會收窄、不會放寬權限。** 每支工具底下照跑網頁版用的同一套 helper 與角色檢查（`_social_scope`、分會管理員限制）；`club_member` 拿到 `posts:write` 也一樣寫不了。
-- `tools/list` 只列出這個 token 有 scope 的工具；呼叫沒 scope 的工具會收到 403 + `insufficient_scope` 挑戰，客戶端可以請使用者補授權。
+- `tools/list` **一律列出全部工具**，並帶 `annotations`（`readOnlyHint` / `destructiveHint` / `openWorldHint`），客戶端（例如 ChatGPT）據此決定哪些呼叫要先問使用者。呼叫沒 scope 的工具會收到 403 + `insufficient_scope` 挑戰，挑戰裡的 scope 是「現有的＋缺的」，客戶端補授權後不會掉掉原本的權限。
 - 工具層級的失敗（找不到貼文、平台未連接、缺欄位）回 `isError: true` 的結果讓模型自行修正，不回 JSON-RPC 錯誤。
 
 ### 授權伺服器的設計
 
 | 項目 | 做法 |
 |------|------|
-| 客戶端註冊（CIMD） | **Client ID Metadata Documents**：`client_id` 本身是 https 網址，伺服器去抓、驗證 `client_id` 與網址相符、`redirect_uri` 在清單內。抓取限 https、擋內部位址、64 KB 上限、8 秒逾時 |
+| 客戶端註冊（CIMD） | **Client ID Metadata Documents**：`client_id` 本身是 https 網址，伺服器去抓、驗證 `client_id` 與網址相符、`redirect_uri` 在清單內。抓取限 https、**DNS 解析後**擋內部位址（私有、loopback、link-local 等）、**不跟隨轉址**、64 KB 上限、8 秒逾時 |
 | 客戶端註冊（DCR） | 給還不支援 CIMD 的客戶端（例如 Claude Desktop 的 connector）：`POST /api/oauth/register`（RFC 7591）。**不存資料表**：`client_id` 是 `dcr:` 加上用 `MCP_TOKEN_SECRET` 簽的 JWT，內含 redirect_uris 與名稱，改了就驗不過。redirect_uri 限 https，或 localhost 的 http（CLI 類客戶端）。任何人都能註冊、名稱可以亂取，所以同意畫面會另外顯示「授權後會導回哪個網域」 |
 | PKCE | 必填，只收 `S256` |
 | 授權碼 | 5 分鐘有效，只存 SHA-256 雜湊，`DELETE … RETURNING` 保證只能用一次 |
 | access token | JWT（`MCP_TOKEN_SECRET` 簽），**1 小時**；`aud` 綁定 `https://<host>/api/mcp`，別的伺服器發的 token 一律拒絕 |
-| refresh token | **60 天**，只存雜湊（`oauth_refresh_tokens`）。每一筆就是一個「授權」，可撤銷 |
-| 撤銷 | access token 帶 `grant` claim（指向它來自的 refresh token），MCP 端點**每次呼叫都檢查該授權仍有效**，所以撤銷立即生效，不用等 access token 過期 |
+| refresh token | 只存雜湊（`oauth_refresh_tokens`），每一列就是一個「授權」，以固定的 `grant_id` 識別。**每次使用都輪換**：舊的作廢、發新的，有效期限從這次起再算 **60 天**（持續使用就不會過期，閒置 60 天才失效）。已輪換掉的舊 token 再被拿來用，代表有人複製了它，**整個授權直接撤銷** |
+| 撤銷 | access token 帶 `grant` claim（授權的 `grant_id`），MCP 端點**每次呼叫都檢查該授權仍有效**，所以撤銷立即生效，不用等 access token 過期 |
+| resource | 依 RFC 8707 檢查 `resource` 必須是本伺服器；客戶端沒帶（不少 OAuth 函式庫還不支援）時視為本伺服器 |
+| 同意畫面 | `/oauth/*` 與 `/login` 帶 `X-Frame-Options: DENY` 與 `frame-ancestors 'none'`，不能被別的網站嵌在 iframe 裡誘導點擊 |
 | 帳號狀態 | 換 token 與每次呼叫都會重查 `users`，帳號被刪或變回 `pending` 立即失效 |
-| 網域 | resource URI 依請求的 host 算，不寫死：正式站、預覽站、本機各自獨立，token 不能跨站用 |
+| 網域 | resource URI 依請求的 host 算，不寫死：正式站、預覽站、本機各自獨立，token 不能跨站用。Vercel 會覆寫 `X-Forwarded-Host` 所以可信；部署到會轉傳客戶端標頭的平台時，設 `MCP_PUBLIC_ORIGIN` 寫死 |
 
 ### 協定
 
@@ -863,6 +891,25 @@ https://<你的網域>/api/mcp
 - **目前版本 `2026-07-28`**：單一 `POST /api/mcp`，沒有 session、沒有 `initialize`，每個請求在 `params._meta` 自帶 `protocolVersion` 與 `clientCapabilities`。`MCP-Protocol-Version`、`Mcp-Method`、`Mcp-Name` 標頭必須與內容一致，不一致回 `-32020`。
 - **舊版 `2025-11-25` / `2025-06-18` / `2025-03-26`**（`_meta` 沒有 protocolVersion 時走這條）：支援 `initialize` 握手、`notifications/*`（回 202）、`ping`、`tools/list`、`tools/call`。版本看 `MCP-Protocol-Version` 標頭，沒帶就當 `2025-03-26`。**不發 `Mcp-Session-Id`**，舊版規格允許無狀態伺服器這樣做，所以一樣能跑在 serverless 上。回應一律是 JSON，不用 SSE。不支援 JSON-RPC 批次。
 - `GET` / `DELETE /api/mcp` 回 405（沒有伺服器主動推送的串流，也沒有 session 可以結束）。
+
+### 議程輸出（`export_agenda`）
+
+議程表是在瀏覽器裡畫的（各分會版型、列高平均、html2canvas），網頁的「下載 JPG／PDF」是截那個畫面。伺服器端不另寫一套 renderer，而是**用無頭 Chromium 開同一個 `/agenda` 頁面，請頁面做與按鈕完全相同的截圖**：
+
+1. MCP 工具（Python）檢查權限，產生 R2 的 presigned PUT 網址（PDF 一個、JPG 最多 4 頁），再簽一把**5 分鐘的登入 token**（呼叫者本人）。
+2. 呼叫 Next 的 `POST /svc/agenda-export`（`app/svc/agenda-export/route.js`，Node runtime）。它驗 token（`JWT_SECRET`）、用 `@sparticuz/chromium` + `puppeteer-core` 以這個身分開 `/agenda?id=…`，等 `window.__agendaExport.ready`，呼叫頁面上的 `jpg()`／`pdf()`（與下載按鈕共用 `captureJPGs`／`capturePDF`）。
+3. 檔案直接 PUT 到 R2，不經過兩邊 function 的回應大小上限；工具回傳公開連結（路徑含亂數，拿到連結的人都能開）。
+
+注意：
+- 只開**自己這個部署**的頁面（不看請求帶來的 host），上傳網址限定本帳號的 R2 網域——請求裡的 token 不會被送去別的地方。正式站從 Python 呼叫時用 `VERCEL_PROJECT_PRODUCTION_URL`，可用 `AGENDA_RENDER_URL` 覆寫。
+- Vercel 的 Chromium 沒有中文字型，第一次（每個暖機實例一次）會從 Google Fonts 下載 Noto Sans TC 與 Noto Emoji（黑白，給 ⏱ 這類符號）到 `/tmp/fonts`。**順序很重要**：`@sparticuz/chromium` 只在 `/tmp/fonts` 不存在時才解壓自帶的 `fonts.conf`，所以要先呼叫 `chromium.executablePath()` 再補字型；反過來 Chromium 會沒有字型設定，一導覽就斷線（`Navigating frame was detached`）。
+- 一次約 10～30 秒（冷啟動較久），都在 60 秒的 `maxDuration` 內。
+- 頁面用 `alert()` 報錯，route 會關掉對話框並把文字帶進錯誤訊息。
+- 本機開發：Chromium 套件是 Linux 版，設 `CHROME_EXECUTABLE_PATH` 指向本機的 Chrome。不帶 `uploads` 呼叫 route 時檔案以 data URL 直接回傳，不會寫入 R2。
+
+### 從角色試算表帶入（`import_roles`）
+
+`api/index.py` 的 `_parse_roles_sheet` / `_import_sheet_roles` 是 `lib/rolesSheet.js` 與 `app/roles/page.js` 匯入邏輯的 Python 版：同樣的列名對照表、`PM 4-1` 拆成路徑與等級、`TBD` 等視為空白、人名比對會員名單後改成 `Name, LEVEL`、版型沒有的角色略過。**改那兩個 JS 檔的對照表時，Python 這份要一起改。**
 
 ### 撤銷授權
 
@@ -873,7 +920,8 @@ https://<你的網域>/api/mcp
 
 ### 其他注意事項
 
-- 輪換 `MCP_TOKEN_SECRET` 會讓所有 access token 立刻失效（refresh token 不受影響，客戶端會用它換新的 access token）。refresh token 換 access token 時不會輪換，同一把用到過期或被撤銷為止。
+- 輪換 `MCP_TOKEN_SECRET` 會讓所有 access token 立刻失效（refresh token 不受影響，客戶端會用它換新的 access token）。
+- refresh token 輪換的代價：客戶端換 token 時若網路斷掉、沒收到新的 refresh token，下次拿舊的來換會被當成重複使用而撤銷，使用者需要重新連線授權一次。
 
 ---
 
@@ -931,6 +979,9 @@ https://<你的網域>/api/mcp
 | `CREDENTIALS_SECRET_KEY` | 加密 AI 金鑰與 Meta App Secret 的主密鑰（`openssl rand -base64 32`）。**未設定時儲存金鑰會直接失敗**，不會以明文落地 |
 | `MS_CLIENT_ID` / `MS_CLIENT_SECRET` | Microsoft 登入用的 Entra App（見「Microsoft 帳號登入」）。**選填**：沒設就不顯示 Microsoft 按鈕 |
 | `MCP_TOKEN_SECRET` | 簽 MCP access token 的密鑰（`python -c "import secrets; print(secrets.token_urlsafe(48))"`）。**必須和 `JWT_SECRET` 不同**；正式站與預覽站建議各用一把。未設定時 MCP 與 OAuth 端點回 503，其他功能不受影響 |
+| `AGENDA_RENDER_URL` | 選填。`export_agenda` 呼叫議程輸出服務的網址（Next 那一側，例如本機 `http://localhost:3000`）。正式站不用設 |
+| `CHROME_EXECUTABLE_PATH` | 只有本機開發要設：本機 Chrome 執行檔路徑，給 `/svc/agenda-export` 用 |
+| `MCP_PUBLIC_ORIGIN` | 選填。寫死對外網址（例如 `https://agenda.example.com`），MCP 的 resource／issuer 就不再從 `X-Forwarded-Host` 推算。Vercel 上不用設 |
 
 > `JWT_SECRET` 同時被 FastAPI（簽發）與 Next.js `middleware.js`（驗證登入 cookie）讀取，Vercel 上設一次兩邊都拿得到。
 
@@ -1023,6 +1074,15 @@ GitHub → Settings → Environments → `production` 需要的 secrets：
 - 登入 cookie 的 path 是 `/club-management`，避免跟同網域的其他專案互相干擾。
 - FastAPI 經由 `/svc` 代理收到的 Host 是 `api:8001`，所以 OAuth / MCP 的 issuer 與 resource 以 `PUBLIC_BASE_URL` 為準；Microsoft 登入的回呼網址以 `PUBLIC_ORIGIN` 為準。
 - Microsoft 登入（Entra）、Meta 的 redirect URI 要登記為 `https://postgen-d67.eastasia.cloudapp.azure.com/club-management/svc/auth/microsoft/callback` 與 `.../club-management/club`。
+- **MCP 的 `export_agenda`（議程 PDF／JPG）在這個部署目前不能用**：它用無頭 Chromium 開議程頁截圖，而 `Dockerfile.web` 的 Alpine 映像沒有 Chromium（Vercel 用的內建版本只能在 Amazon Linux 上跑）。呼叫時會回「這個部署沒有可用的 Chromium」，其他 MCP 工具不受影響。要啟用的話，在 web 映像安裝 Chromium 與中文字型，並設定 `CHROME_EXECUTABLE_PATH`，例如：
+
+  ```dockerfile
+  # Dockerfile.web 最後一個 stage，USER node 之前
+  RUN apk add --no-cache chromium font-noto-cjk
+  ENV CHROME_EXECUTABLE_PATH=/usr/bin/chromium-browser
+  ```
+
+  route 會自己開 `http://127.0.0.1:3000/club-management/agenda`（同一個容器、加上 basePath），不需要額外設定網址。
 
 ---
 
@@ -1113,6 +1173,7 @@ alembic upgrade head
 15. `0015` — 建立 `oauth_codes`、`oauth_refresh_tokens`（MCP 的 OAuth 授權）
 16. `0016` — 兩張 OAuth 表加 `client_name`（同意當下記下客戶端名稱，給「已授權的應用程式」顯示）
 17. `0017` — `users` 加 `email`（不分大小寫唯一）與 `ms_sub`（綁定的 Microsoft 身分，唯一）
+18. `0018` — `oauth_refresh_tokens` 加 `grant_id`（授權的固定識別碼，回填為原 `token_hash`，已發出的 access token 不受影響）與 `prev_token_hash`（refresh token 輪換與重複使用偵測）
 
 ### 常用指令
 
@@ -1423,7 +1484,7 @@ CREATE TABLE agendas (
 | `club_social_accounts` | `0012` | 分會已連接的 FB 粉專／IG／Threads，長效 token 加密存，`expires_at` 用來提前警告；`(club_id, platform)` 唯一 |
 | `pathways`、`pathway_projects`、`pathway_required`、`pathway_electives` | `0013` | Pathways 目錄，見「Pathways 路徑管理」 |
 | `oauth_codes` | `0015`、`0016` | MCP 授權碼（只存雜湊，5 分鐘） |
-| `oauth_refresh_tokens` | `0015`、`0016` | MCP refresh token，也就是「授權」本身（只存雜湊，60 天）。`client_name` 同意時的客戶端名稱、`revoked_at` 撤銷時間、`last_used_at` 最後使用時間 |
+| `oauth_refresh_tokens` | `0015`、`0016`、`0018` | MCP 的「授權」本身。`grant_id` 固定識別碼；`token_hash` 目前這把 refresh token 的雜湊（每次使用輪換）、`prev_token_hash` 上一把（用來偵測重複使用）；`client_name` 同意時的客戶端名稱、`revoked_at` 撤銷時間、`last_used_at` 最後使用時間、`expires_at` 閒置到期（60 天，每次使用往後延） |
 
 ### users 欄位說明
 

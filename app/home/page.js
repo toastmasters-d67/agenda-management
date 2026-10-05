@@ -319,7 +319,7 @@ export default function HomePage() {
 
   return (
     <>
-      <Sidebar active="home" navOverrides={{ index: goNewAgenda }} />
+      <Sidebar active="home" />
 
       <div className="main-area">
         <header className="topbar">
