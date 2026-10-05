@@ -855,6 +855,7 @@ https://<你的網域>/api/mcp
 | `update_club` | `clubs:write` | 修改分會欄位與版型設定，只改有給的；`settings` 給 `null` 刪除。**限系統管理員**（與 `PUT /api/clubs/{id}` 同規則） |
 | `create_club` | `clubs:write` | 建立分會。限系統管理員 |
 | `set_club_image` | `clubs:write` | 更換 Logo、各 QR code、第二頁圖片。限系統管理員 |
+| `delete_post` | `posts:write` | 從系統刪除一則貼文（草稿或已發布的都可以），與網頁的刪除相同。只刪系統紀錄，已發到社群平台上的貼文不受影響——本系統不管理發布之後的社群貼文 |
 
 - **所有 scope 都公開宣告**（`scopes_supported` 與 401 挑戰都列出），所以客戶端會一起請求；但同意畫面上 `publish` 預設**不勾**，並標示「公開且無法收回」，要使用者自己勾。客戶端沒指定 scope 時給 `posts:read posts:write agendas:write ai:generate`。
   - `agendas:write`、`clubs:write` 是後來加的：在它之前授權的客戶端呼叫這些工具會收到 403 補授權挑戰。有些客戶端（例如 Codex）收到後不會自己帶使用者回同意畫面，重新加入伺服器也會沿用舊憑證——要在「設定 → 已授權的應用程式」撤銷舊授權，客戶端下次呼叫拿到 401 才會重新走授權。

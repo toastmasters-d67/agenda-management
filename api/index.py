@@ -5502,6 +5502,25 @@ def _tool_generate_agenda_theme_image(caller, args):
                       {"agendaId": aid, "url": item["url"], "prompt": prompt})
 
 
+# ------------------------------------------------------------------ delete post
+# Removes the post from this system — draft or already published alike, as
+# DELETE /api/social-posts/{id} does for the web page. What publish_post put
+# on Facebook / Instagram / Threads is not touched; this app does not manage
+# posts once they are on the platforms.
+
+def _tool_delete_post(caller, args):
+    _officer_only(caller)
+    post_id = int(args["post_id"])
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            row = _social_row(_load_social_post(cur, post_id, caller))
+            cur.execute("DELETE FROM social_posts WHERE id=%s", (post_id,))
+    live = sorted(row["published"])
+    note = f"（已發布到 {'、'.join(live)} 的貼文不受影響，仍在社群上）" if live else ""
+    return _tool_text(f"已刪除貼文 #{post_id}「{row['title'] or '無標題'}」{note}",
+                      {"postId": post_id})
+
+
 # ------------------------------------------------------------------ catalogue
 # Spelled out because a system admin's omitted club_id silently means "every
 # club", and a model that does not know that reads the mix as one club.
@@ -5919,6 +5938,17 @@ MCP_TOOLS = [
         "annotations": {"readOnlyHint": False, "destructiveHint": True,
                         "idempotentHint": True, "openWorldHint": True},
         "handler": _tool_set_club_image,
+    },
+    {
+        "name": "delete_post", "scope": "posts:write", "title": "刪除貼文",
+        "description": "從系統刪除一則貼文（草稿或已發布的都可以），無法復原，刪除前請先跟使用者確認。"
+                       "只刪系統裡的紀錄，已經發到 Facebook／Instagram／Threads 上的貼文不受影響。",
+        "inputSchema": {"type": "object", "properties": {
+            "post_id": {"type": "integer"},
+        }, "required": ["post_id"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True,
+                        "idempotentHint": True, "openWorldHint": False},
+        "handler": _tool_delete_post,
     },
 ]
 
