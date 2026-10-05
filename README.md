@@ -1074,15 +1074,7 @@ GitHub → Settings → Environments → `production` 需要的 secrets：
 - 登入 cookie 的 path 是 `/club-management`，避免跟同網域的其他專案互相干擾。
 - FastAPI 經由 `/svc` 代理收到的 Host 是 `api:8001`，所以 OAuth / MCP 的 issuer 與 resource 以 `PUBLIC_BASE_URL` 為準；Microsoft 登入的回呼網址以 `PUBLIC_ORIGIN` 為準。
 - Microsoft 登入（Entra）、Meta 的 redirect URI 要登記為 `https://postgen-d67.eastasia.cloudapp.azure.com/club-management/svc/auth/microsoft/callback` 與 `.../club-management/club`。
-- **MCP 的 `export_agenda`（議程 PDF／JPG）在這個部署目前不能用**：它用無頭 Chromium 開議程頁截圖，而 `Dockerfile.web` 的 Alpine 映像沒有 Chromium（Vercel 用的內建版本只能在 Amazon Linux 上跑）。呼叫時會回「這個部署沒有可用的 Chromium」，其他 MCP 工具不受影響。要啟用的話，在 web 映像安裝 Chromium 與中文字型，並設定 `CHROME_EXECUTABLE_PATH`，例如：
-
-  ```dockerfile
-  # Dockerfile.web 最後一個 stage，USER node 之前
-  RUN apk add --no-cache chromium font-noto-cjk
-  ENV CHROME_EXECUTABLE_PATH=/usr/bin/chromium-browser
-  ```
-
-  route 會自己開 `http://127.0.0.1:3000/club-management/agenda`（同一個容器、加上 basePath），不需要額外設定網址。
+- **MCP 的 `export_agenda`（議程 PDF／JPG）**用無頭 Chromium 開議程頁截圖。`node_modules` 裡內建的 Chromium 是給 Vercel 的 Amazon Linux 版本，在 Alpine 跑不起來，所以 `Dockerfile.web` 另外 `apk add chromium font-noto-cjk font-noto-emoji`（沒有中文字型，議程上的中文會全部變成方框），並把執行檔連到固定的 `/usr/local/bin/agenda-chromium`、設成 `CHROME_EXECUTABLE_PATH`。route 會開 `http://127.0.0.1:3000/club-management/agenda`（同一個容器、加上 basePath），不需要額外設定網址；產生的檔案上傳到 `.env` 裡設定的 R2。這讓 web 映像大約多 200 MB。
 
 ---
 

@@ -16,10 +16,20 @@ RUN npm run build
 
 FROM node:22-alpine
 WORKDIR /app
+# Headless Chromium for /svc/agenda-export (MCP export_agenda: agenda → PDF/JPG).
+# The Chromium bundled in node_modules is an Amazon Linux build for Vercel and
+# does not run on Alpine, so the distro's is used, with CJK and emoji fonts —
+# without them every 中文 glyph on the agenda renders as an empty box.
+# Alpine has shipped the binary as both chromium-browser and chromium; link
+# whichever exists to one fixed path so the env var below cannot go stale.
+RUN apk add --no-cache chromium font-noto-cjk font-noto-emoji \
+ && ln -s "$(command -v chromium-browser || command -v chromium)" /usr/local/bin/agenda-chromium \
+ && /usr/local/bin/agenda-chromium --version
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
     HOSTNAME=0.0.0.0 \
-    PORT=3000
+    PORT=3000 \
+    CHROME_EXECUTABLE_PATH=/usr/local/bin/agenda-chromium
 COPY --from=build --chown=node:node /app/.next/standalone ./
 COPY --from=build --chown=node:node /app/.next/static ./.next/static
 COPY --from=build --chown=node:node /app/public ./public
