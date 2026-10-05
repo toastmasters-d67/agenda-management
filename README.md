@@ -838,8 +838,16 @@ https://<你的網域>/api/mcp
 | `update_post` | `posts:write` | 修改標題、文案、用途、狀態、綁定例會、各平台版本 |
 | `generate_copy` | `ai:generate` | 用 AI 產生文案並存進貼文，**消耗呼叫者（或分會共用）的 AI 額度** |
 | `publish_post` | `publish` | 發布到 Facebook／Instagram／Threads，**公開且無法透過本系統收回**。已發布過的平台會略過，要再發一則得帶 `republish: true` |
+| `add_post_image` | `posts:write` | 把 AI 客戶端自己做的圖（或任何圖）加到貼文：`image`（ChatGPT 的檔案參數，`_meta["openai/fileParams"]`）、`image_url`（公開 https）或 `image_base64`。存到 R2，15 MB 上限，只收 JPG／PNG／WebP／GIF（看檔頭判斷，不信副檔名） |
+| `remove_post_image` | `posts:write` | 依順序（從 1 開始）移除貼文的一張圖 |
+| `generate_post_image` | `ai:generate` | 用平台的 OpenAI 生圖並加到貼文，與網頁「生圖」同一個函式（`_generate_image`），**消耗呼叫者（或分會共用）的 OpenAI 額度** |
+| `get_agenda` | `posts:read` | 一份議程的完整 `data` |
+| `create_agenda` | `agendas:write` | 建立議程。時間地點沿用該分會上一份議程（再退到分會設定）；同一天已有議程時拒絕並回傳既有 id。`import_roles: true` 從角色試算表帶入 |
+| `update_agenda` | `agendas:write` | 只改有給的欄位；`speeches`／`evaluators` 依位置合併（`null` 表示該位置不變），刪減篇數用 `speech_count`／`evaluator_count`。`import_roles` 只補空白的角色，`overwrite_roles` 才覆蓋 |
+| `export_agenda` | `posts:read` | 議程輸出 PDF／JPG（每頁一張），回傳 R2 公開連結。見下方「議程輸出」 |
 
-- **四個 scope 都公開宣告**（`scopes_supported` 與 401 挑戰都列出），所以客戶端會一起請求；但同意畫面上 `publish` 預設**不勾**，並標示「公開且無法收回」，要使用者自己勾。客戶端沒指定 scope 時給 `posts:read posts:write ai:generate`。
+- **所有 scope 都公開宣告**（`scopes_supported` 與 401 挑戰都列出），所以客戶端會一起請求；但同意畫面上 `publish` 預設**不勾**，並標示「公開且無法收回」，要使用者自己勾。客戶端沒指定 scope 時給 `posts:read posts:write agendas:write ai:generate`。
+  - `agendas:write` 是後來加的：在它之前授權的客戶端呼叫議程寫入工具會收到 403 補授權挑戰，或請使用者重新連線一次。
   - 早先的做法是連宣告都不宣告 `publish`、`tools/list` 也藏起 `publish_post`，結果模型看不到工具就不會呼叫，客戶端也不會請求這個 scope，同意畫面根本沒機會問——等於永遠拿不到。
 - 請求的 scope 全都不認得時回 400（`openid`、`offline_access` 這類 OIDC 慣用 scope 除外，忽略即可）。
 - **分會隔離**：`club_member` 與 `club_admin` 的 `club_id` 固定是自己的分會，帶別的一律 403；用 `post_id`／`agenda_id` 直接指也會先比對所屬分會。只有 `system_admin` 能跨分會，而它**不帶 `club_id` 時會拿到所有分會混在一起的結果**，所以清單每筆都標分會，工具說明也要求帶 `club_id`。
@@ -869,6 +877,25 @@ https://<你的網域>/api/mcp
 - **目前版本 `2026-07-28`**：單一 `POST /api/mcp`，沒有 session、沒有 `initialize`，每個請求在 `params._meta` 自帶 `protocolVersion` 與 `clientCapabilities`。`MCP-Protocol-Version`、`Mcp-Method`、`Mcp-Name` 標頭必須與內容一致，不一致回 `-32020`。
 - **舊版 `2025-11-25` / `2025-06-18` / `2025-03-26`**（`_meta` 沒有 protocolVersion 時走這條）：支援 `initialize` 握手、`notifications/*`（回 202）、`ping`、`tools/list`、`tools/call`。版本看 `MCP-Protocol-Version` 標頭，沒帶就當 `2025-03-26`。**不發 `Mcp-Session-Id`**，舊版規格允許無狀態伺服器這樣做，所以一樣能跑在 serverless 上。回應一律是 JSON，不用 SSE。不支援 JSON-RPC 批次。
 - `GET` / `DELETE /api/mcp` 回 405（沒有伺服器主動推送的串流，也沒有 session 可以結束）。
+
+### 議程輸出（`export_agenda`）
+
+議程表是在瀏覽器裡畫的（各分會版型、列高平均、html2canvas），網頁的「下載 JPG／PDF」是截那個畫面。伺服器端不另寫一套 renderer，而是**用無頭 Chromium 開同一個 `/agenda` 頁面，請頁面做與按鈕完全相同的截圖**：
+
+1. MCP 工具（Python）檢查權限，產生 R2 的 presigned PUT 網址（PDF 一個、JPG 最多 4 頁），再簽一把**5 分鐘的登入 token**（呼叫者本人）。
+2. 呼叫 Next 的 `POST /svc/agenda-export`（`app/svc/agenda-export/route.js`，Node runtime）。它驗 token（`JWT_SECRET`）、用 `@sparticuz/chromium` + `puppeteer-core` 以這個身分開 `/agenda?id=…`，等 `window.__agendaExport.ready`，呼叫頁面上的 `jpg()`／`pdf()`（與下載按鈕共用 `captureJPGs`／`capturePDF`）。
+3. 檔案直接 PUT 到 R2，不經過兩邊 function 的回應大小上限；工具回傳公開連結（路徑含亂數，拿到連結的人都能開）。
+
+注意：
+- 只開**自己這個部署**的頁面（不看請求帶來的 host），上傳網址限定本帳號的 R2 網域——請求裡的 token 不會被送去別的地方。正式站從 Python 呼叫時用 `VERCEL_PROJECT_PRODUCTION_URL`，可用 `AGENDA_RENDER_URL` 覆寫。
+- Vercel 的 Chromium 沒有中文字型，第一次（每個暖機實例一次）會從 Google Fonts 下載 Noto Sans TC 到 `/tmp/fonts`。
+- 一次約 10～30 秒（冷啟動較久），都在 60 秒的 `maxDuration` 內。
+- 頁面用 `alert()` 報錯，route 會關掉對話框並把文字帶進錯誤訊息。
+- 本機開發：Chromium 套件是 Linux 版，設 `CHROME_EXECUTABLE_PATH` 指向本機的 Chrome。不帶 `uploads` 呼叫 route 時檔案以 data URL 直接回傳，不會寫入 R2。
+
+### 從角色試算表帶入（`import_roles`）
+
+`api/index.py` 的 `_parse_roles_sheet` / `_import_sheet_roles` 是 `lib/rolesSheet.js` 與 `app/roles/page.js` 匯入邏輯的 Python 版：同樣的列名對照表、`PM 4-1` 拆成路徑與等級、`TBD` 等視為空白、人名比對會員名單後改成 `Name, LEVEL`、版型沒有的角色略過。**改那兩個 JS 檔的對照表時，Python 這份要一起改。**
 
 ### 撤銷授權
 
@@ -938,6 +965,8 @@ https://<你的網域>/api/mcp
 | `CREDENTIALS_SECRET_KEY` | 加密 AI 金鑰與 Meta App Secret 的主密鑰（`openssl rand -base64 32`）。**未設定時儲存金鑰會直接失敗**，不會以明文落地 |
 | `MS_CLIENT_ID` / `MS_CLIENT_SECRET` | Microsoft 登入用的 Entra App（見「Microsoft 帳號登入」）。**選填**：沒設就不顯示 Microsoft 按鈕 |
 | `MCP_TOKEN_SECRET` | 簽 MCP access token 的密鑰（`python -c "import secrets; print(secrets.token_urlsafe(48))"`）。**必須和 `JWT_SECRET` 不同**；正式站與預覽站建議各用一把。未設定時 MCP 與 OAuth 端點回 503，其他功能不受影響 |
+| `AGENDA_RENDER_URL` | 選填。`export_agenda` 呼叫議程輸出服務的網址（Next 那一側，例如本機 `http://localhost:3000`）。正式站不用設 |
+| `CHROME_EXECUTABLE_PATH` | 只有本機開發要設：本機 Chrome 執行檔路徑，給 `/svc/agenda-export` 用 |
 | `MCP_PUBLIC_ORIGIN` | 選填。寫死對外網址（例如 `https://agenda.example.com`），MCP 的 resource／issuer 就不再從 `X-Forwarded-Host` 推算。Vercel 上不用設 |
 
 > `JWT_SECRET` 同時被 FastAPI（簽發）與 Next.js `middleware.js`（驗證登入 cookie）讀取，Vercel 上設一次兩邊都拿得到。

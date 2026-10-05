@@ -1519,86 +1519,110 @@ async function swapCrossOriginImagesForCapture(element) {
   return () => restores.forEach((fn) => fn());
 }
 
-async function downloadPDF() {
+// The capture itself is shared by the 下載 buttons and the server-side export
+// (app/svc/agenda-export, via window.__agendaExport below), so a file made
+// for an MCP client is exactly the file the button makes.
+
+/** `Agenda_2026-10-01_No350` — the stem every download is named from. */
+function exportBaseName() {
   const data = collectData();
   const dateStr = formatDate(data.meetingDate) || 'agenda';
-  const element = document.getElementById('agendaPages');
+  return `Agenda_${dateStr}_No${data.meetingNo || ''}`;
+}
 
-  const savedTransform = element.style.transform;
-  const savedMarginBottom = element.style.marginBottom;
-  const savedTransformOrigin = element.style.transformOrigin;
-  const savedGap = element.style.gap;
+/**
+ * Put the preview into capture shape and return the function that undoes it:
+ * unscaled, and with cross-origin images inlined so html2canvas does not
+ * taint the canvas.
+ *
+ * `forPdf` also zeroes the inter-page gap. The live preview's gap (for
+ * on-screen page separation) has no print equivalent — left in place, it
+ * pushes each page's captured height past jsPDF's per-page budget and
+ * 'legacy' auto-slicing then inserts a spurious near-blank page for the
+ * overflow. Zeroed, the explicit `.extra-page` break gives one clean page per
+ * `.agenda-page`.
+ */
+async function prepareCapture(element, { forPdf = false } = {}) {
+  const saved = {
+    transform: element.style.transform,
+    marginBottom: element.style.marginBottom,
+    transformOrigin: element.style.transformOrigin,
+    gap: element.style.gap,
+  };
   element.style.transform = '';
   element.style.marginBottom = '';
   element.style.transformOrigin = '';
-  // The live preview's inter-page gap (for on-screen page separation) has no
-  // print equivalent — left in place, it pushes each page's captured height
-  // past jsPDF's per-page budget and 'legacy' auto-slicing then inserts a
-  // spurious near-blank page for the overflow. Zero it and rely solely on the
-  // explicit `.extra-page` break for one clean page per `.agenda-page`.
-  element.style.gap = '0px';
+  if (forPdf) element.style.gap = '0px';
 
   const restoreTheme = await swapThemeImgForCapture(element);
   const restoreImgs = await swapCrossOriginImagesForCapture(element);
+  return () => {
+    Object.assign(element.style, saved);
+    restoreTheme();
+    restoreImgs();
+  };
+}
 
-  const opt = {
+function pdfOptions() {
+  return {
     margin: [8, 8, 8, 8],
-    filename: `Agenda_${dateStr}_No${data.meetingNo || ''}.pdf`,
+    filename: `${exportBaseName()}.pdf`,
     image: { type: 'jpeg', quality: 0.98 },
     html2canvas: { scale: 2, useCORS: true, logging: false, scrollX: 0, scrollY: 0 },
     jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
     pagebreak: { mode: ['css'], before: '.extra-page' },
   };
+}
 
-  window.html2pdf().set(opt).from(element).save().then(() => {
-    element.style.transform = savedTransform;
-    element.style.marginBottom = savedMarginBottom;
-    element.style.transformOrigin = savedTransformOrigin;
-    element.style.gap = savedGap;
-    restoreTheme();
-    restoreImgs();
-  });
+/** The whole agenda as one PDF, as a data URL. */
+async function capturePDF() {
+  const element = document.getElementById('agendaPages');
+  const restore = await prepareCapture(element, { forPdf: true });
+  try {
+    return await window.html2pdf().set(pdfOptions()).from(element).outputPdf('datauristring');
+  } finally {
+    restore();
+  }
+}
+
+/**
+ * One JPEG data URL per physical page (agendaPreview + any .extra-page
+ * siblings) — a multi-page template like chillhihigh/china comes out as
+ * separate page-1/page-2 images, not one tall image spanning both.
+ */
+async function captureJPGs() {
+  const element = document.getElementById('agendaPages');
+  const pageEls = [...element.querySelectorAll('.agenda-page')];
+  const restore = await prepareCapture(element);
+  try {
+    const out = [];
+    for (const el of pageEls) {
+      const canvas = await window.html2canvas(el, {
+        scale: 2, useCORS: true, logging: false, scrollX: 0, scrollY: 0,
+      });
+      out.push(canvas.toDataURL('image/jpeg', 0.95));
+    }
+    return out;
+  } finally {
+    restore();
+  }
+}
+
+async function downloadPDF() {
+  const element = document.getElementById('agendaPages');
+  const restore = await prepareCapture(element, { forPdf: true });
+  window.html2pdf().set(pdfOptions()).from(element).save().then(restore);
 }
 
 async function downloadJPG() {
-  const data = collectData();
-  const dateStr = formatDate(data.meetingDate) || 'agenda';
-  const element = document.getElementById('agendaPages');
-  // One image per physical page (agendaPreview + any .extra-page siblings) —
-  // a multi-page template like chillhihigh/china should download as separate
-  // page-1/page-2 JPGs, not one tall image spanning both.
-  const pageEls = [...element.querySelectorAll('.agenda-page')];
-
-  const savedTransform = element.style.transform;
-  const savedMarginBottom = element.style.marginBottom;
-  const savedTransformOrigin = element.style.transformOrigin;
-  element.style.transform = '';
-  element.style.marginBottom = '';
-  element.style.transformOrigin = '';
-
-  const restoreTheme = await swapThemeImgForCapture(element);
-  const restoreImgs = await swapCrossOriginImagesForCapture(element);
-
-  for (let i = 0; i < pageEls.length; i++) {
-    const canvas = await window.html2canvas(pageEls[i], {
-      scale: 2,
-      useCORS: true,
-      logging: false,
-      scrollX: 0,
-      scrollY: 0,
-    });
-    const suffix = pageEls.length > 1 ? `_p${i + 1}` : '';
+  const name = exportBaseName();
+  const pages = await captureJPGs();
+  pages.forEach((href, i) => {
     const link = document.createElement('a');
-    link.download = `Agenda_${dateStr}_No${data.meetingNo || ''}${suffix}.jpg`;
-    link.href = canvas.toDataURL('image/jpeg', 0.95);
+    link.download = `${name}${pages.length > 1 ? `_p${i + 1}` : ''}.jpg`;
+    link.href = href;
     link.click();
-  }
-
-  element.style.transform = savedTransform;
-  element.style.marginBottom = savedMarginBottom;
-  element.style.transformOrigin = savedTransformOrigin;
-  restoreTheme();
-  restoreImgs();
+  });
 }
 
 // ================================================================
@@ -2056,6 +2080,21 @@ export default function AgendaIndexPage() {
 
         updatePreview();
         window.addEventListener('resize', applyPreviewScale);
+
+        // For app/svc/agenda-export, which drives this page headlessly. It
+        // waits for `ready`, then asks for the same captures the 下載 buttons
+        // make. `rerender` lets it redraw once late-loading fonts settle.
+        window.__agendaExport = {
+          ready: true,
+          error: urlId && !currentAgendaId ? '找不到這份議程，或沒有權限讀取' : '',
+          baseName: exportBaseName,
+          rerender: () => new Promise((resolve) => {
+            updatePreview();
+            requestAnimationFrame(() => requestAnimationFrame(resolve));
+          }),
+          jpg: captureJPGs,
+          pdf: capturePDF,
+        };
       } finally {
         hideLoading();
       }

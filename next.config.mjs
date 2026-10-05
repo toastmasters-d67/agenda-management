@@ -1,5 +1,13 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  // app/svc/agenda-export runs a headless Chromium. The package locates its
+  // compressed binary by relative path, which bundling breaks, so it stays
+  // external — and the binary files themselves are not imports, so they are
+  // traced into that one function explicitly.
+  serverExternalPackages: ['@sparticuz/chromium', 'puppeteer-core'],
+  outputFileTracingIncludes: {
+    '/svc/agenda-export': ['./node_modules/@sparticuz/chromium/bin/**'],
+  },
   async headers() {
     // The OAuth consent screen must never render inside someone else's frame:
     // a page that overlays it could steer the "允許" click without the person
