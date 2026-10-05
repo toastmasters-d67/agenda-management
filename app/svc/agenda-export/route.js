@@ -26,6 +26,9 @@ export const runtime = 'nodejs';
 export const maxDuration = 60;
 
 const FORMATS = ['jpg', 'pdf'];
+// Of the 60 s: launching Chromium and loading the agenda page get this much,
+// counted from the start of the request; capture and upload get the rest.
+const LOAD_BUDGET_MS = 40000;
 
 // Chromium on Vercel ships with no CJK font at all, so every 中文 glyph would
 // render as an empty box. @sparticuz/chromium unpacks its fonts.tar.br —
@@ -153,6 +156,7 @@ export async function POST(request) {
     : (process.env.AGENDA_RENDER_PAGE_ORIGIN || `http://127.0.0.1:${process.env.PORT || 3000}`);
   const base = process.env.NEXT_PUBLIC_BASE_PATH || '';
 
+  const started = Date.now();
   let browser;
   try {
     browser = await launchBrowser();
@@ -170,12 +174,32 @@ export async function POST(request) {
       httpOnly: true, secure: origin.startsWith('https:'), sameSite: 'Lax',
     });
 
-    await page.goto(`${origin}${base}/agenda?id=${agendaId}`, { waitUntil: 'networkidle0', timeout: 30000 });
-    await page.waitForFunction(
-      () => window.__agendaExport && window.__agendaExport.ready
-        && window.html2canvas && window.html2pdf,
-      { timeout: 20000 },
-    );
+    // Wait for the page to say it is ready, not for the network to go quiet.
+    // `networkidle0` was the first try and timed out intermittently: the page
+    // makes several /svc calls into the API function — which is busy serving
+    // the very MCP call that asked for this export — so on Vercel they often
+    // land on freshly started instances, and one slow cold start was enough to
+    // blow a fixed 30 s. `ready` is set once the agenda has loaded and drawn;
+    // images are awaited later, by the capture itself (waitForImages).
+    // One budget for loading, leaving the rest of maxDuration for capture
+    // and upload.
+    const loadBy = started + LOAD_BUDGET_MS;
+    const left = () => Math.max(1000, loadBy - Date.now());
+    await page.goto(`${origin}${base}/agenda?id=${agendaId}`,
+      { waitUntil: 'domcontentloaded', timeout: left() });
+    try {
+      await page.waitForFunction(
+        () => window.__agendaExport && window.__agendaExport.ready
+          && window.html2canvas && window.html2pdf,
+        { timeout: left(), polling: 250 },
+      );
+    } catch (e) {
+      if (new URL(page.url()).pathname !== `${base}/agenda`) {
+        throw new Error('帳號需要先到網站變更密碼，或登入已失效');
+      }
+      throw new Error(`議程頁在 ${Math.round(LOAD_BUDGET_MS / 1000)} 秒內沒有載入完成`
+        + `（伺服器可能剛啟動，請稍後再試一次）${alerts.length ? '：' + alerts.join('；') : ''}`);
+    }
     const failure = await page.evaluate(() => window.__agendaExport.error || '');
     if (failure) throw new Error([failure, ...alerts].join('：'));
     if (new URL(page.url()).pathname !== `${base}/agenda`) {
