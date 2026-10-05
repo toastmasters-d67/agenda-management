@@ -2538,6 +2538,12 @@ META_SCOPES = [
     "business_management",
 ]
 THREADS_SCOPES = ["threads_basic", "threads_content_publish"]
+# Deleting a published thread needs `threads_delete`, a permission the App has
+# to have switched on in the Meta console first. Asked for only when that has
+# been done (THREADS_ENABLE_DELETE=1): requesting a permission the App lacks
+# fails the whole connect flow, which would break Threads for every club.
+if os.getenv("THREADS_ENABLE_DELETE") == "1":
+    THREADS_SCOPES.append("threads_delete")
 
 SOCIAL_ACCOUNT_PLATFORMS = ("facebook", "instagram", "threads")
 
@@ -2629,8 +2635,10 @@ def _graph(url: str, params: dict = None, method: str = "GET") -> dict:
 
     payload = urllib.parse.urlencode({k: v for k, v in (params or {}).items()
                                       if v is not None})
-    if method == "GET":
-        req = urllib.request.Request(f"{url}?{payload}" if payload else url)
+    if method in ("GET", "DELETE"):
+        # DELETE carries its access_token in the query too: a body on DELETE
+        # is something Graph does not promise to read.
+        req = urllib.request.Request(f"{url}?{payload}" if payload else url, method=method)
     else:
         req = urllib.request.Request(url, data=payload.encode("utf-8"), method=method)
 
@@ -5502,6 +5510,150 @@ def _tool_generate_agenda_theme_image(caller, args):
                       {"agendaId": aid, "url": item["url"], "prompt": prompt})
 
 
+# ------------------------------------------------------------------ deleting drafts / published posts
+# A post has two lives: the draft row here, and the copies publish_post put
+# on each platform (recorded in social_posts.published). The tools keep them
+# apart on purpose — deleting the draft never touches what is online, and
+# taking a copy offline never deletes the draft — so neither can happen as a
+# side effect of the other.
+
+def _tool_delete_post(caller, args):
+    _officer_only(caller)
+    post_id = int(args["post_id"])
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            row = _social_row(_load_social_post(cur, post_id, caller))
+    live = sorted(row["published"])
+    if live and not args.get("keep_published_online"):
+        # Without the record, nothing here could take those copies down later.
+        return _tool_text(
+            f"貼文 #{post_id} 已發布到 {'、'.join(live)}。刪掉草稿後，系統就無法再幫你下架那些貼文。"
+            "要先下架請用 unpublish_post；確定只刪草稿、讓已發布的留在線上，請帶 keep_published_online: true。",
+            {"postId": post_id, "published": live}, is_error=True)
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM social_posts WHERE id=%s", (post_id,))
+    note = f"（已發布到 {'、'.join(live)} 的貼文仍在線上）" if live else ""
+    return _tool_text(f"已刪除貼文 #{post_id}「{row['title'] or '無標題'}」{note}",
+                      {"postId": post_id, "stillOnline": live})
+
+
+# What each platform's API lets an app do with a post after publishing.
+# Instagram and Threads have no caption/text edit at all; the only way to
+# change one is to take it down and publish again.
+_LIVE_EDITABLE = {"facebook"}
+
+
+def _live_record(row: dict, platform: str) -> dict:
+    rec = (row["published"] or {}).get(platform) or {}
+    if not rec.get("id"):
+        raise HTTPException(status_code=400,
+                            detail=f"貼文 #{row['id']} 沒有發布到 {platform} 的紀錄")
+    return rec
+
+
+def _tool_get_published_post(caller, args):
+    post_id, platform = int(args["post_id"]), args.get("platform") or ""
+    if platform not in SOCIAL_ACCOUNT_PLATFORMS:
+        return _tool_text("platform 只能是 facebook、instagram、threads", is_error=True)
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            row = _social_row(_load_social_post(cur, post_id, caller))
+    rec = _live_record(row, platform)
+    token = _require_account(row["clubId"], platform)["token"]
+    if platform == "facebook":
+        live = _fb(rec["id"], {"fields": "message,created_time,permalink_url",
+                               "access_token": token})
+        text, url = live.get("message", ""), live.get("permalink_url") or rec.get("url", "")
+    elif platform == "instagram":
+        live = _fb(rec["id"], {"fields": "caption,permalink,timestamp,like_count,comments_count",
+                               "access_token": token})
+        text, url = live.get("caption", ""), live.get("permalink") or rec.get("url", "")
+    else:
+        live = _th(rec["id"], {"fields": "text,permalink,timestamp", "access_token": token})
+        text, url = live.get("text", ""), live.get("permalink") or rec.get("url", "")
+    stats = "、".join(f"{k}={live[k]}" for k in ("like_count", "comments_count") if k in live)
+    return _tool_text(f"{platform}（{url}）{('｜' + stats) if stats else ''}\n\n{text}",
+                      {"postId": post_id, "platform": platform, "url": url, "text": text,
+                       "live": live})
+
+
+def _tool_update_published_post(caller, args):
+    _officer_only(caller)
+    post_id, platform = int(args["post_id"]), args.get("platform") or ""
+    text = str(args.get("text") or "").strip()
+    if platform not in _LIVE_EDITABLE:
+        return _tool_text(
+            f"{platform or '這個平台'} 的 API 不支援修改已發布的貼文。要改內容只能先 unpublish_post 下架，"
+            "再用 publish_post 重新發布（會是一則新貼文，原本的按讚與留言不會保留）。", is_error=True)
+    if not text:
+        return _tool_text("請提供新的 text", is_error=True)
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            row = _social_row(_load_social_post(cur, post_id, caller))
+    rec = _live_record(row, platform)
+    token = _require_account(row["clubId"], platform)["token"]
+    # A feed or photo post is `<page>_<post>` and takes `message`; a video
+    # post was recorded by its video id, whose text field is `description`.
+    field = "message" if "_" in rec["id"] else "description"
+    _fb(rec["id"], {field: text, "access_token": token}, method="POST")
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # Keep the draft telling the truth about what is online.
+            variants = dict(row["variants"])
+            v = dict(variants.get(platform) or {"enabled": True})
+            v["text"] = text
+            variants[platform] = v
+            published = dict(row["published"])
+            published[platform] = {**rec, "editedAt": datetime.now(timezone.utc).isoformat()}
+            cur.execute("UPDATE social_posts SET variants=%s::jsonb, published=%s::jsonb,"
+                        " updated_at=NOW() WHERE id=%s",
+                        (json.dumps(variants), json.dumps(published), post_id))
+    return _tool_text(f"已修改 Facebook 上的貼文 #{post_id}：{rec.get('url', '')}",
+                      {"postId": post_id, "platform": platform, "url": rec.get("url", "")})
+
+
+def _tool_unpublish_post(caller, args):
+    _officer_only(caller)
+    post_id = int(args["post_id"])
+    platforms = [p for p in (args.get("platforms") or []) if p in SOCIAL_ACCOUNT_PLATFORMS]
+    if not platforms:
+        return _tool_text("請指定要下架的平台（facebook / instagram / threads）", is_error=True)
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            row = _social_row(_load_social_post(cur, post_id, caller))
+
+    published = dict(row["published"])
+    results = {}
+    for p in platforms:
+        try:
+            rec = _live_record(row, p)
+            token = _require_account(row["clubId"], p)["token"]
+            (_fb if p != "threads" else _th)(rec["id"], {"access_token": token}, method="DELETE")
+            published.pop(p, None)
+            results[p] = {"ok": True}
+        except HTTPException as e:
+            detail = str(e.detail)
+            if p == "threads" and ("permission" in detail.lower() or "[10]" in detail
+                                   or "[200]" in detail):
+                detail += "（Threads 刪除需要 threads_delete 權限：在 Meta 開發者後台為 App 開啟後，"\
+                          "設定 THREADS_ENABLE_DELETE=1 並重新連接 Threads）"
+            results[p] = {"ok": False, "error": detail}
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # Nothing left online: the draft is a draft again, ready to go out.
+            cur.execute("UPDATE social_posts SET published=%s::jsonb,"
+                        " status=CASE WHEN %s AND status='posted' THEN 'ready' ELSE status END,"
+                        " updated_at=NOW() WHERE id=%s",
+                        (json.dumps(published), not published, post_id))
+    lines = [f"{p}: " + ("已下架" if r["ok"] else "失敗 — " + r["error"]) for p, r in results.items()]
+    return _tool_text("\n".join(lines), {"postId": post_id, "results": results,
+                                         "stillOnline": sorted(published)},
+                      is_error=not any(r["ok"] for r in results.values()))
+
+
 # ------------------------------------------------------------------ catalogue
 # Spelled out because a system admin's omitted club_id silently means "every
 # club", and a model that does not know that reads the mix as one club.
@@ -5919,6 +6071,58 @@ MCP_TOOLS = [
         "annotations": {"readOnlyHint": False, "destructiveHint": True,
                         "idempotentHint": True, "openWorldHint": True},
         "handler": _tool_set_club_image,
+    },
+
+    # ---- deleting drafts, and published posts on the platforms
+    {
+        "name": "delete_post", "scope": "posts:write", "title": "刪除貼文草稿",
+        "description": "刪除系統裡的貼文（草稿）。只刪系統紀錄，不會動到已發布在社群上的貼文；"
+                       "已發布過的貼文會先拒絕，請先 unpublish_post 下架，或帶 keep_published_online: true 確認只刪紀錄。",
+        "inputSchema": {"type": "object", "properties": {
+            "post_id": {"type": "integer"},
+            "keep_published_online": {"type": "boolean",
+                                      "description": "已發布的貼文留在線上，只刪系統紀錄"},
+        }, "required": ["post_id"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True,
+                        "idempotentHint": True, "openWorldHint": False},
+        "handler": _tool_delete_post,
+    },
+    {
+        "name": "get_published_post", "scope": "posts:read", "title": "讀取已發布的貼文",
+        "description": "從社群平台讀回已發布貼文的目前內容與連結（Instagram 另有按讚與留言數）。",
+        "inputSchema": {"type": "object", "properties": {
+            "post_id": {"type": "integer"},
+            "platform": {"type": "string", "enum": list(SOCIAL_ACCOUNT_PLATFORMS)},
+        }, "required": ["post_id", "platform"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": True, "openWorldHint": True},
+        "handler": _tool_get_published_post,
+    },
+    {
+        "name": "update_published_post", "scope": "publish", "title": "修改已發布的貼文",
+        "description": "修改已發布貼文的文字，並同步更新系統裡的版本。只有 Facebook 支援；"
+                       "Instagram 與 Threads 的 API 不能修改，只能 unpublish_post 下架後重新發布。⚠️ 修改會公開生效。",
+        "inputSchema": {"type": "object", "properties": {
+            "post_id": {"type": "integer"},
+            "platform": {"type": "string", "enum": ["facebook"]},
+            "text": {"type": "string", "description": "新的貼文文字"},
+        }, "required": ["post_id", "platform", "text"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True,
+                        "idempotentHint": True, "openWorldHint": True},
+        "handler": _tool_update_published_post,
+    },
+    {
+        "name": "unpublish_post", "scope": "publish", "title": "下架已發布的貼文",
+        "description": "從指定的社群平台刪除已發布的貼文（按讚、留言會一起消失，無法復原）。"
+                       "系統裡的草稿保留，全部平台都下架後狀態改回 ready，可以修改後重新發布。"
+                       "Threads 需要 App 已開啟 threads_delete 權限。下架前請先取得使用者同意。",
+        "inputSchema": {"type": "object", "properties": {
+            "post_id": {"type": "integer"},
+            "platforms": {"type": "array", "items": {
+                "type": "string", "enum": list(SOCIAL_ACCOUNT_PLATFORMS)}},
+        }, "required": ["post_id", "platforms"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True,
+                        "idempotentHint": True, "openWorldHint": True},
+        "handler": _tool_unpublish_post,
     },
 ]
 
