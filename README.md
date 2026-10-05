@@ -845,9 +845,21 @@ https://<你的網域>/api/mcp
 | `create_agenda` | `agendas:write` | 建立議程。時間地點沿用該分會上一份議程（再退到分會設定）；同一天已有議程時拒絕並回傳既有 id。`import_roles: true` 從角色試算表帶入 |
 | `update_agenda` | `agendas:write` | 只改有給的欄位；`speeches`／`evaluators` 依位置合併（`null` 表示該位置不變），刪減篇數用 `speech_count`／`evaluator_count`。`import_roles` 只補空白的角色，`overwrite_roles` 才覆蓋 |
 | `export_agenda` | `posts:read` | 議程輸出 PDF／JPG（每頁一張），回傳 R2 公開連結。見下方「議程輸出」 |
+| `set_agenda_theme_image` | `agendas:write` | 設定（或 `clear` 移除）議程的主題圖 `themeImgUrl`，圖片來源同 `add_post_image`。只有 `standard`、`entrepreneur` 版型會顯示主題圖，其他版型直接拒絕 |
+| `generate_agenda_theme_image` | `ai:generate` | 用平台 OpenAI 生成主題圖並套用；沒給 prompt 時依例會主題產生。版型不顯示主題圖時**先拒絕、不花錢** |
+| `get_roles` | `posts:read` | 角色安排表：分會接下來（或指定範圍）每場已安排的角色 |
+| `assign_roles` | `agendas:write` | 用角色安排頁的角色 id（`tme`、`speech2`、`evaluator1`…）安排一場的角色。人名比對會員名單改成名單寫法，版型沒有的角色略過，`""` 清空 |
+| `import_roles_sheet` | `agendas:write` | 角色安排頁的「從 Google Sheet 匯入」，一次匯整個日期範圍。預設只補空白、不建立議程；`overwrite`、`create_missing` 開啟對應行為；只有會議編號的欄視為空檔跳過 |
+| `list_members` | `posts:read` | 分會會員的中英文名與等級（不含帳號、Email），安排角色時對照人名用 |
+| `get_club` | `posts:read` | 分會設定（只回傳議程用欄位；`meta_app_id` 等其他設定不回傳） |
+| `update_club` | `clubs:write` | 修改分會欄位與版型設定，只改有給的；`settings` 給 `null` 刪除。**限系統管理員**（與 `PUT /api/clubs/{id}` 同規則） |
+| `create_club` | `clubs:write` | 建立分會。限系統管理員 |
+| `set_club_image` | `clubs:write` | 更換 Logo、各 QR code、第二頁圖片。限系統管理員 |
 
 - **所有 scope 都公開宣告**（`scopes_supported` 與 401 挑戰都列出），所以客戶端會一起請求；但同意畫面上 `publish` 預設**不勾**，並標示「公開且無法收回」，要使用者自己勾。客戶端沒指定 scope 時給 `posts:read posts:write agendas:write ai:generate`。
-  - `agendas:write` 是後來加的：在它之前授權的客戶端呼叫議程寫入工具會收到 403 補授權挑戰，或請使用者重新連線一次。
+  - `agendas:write`、`clubs:write` 是後來加的：在它之前授權的客戶端呼叫這些工具會收到 403 補授權挑戰。有些客戶端（例如 Codex）收到後不會自己帶使用者回同意畫面，重新加入伺服器也會沿用舊憑證——要在「設定 → 已授權的應用程式」撤銷舊授權，客戶端下次呼叫拿到 401 才會重新走授權。
+- **分會管理工具只開放系統管理員**，與網頁一致（分會管理頁、`/api/clubs` 寫入都限 `system_admin`）。能改的欄位是分會管理頁會編輯的那些：分會本身的欄位，加上各版型 manifest（`lib/agendaTemplates.js` 的 `settings`）宣告的設定。`clubs.settings` 裡的其他鍵（Meta／Threads app id）屬於其他畫面，不讀也不寫。刪除分會沒有開放給 MCP。
+- **角色安排工具**讀寫的就是 `agendas.data`（角色安排頁本來就沒有獨立的儲存），角色 id 與規則和頁面相同；`assign_roles` 只收角色欄位與場次／主題，日期、地點請用 `update_agenda`。
   - 早先的做法是連宣告都不宣告 `publish`、`tools/list` 也藏起 `publish_post`，結果模型看不到工具就不會呼叫，客戶端也不會請求這個 scope，同意畫面根本沒機會問——等於永遠拿不到。
 - 請求的 scope 全都不認得時回 400（`openid`、`offline_access` 這類 OIDC 慣用 scope 除外，忽略即可）。
 - **分會隔離**：`club_member` 與 `club_admin` 的 `club_id` 固定是自己的分會，帶別的一律 403；用 `post_id`／`agenda_id` 直接指也會先比對所屬分會。只有 `system_admin` 能跨分會，而它**不帶 `club_id` 時會拿到所有分會混在一起的結果**，所以清單每筆都標分會，工具說明也要求帶 `club_id`。

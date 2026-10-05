@@ -3331,13 +3331,15 @@ MCP_CODE_TTL     = timedelta(minutes=5)
 MCP_SCOPES = {
     "posts:read":    "讀取分會、例會議程與貼文，並匯出議程 PDF／JPG",
     "posts:write":   "建立與修改貼文草稿、加入或移除貼文圖片",
-    "agendas:write": "建立與修改議程（含從角色試算表帶入）",
+    "agendas:write": "建立與修改議程、安排角色（含從角色試算表帶入）",
+    "clubs:write":   "修改分會設定與圖片（名稱、版型、地點、QR code；限系統管理員）",
     "ai:generate":   "用你的 AI 帳號產生文案與圖片（會消耗你的 API 額度）",
     "publish":       "代表分會公開發文到 Facebook／Instagram／Threads",
 }
 # What a client gets when it asks for nothing in particular. `publish` is
 # absent: it is only ever granted by someone ticking it.
-MCP_DEFAULT_SCOPES = ("posts:read", "posts:write", "agendas:write", "ai:generate")
+MCP_DEFAULT_SCOPES = ("posts:read", "posts:write", "agendas:write", "clubs:write",
+                      "ai:generate")
 
 
 def _public_origin(request: Request) -> str:
@@ -4645,20 +4647,26 @@ def _role_label(rid: str) -> str:
     return _AGENDA_TEXT_FIELDS.get(rid, rid).split("，")[0].split("（")[0]
 
 
-def _import_sheet_roles(caller: dict, club_id: int, data: dict, overwrite: bool) -> list:
+def _resolve_member(raw: str, roster, lang: str):
     """
-    Fill `data` from the club's role sheet, for the column matching its date.
-    Returns lines describing what happened, for the tool's answer.
-
-    Without `overwrite`, a cell that already holds a different value is left
-    alone and reported — the same distinction the 角色 page's preview draws
-    between filling a blank and undoing someone's edit.
+    resolveMemberName in lib/rolesSheet.js: a name in any of the forms people
+    write it (`Leah Kao 高莉雅`, `高莉雅`, `Leah Kao, DTM`) → the roster's
+    canonical `Name, LEVEL` in the agenda's language. Returns (value, matched);
+    a name not on the roster — a guest — is kept as written.
     """
-    date = data.get("meetingDate") or ""
-    if not date:
-        return ["沒有例會日期，無法對應試算表的欄位"]
-    csv_text = fetch_roles_sheet(club_id, caller)["csv"]    # raises with the reason
+    v = _sheet_clean(raw)
+    key = v.lower()
+    eq = lambda s: _sheet_clean(s).lower() == key
+    for en, zh, level in roster:
+        if (eq(en) or eq(zh) or eq(f"{en} {zh}") or eq(f"{zh} {en}")
+                or (level and (eq(f"{en}, {level}") or eq(f"{zh}, {level}")))):
+            name = (zh if lang == "zh" else en) or en or zh or ""
+            return (f"{name}, {level}" if level else name), True
+    return v, False
 
+
+def _club_role_context(club_id: int) -> dict:
+    """What placing a role on this club's agendas depends on."""
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT code FROM pathways")
@@ -4667,52 +4675,70 @@ def _import_sheet_roles(caller: dict, club_id: int, data: dict, overwrite: bool)
             tmpl = ((cur.fetchone() or [None])[0]) or "compact"
             cur.execute("SELECT name_en, name_zh, level FROM users WHERE club_id=%s", (club_id,))
             roster = cur.fetchall()
+    return {"codes": codes, "template": tmpl, "roster": roster}
 
-    values = _parse_roles_sheet(csv_text, codes).get(date)
-    if values is None:
-        return [f"角色試算表裡沒有 {date} 這一欄，角色沒有匯入"]
 
+def _apply_role_values(data: dict, values: dict, ctx: dict, overwrite: bool) -> dict:
+    """
+    Put {role id: value} onto one agenda's data, the way the 角色 page does:
+    roles the club's template lacks are skipped, person cells are resolved
+    against the roster, and — without `overwrite` — a cell already holding a
+    different value is left alone and reported. That last rule is the
+    distinction the page's import preview draws between filling a blank and
+    undoing someone's edit.
+    """
     lang = "zh" if data.get("lang") == "zh" else "en"
-
-    def resolve(raw: str):
-        key = raw.lower()
-        eq = lambda s: _sheet_clean(s).lower() == key
-        for en, zh, level in roster:
-            if (eq(en) or eq(zh) or eq(f"{en} {zh}") or eq(f"{zh} {en}")
-                    or (level and (eq(f"{en}, {level}") or eq(f"{zh}, {level}")))):
-                name = (zh if lang == "zh" else en) or en or zh or ""
-                return (f"{name}, {level}" if level else name), True
-        return raw, False
-
-    applied, kept, unmatched, locked = 0, [], [], 0
+    out = {"applied": 0, "kept": [], "unmatched": [], "locked": []}
     for rid, raw in values.items():
         allow = _ROLE_TEMPLATES.get(rid)
-        if allow and tmpl not in allow:
-            locked += 1
+        if allow and ctx["template"] not in allow:
+            out["locked"].append(_role_label(rid))
             continue
-        value = raw
-        if _sheet_is_person(rid):
-            value, hit = resolve(raw)
+        value = str(raw or "")
+        if value and _sheet_is_person(rid):
+            value, hit = _resolve_member(value, ctx["roster"], lang)
             if not hit:
-                unmatched.append(raw)
+                out["unmatched"].append(value)
         before = str(_role_get(data, rid) or "")
         if before == value:
             continue
         if before and not overwrite:
-            kept.append(f"{_role_label(rid)}：保留「{before}」（試算表是「{value}」）")
+            out["kept"].append(f"{_role_label(rid)}：保留「{before}」（新的是「{value}」）")
             continue
         _role_set(data, rid, value)
-        applied += 1
+        out["applied"] += 1
+    return out
 
-    lines = [f"從角色試算表匯入 {applied} 個欄位"]
-    if kept:
-        lines.append("已有內容、沒有覆蓋（要覆蓋請帶 overwrite_roles: true）：\n  "
-                     + "\n  ".join(kept))
-    if unmatched:
-        lines.append("不在會員名單、照試算表原文填入：" + "、".join(dict.fromkeys(unmatched)))
-    if locked:
-        lines.append(f"{locked} 個欄位這個分會的版型沒有，略過")
+
+def _role_report(r: dict, what: str, overwrite_hint: str) -> list:
+    lines = [f"{what} {r['applied']} 個欄位"]
+    if r["kept"]:
+        lines.append(f"已有內容、沒有覆蓋（要覆蓋請帶 {overwrite_hint}: true）：\n  "
+                     + "\n  ".join(r["kept"]))
+    if r["unmatched"]:
+        lines.append("不在會員名單、照原文填入：" + "、".join(dict.fromkeys(r["unmatched"])))
+    if r["locked"]:
+        lines.append("這個分會的版型沒有、略過：" + "、".join(dict.fromkeys(r["locked"])))
     return lines
+
+
+def _sheet_values(caller: dict, club_id: int, ctx: dict) -> dict:
+    """The club's role sheet as {iso date: {role id: value}}."""
+    csv_text = fetch_roles_sheet(club_id, caller)["csv"]    # raises with the reason
+    return _parse_roles_sheet(csv_text, ctx["codes"])
+
+
+def _import_sheet_roles(caller: dict, club_id: int, data: dict, overwrite: bool) -> list:
+    """Fill one agenda from the sheet column for its date. Returns report lines."""
+    date = data.get("meetingDate") or ""
+    if not date:
+        return ["沒有例會日期，無法對應試算表的欄位"]
+    ctx = _club_role_context(club_id)
+    values = _sheet_values(caller, club_id, ctx).get(date)
+    if values is None:
+        return [f"角色試算表裡沒有 {date} 這一欄，角色沒有匯入"]
+    return _role_report(_apply_role_values(data, values, ctx, overwrite),
+                        "從角色試算表匯入", "overwrite_roles")
 
 
 def _agenda_for(cur, agenda_id: int, caller: dict):
@@ -5048,6 +5074,434 @@ def _tool_generate_post_image(caller, args):
                       {"postId": post_id, "position": n, "image": item})
 
 
+# ------------------------------------------------------------------ roles (角色安排)
+# The 角色安排 page is a view over agendas.data — there is no separate role
+# store — so these tools read and write the same fields, with the same role
+# ids (app/roles/page.js ROLE_GROUPS) and the same rules as the page.
+
+_ROLE_IDS_DOC = (
+    "角色 id：receptionHost 報到接待、callingToOrder 宣布例會開始、welcomeTME 會長致歡迎詞、"
+    "tme 總主持人、timer 計時員、timerAssistant 計時員幫手、ahCounter 贅語記錄員、"
+    "boardWriter 板書、photographer 攝影、voteCounter 計票員、varietyHost 多元單元主持人、"
+    "tableTopicsMaster 即席問答主持人、wordOfTheDay 每日一字、quizHost 問答遊戲主持、"
+    "langEvaluator 語言講評、generalEvaluator 總講評、awardsPresenter 贈感謝狀、"
+    "sharingFeedback 會後分享、meetingNo 場次、meetingTheme 主題、themeQuestion 主題題目；"
+    "第 N 篇演講：speechN（演講者）、speechN_title、speechN_pwcode、speechN_pwlevel、"
+    "speechN_project；evaluatorN 第 N 位個別講評員；evalEvaluatorN 講評員講評")
+
+# Rows of the matrix, in the page's order, for get_roles' summary.
+_ROLE_ROWS = ("receptionHost", "callingToOrder", "welcomeTME", "tme", "timer",
+              "timerAssistant", "ahCounter", "boardWriter", "photographer", "voteCounter",
+              "varietyHost", "tableTopicsMaster", "wordOfTheDay", "quizHost",
+              "langEvaluator", "generalEvaluator", "awardsPresenter", "sharingFeedback")
+
+
+def _meeting_roles(data: dict, template: str) -> dict:
+    """Every filled role on one agenda as {role id: value}, slots expanded."""
+    out = {}
+    for rid in _ROLE_ROWS:
+        allow = _ROLE_TEMPLATES.get(rid)
+        if allow and template not in allow:
+            continue
+        v = _role_get(data, rid)
+        if v:
+            out[rid] = v
+    for i, sp in enumerate(data.get("speeches") or []):
+        for sub, field in (("", "speaker"), ("_title", "title"),
+                           ("_pwcode", "pathwayCode"), ("_pwlevel", "pathwayLevel"),
+                           ("_project", "pathwayProject")):
+            if (sp or {}).get(field):
+                out[f"speech{i + 1}{sub}"] = sp[field]
+    for key, pre in (("evaluators", "evaluator"), ("evalEvaluators", "evalEvaluator")):
+        for i, v in enumerate(data.get(key) or []):
+            if v:
+                out[f"{pre}{i + 1}"] = v
+    return out
+
+
+def _tool_get_roles(caller, args):
+    cid = _social_scope(caller, args.get("club_id"))
+    if cid is None:
+        return _tool_text("系統管理員請指定 club_id（用 list_clubs 查）", is_error=True)
+    date_from = args.get("date_from") or datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+    date_to = args.get("date_to")
+    limit = min(int(args.get("limit") or 8), 30)
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT template_key FROM clubs WHERE id=%s", (cid,))
+            tmpl = ((cur.fetchone() or [None])[0]) or "compact"
+            cur.execute(
+                "SELECT id, meeting_date, data FROM agendas WHERE club_id=%s"
+                " AND meeting_date >= %s AND (%s::date IS NULL OR meeting_date <= %s)"
+                " ORDER BY meeting_date LIMIT %s",
+                (cid, date_from, date_to, date_to, limit))
+            rows = cur.fetchall()
+    meetings = []
+    lines = []
+    for aid, date, raw in rows:
+        data = parse_jsonb(raw)
+        roles = _meeting_roles(data, tmpl)
+        meetings.append({"agendaId": aid, "date": str(date), "meetingNo": data.get("meetingNo", ""),
+                         "theme": data.get("meetingTheme", ""), "roles": roles})
+        filled = "、".join(f"{_role_label(k)}={v}" for k, v in roles.items()) or "（尚未安排）"
+        lines.append(f"{date} 第{data.get('meetingNo', '')}次（agendaId={aid}）：{filled}")
+    return _tool_text("\n".join(lines) or f"{date_from} 之後沒有議程",
+                      {"clubId": cid, "template": tmpl, "meetings": meetings})
+
+
+def _tool_assign_roles(caller, args):
+    _officer_only(caller)
+    aid = int(args["agenda_id"])
+    roles = args.get("roles") or {}
+    if not isinstance(roles, dict) or not roles:
+        return _tool_text("roles 要是 {角色 id: 人名} 的物件", is_error=True)
+    # Role cells and the matrix's column-header fields only — a date or venue
+    # changed here would skip update_agenda's handling of them.
+    bad = [k for k in roles if not (k in _ROLE_ROWS or k in _SHEET_META_ROWS.values()
+                                    or _SLOT_RE.match(k))]
+    if bad:
+        return _tool_text("不認得的角色 id：" + "、".join(bad) + "。" + _ROLE_IDS_DOC, is_error=True)
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            data, cid = _agenda_for(cur, aid, caller)
+    report = _apply_role_values(data, {k: ("" if v is None else str(v)) for k, v in roles.items()},
+                                _club_role_context(cid), overwrite=args.get("overwrite", True))
+    if report["applied"]:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE agendas SET data=%s::jsonb, updated_at=NOW() WHERE id=%s",
+                            (json.dumps(data), aid))
+    return _tool_text("\n".join([_agenda_summary(aid, data)]
+                                + _role_report(report, "已安排", "overwrite")),
+                      {"agendaId": aid, "applied": report["applied"],
+                       "unmatched": report["unmatched"], "skipped": report["locked"]})
+
+
+def _tool_import_roles_sheet(caller, args):
+    """The 角色 page's 從 Google Sheet 匯入, for a whole date range at once."""
+    _officer_only(caller)
+    cid = _social_scope(caller, args.get("club_id"))
+    if cid is None:
+        return _tool_text("系統管理員請指定 club_id（用 list_clubs 查）", is_error=True)
+    ctx = _club_role_context(cid)
+    sheet = _sheet_values(caller, cid, ctx)
+    lo, hi = args.get("date_from") or "", args.get("date_to") or "9999-12-31"
+    dates = sorted(d for d in sheet if lo <= d <= hi)
+    if not dates:
+        return _tool_text("試算表在這個日期範圍沒有任何例會欄", is_error=True)
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, meeting_date, data FROM agendas"
+                        " WHERE club_id=%s AND meeting_date = ANY(%s::date[])", (cid, dates))
+            existing = {str(r[1]): (r[0], parse_jsonb(r[2])) for r in cur.fetchall()}
+
+    overwrite = bool(args.get("overwrite"))
+    lines, changed, created, skipped_new = [], [], 0, []
+    for d in dates:
+        values = sheet[d]
+        if d in existing:
+            aid, data = existing[d]
+        elif not any(k not in _SHEET_META_ROWS.values() for k in values):
+            # Columns holding only the season's pre-filled 會議編號 are empty
+            # slots, not planned meetings — the page's importer skips them too.
+            continue
+        elif args.get("create_missing"):
+            aid, data = None, {"meetingDate": d}
+        else:
+            skipped_new.append(d)
+            continue
+        report = _apply_role_values(data, values, ctx, overwrite)
+        if aid is None or report["applied"]:
+            changed.append((aid, d, data))
+        tag = "新建" if aid is None else f"#{aid}"
+        line = f"{d}（{tag}）：填入 {report['applied']} 個欄位"
+        if report["kept"]:
+            line += f"，{len(report['kept'])} 個已有內容沒覆蓋"
+        if report["unmatched"]:
+            line += "，不在名單：" + "、".join(dict.fromkeys(report["unmatched"]))
+        lines.append(line)
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            for aid, d, data in changed:
+                if aid is None:
+                    cur.execute("INSERT INTO agendas (username, data, meeting_date, club_id)"
+                                " VALUES (%s, %s::jsonb, %s, %s)",
+                                (caller["username"], json.dumps(data), d, cid))
+                    created += 1
+                else:
+                    cur.execute("UPDATE agendas SET data=%s::jsonb, updated_at=NOW()"
+                                " WHERE id=%s", (json.dumps(data), aid))
+    if skipped_new:
+        lines.append("系統裡還沒有議程、沒有建立（要建立請帶 create_missing: true）："
+                     + "、".join(skipped_new))
+    if not overwrite and any("沒覆蓋" in l for l in lines):
+        lines.append("要以試算表為準覆蓋已填的角色，請帶 overwrite: true")
+    return _tool_text("\n".join([f"已更新 {len(changed) - created} 份、新建 {created} 份議程"]
+                                + lines),
+                      {"clubId": cid, "updated": len(changed) - created, "created": created})
+
+
+def _tool_list_members(caller, args):
+    """The roster role names should be written from — names only."""
+    cid = _social_scope(caller, args.get("club_id"))
+    if cid is None:
+        return _tool_text("系統管理員請指定 club_id（用 list_clubs 查）", is_error=True)
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT name_en, name_zh, level, role FROM users"
+                        " WHERE club_id=%s AND status <> 'pending'"
+                        " ORDER BY name_en", (cid,))
+            rows = cur.fetchall()
+    items = [{"nameEn": r[0] or "", "nameZh": r[1] or "", "level": r[2] or "",
+              "role": r[3]} for r in rows]
+    lines = [f"{i['nameEn']} {i['nameZh']}" + (f", {i['level']}" if i["level"] else "")
+             for i in items] or ["（沒有會員）"]
+    return _tool_text("\n".join(lines), {"clubId": cid, "members": items})
+
+
+# ------------------------------------------------------------------ clubs (分會管理)
+# Same rule as PUT /api/clubs/{id}: system admins only. What can be edited is
+# what the 分會管理 page edits — the club's own columns plus the template
+# fields each template declares (lib/agendaTemplates.js `settings` manifests).
+# Other keys in clubs.settings (the Meta / Threads app ids) belong to other
+# screens and are neither shown nor writable here.
+
+_CLUB_COLUMNS = {
+    "name": "分會名稱（必填、不可重複）", "name_zh": "中文名稱", "name_en": "英文名稱",
+    "charter_no": "章程編號 / Club No.", "founded_date": "成立日", "fee": "入場費",
+    "template_key": "議程版型：standard、compact、chillhihigh、china、entrepreneur",
+}
+_CLUB_IMAGE_COLUMNS = {"logo_url": "Logo", "fb_qr_url": "Facebook QR", "line_qr_url": "LINE QR"}
+_CLUB_SETTINGS = {
+    "timeRange": "預設時間（議程可覆寫）", "venue": "預設地點（議程可覆寫）",
+    "scheduleZh": "會議日期行（中文）", "scheduleEn": "會議日期行（English）",
+    "scheduleText": "會議時間（China）", "slogan": "標語", "transit": "交通",
+    "closingLine": "結尾句", "upcomingMeetings": "近期例會", "specialEvent": "特別活動",
+    "membershipFee": "入會費用", "admissionFeeText": "入場費文字（China）",
+    "contactEmail": "聯絡 Email", "officerTeamYear": "幹部任期年度",
+    "officerTeam": "幹部名單（每行：職稱|Lead|Deputy）",
+    "upcomingEvents": "近期活動（每行：日期|活動）",
+    "roles_sheet_url": "角色表 Google Sheet 網址（需含 #gid=）",
+}
+_CLUB_IMAGE_SETTINGS = {
+    "ig_qr_url": "Instagram QR", "threads_qr_url": "Threads QR",
+    "evoting_qr_url": "E-Voting QR", "membership_qr_url": "入會登記 QR",
+    "page2_hero_url": "第二頁 圖1（我們是誰）", "page2_img2_url": "第二頁 圖2（招生／入會流程）",
+}
+_TEMPLATE_KEYS = ("standard", "compact", "chillhihigh", "china", "entrepreneur")
+
+
+def _system_admin_only(caller: dict):
+    if caller["role"] != "system_admin":
+        raise HTTPException(status_code=403, detail="分會設定只有系統管理員可以修改")
+
+
+def _club_view(cur, club_id: int) -> dict:
+    cur.execute(f"SELECT {_CLUB_COLS} FROM clubs WHERE id=%s", (club_id,))
+    row = cur.fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="找不到此分會")
+    c = _club_row_to_dict(row)
+    st = c.pop("settings") or {}
+    visible = {**_CLUB_SETTINGS, **_CLUB_IMAGE_SETTINGS}
+    c["settings"] = {k: v for k, v in st.items() if k in visible}
+    return c
+
+
+def _tool_get_club(caller, args):
+    cid = _social_scope(caller, args.get("club_id"))
+    if cid is None:
+        return _tool_text("系統管理員請指定 club_id（用 list_clubs 查）", is_error=True)
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            c = _club_view(cur, cid)
+    return _tool_text(json.dumps(c, ensure_ascii=False, indent=1, default=str), c)
+
+
+def _club_write(cur, club_id, columns: dict, settings: dict):
+    """Partial update: given columns replace, settings merge (null deletes)."""
+    if columns:
+        sets = ", ".join(f"{k}=%s" for k in columns)
+        cur.execute(f"UPDATE clubs SET {sets} WHERE id=%s", (*columns.values(), club_id))
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="找不到此分會")
+    if settings:
+        drop = [k for k, v in settings.items() if v is None]
+        keep = {k: v for k, v in settings.items() if v is not None}
+        cur.execute("UPDATE clubs SET settings = (COALESCE(settings,'{}'::jsonb) - %s::text[])"
+                    " || %s::jsonb WHERE id=%s", (drop, json.dumps(keep), club_id))
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="找不到此分會")
+
+
+def _club_changes(args: dict):
+    cols = {k: v for k, v in (args.get("fields") or {}).items()}
+    sets = dict(args.get("settings") or {})
+    bad = [k for k in cols if k not in _CLUB_COLUMNS and k not in _CLUB_IMAGE_COLUMNS] + \
+          [k for k in sets if k not in _CLUB_SETTINGS and k not in _CLUB_IMAGE_SETTINGS]
+    if bad:
+        raise HTTPException(status_code=400, detail="不能修改的欄位：" + "、".join(bad))
+    if "name" in cols and not str(cols["name"] or "").strip():
+        raise HTTPException(status_code=400, detail="分會名稱不得為空")
+    if cols.get("template_key") is not None and cols["template_key"] not in _TEMPLATE_KEYS:
+        raise HTTPException(status_code=400, detail="template_key 只能是 " + "、".join(_TEMPLATE_KEYS))
+    cols = {k: (None if v is None else str(v).strip() if k == "name" else str(v))
+            for k, v in cols.items()}
+    return cols, {k: (None if v is None else str(v)) for k, v in sets.items()}
+
+
+def _tool_update_club(caller, args):
+    _system_admin_only(caller)
+    cid = int(args["club_id"])
+    cols, sets = _club_changes(args)
+    if not cols and not sets:
+        return _tool_text("沒有要修改的欄位", is_error=True)
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                _club_write(cur, cid, cols, sets)
+                c = _club_view(cur, cid)
+    except psycopg2.errors.UniqueViolation:
+        return _tool_text("分會名稱已存在", is_error=True)
+    return _tool_text(f"已更新分會 #{cid}：" + "、".join(list(cols) + list(sets)), c)
+
+
+def _tool_create_club(caller, args):
+    _system_admin_only(caller)
+    cols, sets = _club_changes(args)
+    if not (cols.get("name") or "").strip():
+        return _tool_text("請在 fields 裡給 name", is_error=True)
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("INSERT INTO clubs (name, template_key, settings)"
+                            " VALUES (%s, %s, '{}'::jsonb) RETURNING id",
+                            (cols.pop("name"), cols.pop("template_key", None) or "standard"))
+                cid = cur.fetchone()[0]
+                _club_write(cur, cid, cols, sets)
+                c = _club_view(cur, cid)
+    except psycopg2.errors.UniqueViolation:
+        return _tool_text("分會名稱已存在", is_error=True)
+    return _tool_text(f"已建立分會 #{cid}「{c['name']}」", c)
+
+
+def _image_from_args(args: dict) -> tuple:
+    """(bytes, content type) from image / image_url / image_base64 — or raise."""
+    import base64
+    f = args.get("image") if isinstance(args.get("image"), dict) else {}
+    url = f.get("download_url") or args.get("image_url")
+    if url:
+        raw = _download_image(str(url))
+    elif args.get("image_base64"):
+        b64 = str(args["image_base64"])
+        try:
+            raw = base64.b64decode(b64[b64.find(",") + 1:] if b64.startswith("data:") else b64)
+        except Exception:
+            raise HTTPException(status_code=400, detail="image_base64 不是有效的 base64")
+        if len(raw) > _IMAGE_MAX_BYTES:
+            raise HTTPException(status_code=400, detail="圖片超過 15 MB")
+    else:
+        raise HTTPException(status_code=400,
+                            detail="請提供 image（檔案）、image_url 或 image_base64 其中一個")
+    ctype = _sniff_image(raw)
+    if not ctype:
+        raise HTTPException(status_code=400, detail="這不是支援的圖片格式（JPG、PNG、WebP、GIF）")
+    return raw, ctype
+
+
+def _store_image(raw: bytes, ctype: str, prefix: str) -> str:
+    key = f"{prefix}/{uuid.uuid4().hex}.{_IMAGE_EXT[ctype]}"
+    try:
+        _r2().put_object(Bucket=R2_BUCKET_NAME, Key=key, Body=raw, ContentType=ctype)
+    except Exception:
+        raise HTTPException(status_code=502, detail="圖片上傳雲端失敗，請稍後再試")
+    return f"{R2_PUBLIC_URL}/{key}"
+
+
+def _tool_set_club_image(caller, args):
+    _system_admin_only(caller)
+    cid, slot = int(args["club_id"]), args.get("slot") or ""
+    if slot not in _CLUB_IMAGE_COLUMNS and slot not in _CLUB_IMAGE_SETTINGS:
+        return _tool_text("slot 只能是 " + "、".join(list(_CLUB_IMAGE_COLUMNS)
+                                                     + list(_CLUB_IMAGE_SETTINGS)), is_error=True)
+    raw, ctype = _image_from_args(args)
+    url = _store_image(raw, ctype, f"media/clubs/{cid}")
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            if slot in _CLUB_IMAGE_COLUMNS:
+                _club_write(cur, cid, {slot: url}, {})
+            else:
+                _club_write(cur, cid, {}, {slot: url})
+    label = _CLUB_IMAGE_COLUMNS.get(slot) or _CLUB_IMAGE_SETTINGS[slot]
+    return _tool_text(f"已更新分會 #{cid} 的「{label}」：{url}",
+                      {"clubId": cid, "slot": slot, "url": url})
+
+
+# ------------------------------------------------------------------ agenda theme image
+# The per-meeting picture beside the header — `themeImgUrl` in agendas.data,
+# set by the editor's 主題圖片 upload. Only these templates draw it; on any
+# other a picture would be stored and never seen (and, generated, paid for).
+_THEME_IMG_TEMPLATES = {"standard", "entrepreneur"}
+
+
+def _theme_target(caller, agenda_id: int):
+    """(data, club id) for an agenda whose template shows a theme image."""
+    _officer_only(caller)
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            data, cid = _agenda_for(cur, agenda_id, caller)
+            cur.execute("SELECT template_key FROM clubs WHERE id=%s", (cid,))
+            tmpl = ((cur.fetchone() or [None])[0]) or "standard"
+    if tmpl not in _THEME_IMG_TEMPLATES:
+        raise HTTPException(status_code=400,
+                            detail=f"這個分會的版型（{tmpl}）沒有每場的主題圖，只有 "
+                                   + "、".join(sorted(_THEME_IMG_TEMPLATES)) + " 版型會顯示")
+    return data, cid
+
+
+def _save_theme(agenda_id: int, data: dict, url: str):
+    data["themeImgUrl"] = url
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE agendas SET data=%s::jsonb, updated_at=NOW() WHERE id=%s",
+                        (json.dumps(data), agenda_id))
+
+
+def _tool_set_agenda_theme_image(caller, args):
+    aid = int(args["agenda_id"])
+    data, cid = _theme_target(caller, aid)
+    if args.get("clear"):
+        data.pop("themeImgUrl", None)
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE agendas SET data=%s::jsonb, updated_at=NOW() WHERE id=%s",
+                            (json.dumps(data), aid))
+        return _tool_text(f"已移除議程 #{aid} 的主題圖", {"agendaId": aid})
+    raw, ctype = _image_from_args(args)
+    url = _store_image(raw, ctype, f"media/clubs/{cid}/agendas")
+    _save_theme(aid, data, url)
+    return _tool_text(f"已設定議程 #{aid} 的主題圖：{url}", {"agendaId": aid, "url": url})
+
+
+def _tool_generate_agenda_theme_image(caller, args):
+    aid = int(args["agenda_id"])
+    data, cid = _theme_target(caller, aid)          # checked before anything is paid for
+    theme = data.get("meetingTheme") or ""
+    prompt = args.get("prompt") or (
+        f"Toastmasters 演講會例會的主題插圖，主題是「{theme}」。溫暖、活潑的扁平插畫風格，"
+        "不要任何文字。" if theme else "")
+    if not prompt:
+        return _tool_text("這份議程沒有主題，請提供 prompt 描述想要的圖", is_error=True)
+    item = _generate_image(caller["username"], cid, {
+        "prompt": prompt, "size": args.get("size") or "1024x1024",
+        "quality": args.get("quality"), "model": args.get("model")})
+    _save_theme(aid, data, item["url"])
+    return _tool_text(f"已產生並設定議程 #{aid} 的主題圖：{item['url']}",
+                      {"agendaId": aid, "url": item["url"], "prompt": prompt})
+
+
 # ------------------------------------------------------------------ catalogue
 # Spelled out because a system admin's omitted club_id silently means "every
 # club", and a model that does not know that reads the mix as one club.
@@ -5313,6 +5767,158 @@ MCP_TOOLS = [
         "annotations": {"readOnlyHint": False, "destructiveHint": False,
                         "idempotentHint": False, "openWorldHint": True},
         "handler": _tool_generate_post_image,
+    },
+
+    # ---- agenda theme image
+    {
+        "name": "set_agenda_theme_image", "scope": "agendas:write", "title": "設定議程主題圖",
+        "description": "把一張圖設成議程的主題圖（議程表頁首旁的插圖）。用你（AI）自己產生或使用者提供的圖："
+                       "給 image（檔案）、image_url 或 image_base64 其中一個；clear: true 移除主題圖。"
+                       "只有 standard、entrepreneur 版型會顯示主題圖，其他版型會被拒絕。",
+        "inputSchema": {"type": "object", "properties": {
+            "agenda_id": {"type": "integer"},
+            "image": {"type": "object", "description": "圖片檔案（支援檔案參數的客戶端使用）",
+                      "properties": {"download_url": {"type": "string"},
+                                     "file_id": {"type": "string"}}},
+            "image_url": {"type": "string", "description": "公開可下載的 https 圖片網址"},
+            "image_base64": {"type": "string", "description": "圖片內容的 base64"},
+            "clear": {"type": "boolean", "description": "移除這場的主題圖"},
+        }, "required": ["agenda_id"], "additionalProperties": False},
+        "_meta": {"openai/fileParams": ["image"]},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True,
+                        "idempotentHint": True, "openWorldHint": True},
+        "handler": _tool_set_agenda_theme_image,
+    },
+    {
+        "name": "generate_agenda_theme_image", "scope": "ai:generate", "title": "AI 產生議程主題圖",
+        "description": "用平台的 OpenAI 生成議程主題圖並直接套用。沒給 prompt 時依例會主題產生。"
+                       "⚠️ 會消耗呼叫者自己（或分會共用）的 OpenAI 額度；版型不顯示主題圖時會先拒絕、不會花錢。",
+        "inputSchema": {"type": "object", "properties": {
+            "agenda_id": {"type": "integer"},
+            "prompt": {"type": "string", "description": "圖片描述；留空依例會主題自動產生"},
+            "size": {"type": "string", "enum": list(_IMAGE_SIZES)},
+            "quality": {"type": "string", "enum": list(IMAGE_QUALITIES), "description": "預設 low（最省）"},
+            "model": {"type": "string", "enum": [m["id"] for m in IMAGE_MODELS]},
+        }, "required": ["agenda_id"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True,
+                        "idempotentHint": False, "openWorldHint": True},
+        "handler": _tool_generate_agenda_theme_image,
+    },
+
+    # ---- roles (角色安排)
+    {
+        "name": "get_roles", "scope": "posts:read", "title": "查看角色安排",
+        "description": "角色安排表：列出分會接下來（或指定日期範圍）每場例會已安排的角色。",
+        "inputSchema": {"type": "object", "properties": {
+            "club_id": {"type": "integer", "description": _CLUB_ID_DOC},
+            "date_from": {"type": "string", "description": "YYYY-MM-DD，預設今天"},
+            "date_to": {"type": "string", "description": "YYYY-MM-DD"},
+            "limit": {"type": "integer", "description": "最多幾場，預設 8，上限 30"},
+        }, "additionalProperties": False},
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+        "handler": _tool_get_roles,
+    },
+    {
+        "name": "assign_roles", "scope": "agendas:write", "title": "安排角色",
+        "description": "為一場例會安排角色，例如 {\"tme\": \"高莉雅\", \"speech1\": \"Bob Lin\"}。"
+                       "人名會比對會員名單，自動改成名單上的寫法；給空字串表示清空。"
+                       "版型沒有的角色會略過。" + _ROLE_IDS_DOC,
+        "inputSchema": {"type": "object", "properties": {
+            "agenda_id": {"type": "integer"},
+            "roles": {"type": "object", "additionalProperties": {"type": ["string", "null"]},
+                      "description": "{角色 id: 人名或內容}"},
+            "overwrite": {"type": "boolean", "description": "已有人時是否覆蓋，預設 true"},
+        }, "required": ["agenda_id", "roles"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True,
+                        "idempotentHint": True, "openWorldHint": False},
+        "handler": _tool_assign_roles,
+    },
+    {
+        "name": "import_roles_sheet", "scope": "agendas:write", "title": "從角色試算表匯入整季",
+        "description": "把分會 Google Sheet 角色規劃表的內容匯入每一場議程（等同角色安排頁的「從 Google Sheet 匯入」）。"
+                       "預設只補空白欄位、不建立新議程；overwrite 以試算表覆蓋、create_missing 為試算表有但系統沒有的場次建立議程。",
+        "inputSchema": {"type": "object", "properties": {
+            "club_id": {"type": "integer", "description": _CLUB_ID_DOC},
+            "date_from": {"type": "string", "description": "YYYY-MM-DD，只匯入這天之後"},
+            "date_to": {"type": "string", "description": "YYYY-MM-DD，只匯入這天之前"},
+            "overwrite": {"type": "boolean", "description": "試算表的值覆蓋已填的角色"},
+            "create_missing": {"type": "boolean", "description": "為系統還沒有的場次建立議程"},
+        }, "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True,
+                        "idempotentHint": True, "openWorldHint": True},
+        "handler": _tool_import_roles_sheet,
+    },
+    {
+        "name": "list_members", "scope": "posts:read", "title": "列出會員",
+        "description": "分會會員名單（中英文名與教育等級），安排角色時用來對照正確的人名。",
+        "inputSchema": {"type": "object", "properties": {
+            "club_id": {"type": "integer", "description": _CLUB_ID_DOC},
+        }, "additionalProperties": False},
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+        "handler": _tool_list_members,
+    },
+
+    # ---- clubs (分會管理)
+    {
+        "name": "get_club", "scope": "posts:read", "title": "取得分會設定",
+        "description": "分會的名稱、版型、地點、時間、QR code 等議程用設定。",
+        "inputSchema": {"type": "object", "properties": {
+            "club_id": {"type": "integer", "description": _CLUB_ID_DOC},
+        }, "additionalProperties": False},
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+        "handler": _tool_get_club,
+    },
+    {
+        "name": "update_club", "scope": "clubs:write", "title": "修改分會設定",
+        "description": "修改分會設定，只會改有給的欄位；settings 裡的值給 null 表示刪除。限系統管理員。"
+                       "圖片（Logo、QR code、第二頁圖片）請用 set_club_image。",
+        "inputSchema": {"type": "object", "properties": {
+            "club_id": {"type": "integer"},
+            "fields": {"type": "object", "additionalProperties": False,
+                       "properties": {k: {"type": ["string", "null"], "description": d}
+                                      for k, d in _CLUB_COLUMNS.items()}},
+            "settings": {"type": "object", "additionalProperties": False,
+                         "properties": {k: {"type": ["string", "null"], "description": d}
+                                        for k, d in _CLUB_SETTINGS.items()}},
+        }, "required": ["club_id"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True,
+                        "idempotentHint": True, "openWorldHint": False},
+        "handler": _tool_update_club,
+    },
+    {
+        "name": "create_club", "scope": "clubs:write", "title": "建立分會",
+        "description": "建立新分會（fields.name 必填）。限系統管理員。",
+        "inputSchema": {"type": "object", "properties": {
+            "fields": {"type": "object", "additionalProperties": False,
+                       "properties": {k: {"type": ["string", "null"], "description": d}
+                                      for k, d in _CLUB_COLUMNS.items()}},
+            "settings": {"type": "object", "additionalProperties": False,
+                         "properties": {k: {"type": ["string", "null"], "description": d}
+                                        for k, d in _CLUB_SETTINGS.items()}},
+        }, "required": ["fields"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": False,
+                        "idempotentHint": False, "openWorldHint": False},
+        "handler": _tool_create_club,
+    },
+    {
+        "name": "set_club_image", "scope": "clubs:write", "title": "設定分會圖片",
+        "description": "更換分會的 Logo、QR code 或議程第二頁圖片。給 image（檔案）、image_url 或 image_base64 其中一個。限系統管理員。",
+        "inputSchema": {"type": "object", "properties": {
+            "club_id": {"type": "integer"},
+            "slot": {"type": "string",
+                     "enum": list(_CLUB_IMAGE_COLUMNS) + list(_CLUB_IMAGE_SETTINGS),
+                     "description": "、".join(f"{k}={v}" for k, v in
+                                              {**_CLUB_IMAGE_COLUMNS, **_CLUB_IMAGE_SETTINGS}.items())},
+            "image": {"type": "object", "description": "圖片檔案（支援檔案參數的客戶端使用）",
+                      "properties": {"download_url": {"type": "string"},
+                                     "file_id": {"type": "string"}}},
+            "image_url": {"type": "string"},
+            "image_base64": {"type": "string"},
+        }, "required": ["club_id", "slot"], "additionalProperties": False},
+        "_meta": {"openai/fileParams": ["image"]},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True,
+                        "idempotentHint": True, "openWorldHint": True},
+        "handler": _tool_set_club_image,
     },
 ]
 
