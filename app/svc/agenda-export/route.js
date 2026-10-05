@@ -51,7 +51,7 @@ async function ensureCjkFont() {
   }));
 }
 
-async function launchBrowser() {
+async function launchBrowser(diag = {}) {
   const puppeteer = (await import('puppeteer-core')).default;
   // Local development: point at an installed Chrome; the bundled Chromium is
   // a Linux (Lambda) binary.
@@ -60,7 +60,7 @@ async function launchBrowser() {
   }
   const chromium = (await import('@sparticuz/chromium')).default;
   chromium.setGraphicsMode = false;
-  await ensureCjkFont();
+  if (diag.font !== false) await ensureCjkFont();
   // --single-process (in the package's defaults, for tight Lambda memory)
   // detaches the frame on the cross-origin navigation from about:blank to the
   // agenda page — "Navigating frame was detached". A Vercel function has the
@@ -68,8 +68,9 @@ async function launchBrowser() {
   // Out of single-process mode the processes talk over shared memory, and the
   // sandbox's /dev/shm is tiny — net::ERR_INSUFFICIENT_RESOURCES on the first
   // request. --disable-dev-shm-usage moves that to /tmp.
-  const args = [...chromium.args.filter((a) => a !== '--single-process'),
-    '--disable-dev-shm-usage'];
+  const args = diag.single
+    ? chromium.args
+    : [...chromium.args.filter((a) => a !== '--single-process'), '--disable-dev-shm-usage'];
   return puppeteer.launch({
     args: await puppeteer.defaultArgs({ args, headless: 'shell' }),
     executablePath: await chromium.executablePath(),
@@ -130,7 +131,9 @@ export async function POST(request) {
 
   let browser;
   try {
-    browser = await launchBrowser();
+    // TEMP diagnostics (removed once production rendering is confirmed).
+    const diag = body.diag || {};
+    browser = await launchBrowser(diag);
     // Reuse the tab Chromium opened with rather than adding one: a second
     // target is one more thing for a constrained runtime to lose track of.
     const page = (await browser.pages())[0] || await browser.newPage();
@@ -139,6 +142,13 @@ export async function POST(request) {
     // it is the actual reason ("找不到此議程", a 403, …).
     const alerts = [];
     page.on('dialog', (d) => { alerts.push(d.message()); d.dismiss().catch(() => {}); });
+    const events = [];
+    page.on('error', (e) => events.push(`crash: ${e.message}`));
+    page.on('pageerror', (e) => events.length < 8 && events.push(`js: ${String(e.message).slice(0, 160)}`));
+    page.on('requestfailed', (r) => events.length < 8 && events.push(`req: ${r.url().slice(0, 100)} ${r.failure()?.errorText}`));
+    browser.on('disconnected', () => events.push('browser disconnected'));
+    request.signal?.addEventListener?.('abort', () => {});
+    globalThis.__exportEvents = events;
     // A4 at the editor's layout width; scale stays 1 so the preview is not
     // shrunk (applyPreviewScale only scales down for narrow screens).
     await page.setViewport({ width: 1400, height: 1200, deviceScaleFactor: 1 });
@@ -147,6 +157,11 @@ export async function POST(request) {
       httpOnly: true, secure: origin.startsWith('https:'), sameSite: 'Lax',
     });
 
+    const path = typeof diag.path === 'string' && diag.path.startsWith('/') ? diag.path : `/agenda?id=${agendaId}`;
+    if (diag.path) {
+      await page.goto(`${origin}${path}`, { waitUntil: 'networkidle0', timeout: 30000 });
+      return NextResponse.json({ ok: true, url: page.url(), title: await page.title(), events });
+    }
     await page.goto(`${origin}/agenda?id=${agendaId}`, { waitUntil: 'networkidle0', timeout: 30000 });
     await page.waitForFunction(
       () => window.__agendaExport && window.__agendaExport.ready
@@ -184,7 +199,8 @@ export async function POST(request) {
     return NextResponse.json({ name: out.name, jpgPages: (out.jpg || []).length, pdf: !!out.pdf });
   } catch (e) {
     console.error('agenda-export failed', e);
-    return NextResponse.json({ detail: `議程輸出失敗：${e.message || e}` }, { status: 502 });
+    const ev = (globalThis.__exportEvents || []).join(' | ');
+    return NextResponse.json({ detail: `議程輸出失敗：${e.message || e}${ev ? `（${ev}）` : ''}` }, { status: 502 });
   } finally {
     if (browser) await browser.close().catch(() => {});
   }
