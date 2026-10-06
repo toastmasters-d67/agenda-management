@@ -75,6 +75,7 @@ async function loadClubs() {
     // Same club list feeds the 所屬分會 selects in both modals.
     document.getElementById('addClubId').innerHTML = '<option value="">— 未分配 —</option>' + options;
     document.getElementById('fClubId').innerHTML = '<option value="">— 未分配 —</option>' + options;
+    document.getElementById('apClubId').innerHTML = '<option value="">— 未分配 —</option>' + options;
   } catch {
     console.error('載入分會失敗');
   }
@@ -377,16 +378,58 @@ function renderList() {
       </td>
       <td class="col-level"><span class="level-badge">${m.level || 'TM'}</span></td>
       ${showRole ? `<td class="col-role"><span class="role-badge ${m.role}">${roleLabel}</span></td>` : ''}
-      <td class="col-club" style="font-size:12px;color:${m.clubName ? '#0f172a' : '#94a3b8'}">${m.clubName || '—'}</td>
+      <td class="col-club" style="font-size:12px;color:${m.clubName ? '#0f172a' : '#94a3b8'}">${m.clubName || (isPending ? '未選擇（待系統管理員分派）' : '—')}</td>
       <td class="col-actions td-actions">${actions}</td>
     </tr>`;
   }).join('');
 }
 
+// club_admin approves as-is (the backend fixes role/club anyway). system_admin
+// gets a dialog to assign the role and club first — the only way a
+// registration that came in without a club gets placed.
 async function approveUser(username) {
+  if (isSystemAdmin()) { openApproveModal(username); return; }
   try {
     await apiJson(`/users/${username}/approve`, { method: 'PUT' });
-    await fetchMembers(isSystemAdmin() ? selectedClubId : undefined);
+    await fetchMembers();
+  } catch (e) { alert(e.message); }
+}
+
+let approvingUsername = null;
+
+function openApproveModal(username) {
+  const m = members.find((m) => m.username === username);
+  if (!m) return;
+  approvingUsername = username;
+  document.getElementById('apUsername').textContent = m.username;
+  document.getElementById('apUserFullname').textContent =
+    [m.nameZh, m.nameEn].filter(Boolean).join(' / ') || '—';
+  document.getElementById('apRole').value = m.role || 'club_member';
+  document.getElementById('apClubId').value = m.clubId ?? '';
+  document.getElementById('apClubHint').textContent = m.clubId
+    ? `申請人選擇的分會：${m.clubName || m.clubId}`
+    : '申請人未選擇分會，請在此指定。';
+  document.getElementById('approveModal').classList.add('open');
+}
+
+function closeApproveModal() {
+  document.getElementById('approveModal').classList.remove('open');
+  approvingUsername = null;
+}
+
+async function submitApprove() {
+  const role = document.getElementById('apRole').value;
+  const clubVal = document.getElementById('apClubId').value;
+  if (role === 'club_admin' && !clubVal) { alert('分會管理員必須指定所屬分會'); return; }
+  if (!clubVal && role === 'club_member'
+      && !confirm('尚未指定分會，這位會員通過後將看不到任何分會的資料。確定要繼續嗎？')) return;
+  try {
+    await apiJson(`/users/${approvingUsername}/approve`, {
+      method: 'PUT',
+      body: { role, club_id: clubVal ? parseInt(clubVal) : null },
+    });
+    closeApproveModal();
+    await fetchMembers(selectedClubId ?? undefined);
   } catch (e) { alert(e.message); }
 }
 
@@ -497,8 +540,13 @@ export default function MemberPage() {
       const modal = document.getElementById('modal');
       if (e.target === modal) closeModal();
     };
+    const approveModalOutsideClick = (e) => {
+      const modal = document.getElementById('approveModal');
+      if (e.target === modal) closeApproveModal();
+    };
     document.getElementById('addModal').addEventListener('click', addModalOutsideClick);
     document.getElementById('modal').addEventListener('click', modalOutsideClick);
+    document.getElementById('approveModal').addEventListener('click', approveModalOutsideClick);
 
     applyRoleUI();
 
@@ -513,6 +561,7 @@ export default function MemberPage() {
     return () => {
       document.getElementById('addModal')?.removeEventListener('click', addModalOutsideClick);
       document.getElementById('modal')?.removeEventListener('click', modalOutsideClick);
+      document.getElementById('approveModal')?.removeEventListener('click', approveModalOutsideClick);
       delete window.__memberApprove;
       delete window.__memberReject;
       delete window.__memberOpenModal;
@@ -762,6 +811,38 @@ export default function MemberPage() {
           <div className="modal-actions">
             <button className="btn-modal-cancel" onClick={closeModal}>取消</button>
             <button className="btn-modal-save" onClick={saveMember}>儲存</button>
+          </div>
+        </div>
+      </div>
+
+      <div className="modal-overlay" id="approveModal">
+        <div className="modal">
+          <div className="modal-header">
+            <h3>批准加入申請</h3>
+            <button className="modal-close" onClick={closeApproveModal}>✕</button>
+          </div>
+          <div className="modal-user-info">
+            <div className="modal-user-info-name" id="apUsername"></div>
+            <div className="modal-user-info-sub" id="apUserFullname"></div>
+          </div>
+          <div className="modal-field">
+            <label>角色</label>
+            <select id="apRole" defaultValue="club_member">
+              <option value="club_member">club_member — 一般會員（唯讀）</option>
+              <option value="club_admin">club_admin — 分會管理員（可編輯本分會）</option>
+              <option value="system_admin">system_admin — 系統管理員（全權限）</option>
+            </select>
+          </div>
+          <div className="modal-field">
+            <label>所屬分會</label>
+            <select id="apClubId">
+              <option value="">— 未分配 —</option>
+            </select>
+            <div id="apClubHint" style={{ fontSize: 11, color: '#94a3b8', marginTop: 4, lineHeight: 1.5 }}></div>
+          </div>
+          <div className="modal-actions">
+            <button className="btn-modal-cancel" onClick={closeApproveModal}>取消</button>
+            <button className="btn-modal-save" onClick={submitApprove}>批准</button>
           </div>
         </div>
       </div>

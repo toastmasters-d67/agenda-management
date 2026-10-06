@@ -59,6 +59,30 @@ function MicrosoftButton({ label }) {
   );
 }
 
+// Who reviews the request — mirrors the routing in the backend's register().
+function approverFor(clubVal) {
+  return clubVal ? '分會管理員' : '系統管理員';
+}
+
+// The club is optional: a fresh deployment has no clubs yet, and a request
+// without one goes to the system admins, who place it on approval.
+function ClubSelect({ selectRef, clubs, style }) {
+  return (
+    <div className="login-field">
+      <label>所屬分會（選填）</label>
+      <select ref={selectRef} style={style}>
+        <option value="">— 不確定／清單中沒有 —</option>
+        {clubs.map((c) => (<option key={c.id} value={c.id}>{c.name}</option>))}
+      </select>
+      <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4, lineHeight: 1.5 }}>
+        {clubs.length
+          ? '未選擇分會時，由系統管理員審核並為你分派分會與角色。'
+          : '目前系統尚未建立分會，申請會由系統管理員審核並分派。'}
+      </div>
+    </div>
+  );
+}
+
 export default function LoginPage() {
   const [tab, setTab] = useState('login');
   const [loginError, setLoginError] = useState('');
@@ -90,7 +114,7 @@ export default function LoginPage() {
     if (params.get('ms_error')) {
       setNotice({ kind: 'error', text: params.get('ms_error') });
     } else if (params.get('ms_status') === 'pending') {
-      setNotice({ kind: 'info', text: '你的帳號尚待審核，請等待分會管理員批准後再登入。' });
+      setNotice({ kind: 'info', text: '你的帳號尚待審核，請等待管理員批准後再登入。' });
     }
     const ticket = params.get('ms_signup');
     if (ticket) {
@@ -116,14 +140,13 @@ export default function LoginPage() {
     setRegisterError('');
     if (!name_en) { setRegisterError('請輸入英文姓名'); return; }
     if (!name_zh) { setRegisterError('請輸入中文姓名'); return; }
-    if (!clubVal) { setRegisterError('請選擇所屬分會'); return; }
     setRegisterBusy(true);
     try {
       const data = await apiJson('/auth/microsoft/register', {
         method: 'POST',
-        body: { ticket: msSignup.ticket, name_en, name_zh, club_id: parseInt(clubVal) },
+        body: { ticket: msSignup.ticket, name_en, name_zh, club_id: clubVal ? parseInt(clubVal) : null },
       });
-      setMsSignupDone(data.username);
+      setMsSignupDone({ username: data.username, approver: approverFor(clubVal) });
     } catch (e) {
       setRegisterError(e.message || '無法連線到伺服器');
     } finally {
@@ -176,12 +199,11 @@ export default function LoginPage() {
     if (!username || !password) { setRegisterError('請填寫帳號和密碼'); return; }
     if (!name_en) { setRegisterError('請輸入英文姓名'); return; }
     if (!name_zh) { setRegisterError('請輸入中文姓名'); return; }
-    if (!clubVal) { setRegisterError('請選擇所屬分會'); return; }
-    const club_id = parseInt(clubVal);
+    const club_id = clubVal ? parseInt(clubVal) : null;
     setRegisterBusy(true);
     try {
       await apiJson('/auth/register', { method: 'POST', body: { username, password, name_en, name_zh, club_id } });
-      setRegisteredUsername(username);
+      setRegisteredUsername({ username, approver: approverFor(clubVal) });
     } catch (e) {
       setRegisterError(e.message || '無法連線到伺服器，請確認後端已啟動');
     } finally {
@@ -205,15 +227,15 @@ export default function LoginPage() {
             <div style={{ fontSize: 36, marginBottom: 14 }}>✅</div>
             <div style={{ fontWeight: 700, fontSize: 15, color: '#0f172a', marginBottom: 8 }}>申請已提交！</div>
             <div style={{ fontSize: 12, color: '#64748b', lineHeight: 1.7, marginBottom: 18 }}>
-              請等待分會管理員審核，通過後用 Microsoft 帳號登入即可。<br />
-              （系統帳號：<strong>{msSignupDone}</strong>）
+              請等待{msSignupDone.approver}審核，通過後用 Microsoft 帳號登入即可。<br />
+              （系統帳號：<strong>{msSignupDone.username}</strong>）
             </div>
             <a href={withBase('/login')} style={{ color: '#004165', fontSize: 13, fontWeight: 600, textDecoration: 'none' }}>← 返回登入</a>
           </div>
         ) : (
           <div>
             <div className="login-notice info">
-              這個 Microsoft 帳號還沒有對應的系統帳號。填寫以下資料送出申請，分會管理員審核後即可登入。
+              這個 Microsoft 帳號還沒有對應的系統帳號。填寫以下資料送出申請，管理員審核後即可登入。
             </div>
             {msSignup.email && (
               <div className="login-field">
@@ -229,13 +251,7 @@ export default function LoginPage() {
               <label>中文姓名</label>
               <input type="text" ref={msNameZhRef} placeholder="e.g. 王小明" />
             </div>
-            <div className="login-field">
-              <label>所屬分會</label>
-              <select ref={msClubRef}>
-                <option value="">— 請選擇分會 —</option>
-                {clubs.map((c) => (<option key={c.id} value={c.id}>{c.name}</option>))}
-              </select>
-            </div>
+            <ClubSelect selectRef={msClubRef} clubs={clubs} />
             <div className="login-error">{registerError}</div>
             <button className="btn-login-submit" disabled={registerBusy} onClick={doMsRegister}>
               {registerBusy ? (<><span className="spinner" />處理中...</>) : '提交申請'}
@@ -291,8 +307,8 @@ export default function LoginPage() {
               <div style={{ fontSize: 36, marginBottom: 14 }}>✅</div>
               <div style={{ fontWeight: 700, fontSize: 15, color: '#0f172a', marginBottom: 8 }}>申請已提交！</div>
               <div style={{ fontSize: 12, color: '#64748b', lineHeight: 1.7, marginBottom: 18 }}>
-                帳號 <strong>{registered}</strong> 已成功送出，<br />
-                請等待分會管理員審核批准後即可登入。
+                帳號 <strong>{registered.username}</strong> 已成功送出，<br />
+                請等待{registered.approver}審核批准後即可登入。
               </div>
               <a href="#" onClick={(e) => { e.preventDefault(); switchTab('login'); }} style={{ color: '#004165', fontSize: 13, fontWeight: 600, textDecoration: 'none' }}>
                 ← 返回登入
@@ -327,15 +343,11 @@ export default function LoginPage() {
                   onKeyDown={(e) => { if (e.key === 'Enter') registerPasswordRef.current?.focus(); }}
                 />
               </div>
-              <div className="login-field">
-                <label>所屬分會</label>
-                <select ref={registerClubRef} style={{ width: '100%', padding: '9px 11px', border: '1px solid #ccc', borderRadius: 6, fontSize: 13, background: '#fff' }}>
-                  <option value="">— 請選擇分會 —</option>
-                  {clubs.map((c) => (
-                    <option key={c.id} value={c.id}>{c.name}</option>
-                  ))}
-                </select>
-              </div>
+              <ClubSelect
+                selectRef={registerClubRef}
+                clubs={clubs}
+                style={{ width: '100%', padding: '9px 11px', border: '1px solid #ccc', borderRadius: 6, fontSize: 13, background: '#fff' }}
+              />
               <div className="login-field">
                 <label>密碼（至少 6 字元）</label>
                 <input

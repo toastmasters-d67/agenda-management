@@ -218,7 +218,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
     if not row:
         raise HTTPException(status_code=401, detail="使用者不存在")
     if row[4] == "pending":
-        raise HTTPException(status_code=403, detail="帳號尚待審核，請聯絡分會管理員")
+        raise HTTPException(status_code=403, detail="帳號尚待審核，請聯絡管理員")
     return {"username": row[0], "role": row[1], "club_id": row[2], "must_change_pw": row[3]}
 
 
@@ -247,7 +247,7 @@ def login(req: LoginRequest):
     if not row or not _check_password(req.password, row[0]):
         raise HTTPException(status_code=401, detail="帳號或密碼錯誤")
     if row[4] == "pending":
-        raise HTTPException(status_code=403, detail="帳號尚待審核，請等待分會管理員批准後再登入")
+        raise HTTPException(status_code=403, detail="帳號尚待審核，請等待管理員批准後再登入")
     return {
         "token":          make_token(req.username),
         "username":       req.username,
@@ -267,16 +267,14 @@ def register(req: RegisterRequest):
         raise HTTPException(status_code=400, detail="請輸入英文姓名")
     if not req.name_zh.strip():
         raise HTTPException(status_code=400, detail="請輸入中文姓名")
-    # The club routes the request to an approver; see ms_register.
-    if not req.club_id:
-        raise HTTPException(status_code=400, detail="請選擇所屬分會")
+    # The club is optional: it routes the request to that club's admins, and a
+    # club-less request goes to system admins (who assign club + role on
+    # approval). A fresh deployment has no clubs yet, so it cannot be required.
     password_hash = bcrypt.hashpw(req.password.encode(), bcrypt.gensalt()).decode()
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT 1 FROM clubs WHERE id=%s", (req.club_id,))
-                if not cur.fetchone():
-                    raise HTTPException(status_code=400, detail="找不到這個分會，請重新選擇")
+                _check_register_club(cur, req.club_id)
                 cur.execute(
                     "INSERT INTO users (username, password_hash, name_en, name_zh, role, club_id, status)"
                     " VALUES (%s, %s, %s, %s, 'club_member', %s, 'pending')",
@@ -289,8 +287,21 @@ def register(req: RegisterRequest):
     return {
         "ok":      True,
         "pending": True,
-        "message": "帳號已提交審核，請等待分會管理員批准後再登入",
+        "message": _pending_message(req.club_id),
     }
+
+
+def _check_register_club(cur, club_id: Optional[int]) -> None:
+    if club_id is None:
+        return
+    cur.execute("SELECT 1 FROM clubs WHERE id=%s", (club_id,))
+    if not cur.fetchone():
+        raise HTTPException(status_code=400, detail="找不到這個分會，請重新選擇")
+
+
+def _pending_message(club_id: Optional[int]) -> str:
+    approver = "分會管理員" if club_id else "系統管理員"
+    return f"帳號已提交審核，請等待{approver}批准後再登入"
 
 
 @app.get("/api/auth/verify")
@@ -592,11 +603,8 @@ def ms_register(req: MsRegisterRequest):
         raise HTTPException(status_code=400, detail="請輸入英文姓名")
     if not name_zh:
         raise HTTPException(status_code=400, detail="請輸入中文姓名")
-    # Enforced here, not just in the form: the club is what routes the request
-    # to an approver. A club-less pending account is visible only to system
-    # admins, so a direct API call could otherwise slip past every club admin.
-    if not req.club_id:
-        raise HTTPException(status_code=400, detail="請選擇所屬分會")
+    # Club is optional, as in register(): a club-less request is reviewed by
+    # system admins, who assign the club and role on approval.
     email = t.get("email") or None
 
     # Username from the email's local part, or the English name; made unique
@@ -607,9 +615,7 @@ def ms_register(req: MsRegisterRequest):
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT 1 FROM clubs WHERE id=%s", (req.club_id,))
-                if not cur.fetchone():
-                    raise HTTPException(status_code=400, detail="找不到這個分會，請重新選擇")
+                _check_register_club(cur, req.club_id)
                 cur.execute("SELECT 1 FROM users WHERE ms_sub=%s", (t["sub"],))
                 if cur.fetchone():
                     raise HTTPException(status_code=400,
@@ -628,7 +634,7 @@ def ms_register(req: MsRegisterRequest):
     except psycopg2.errors.UniqueViolation:
         raise HTTPException(status_code=400, detail="這個 Email 已有帳號，請先用帳號密碼登入後在「設定」連結")
     return {"ok": True, "pending": True, "username": username,
-            "message": "帳號已提交審核，請等待分會管理員批准後再登入"}
+            "message": _pending_message(req.club_id)}
 
 
 # ------------------------------------------------------------------ my profile
@@ -1196,9 +1202,22 @@ def reset_password(username: str, req: ResetPasswordRequest, user: dict = Depend
     return {"ok": True}
 
 
+class ApproveRequest(BaseModel):
+    role:    Optional[str] = None
+    club_id: Optional[int] = None
+
+
 @app.put("/api/users/{username}/approve")
-def approve_user(username: str, user: dict = Depends(require_club_admin_or_above)):
-    """Approve a pending self-registration: set status = 'active'."""
+def approve_user(username: str, req: Optional[ApproveRequest] = None,
+                 user: dict = Depends(require_club_admin_or_above)):
+    """
+    Approve a pending self-registration: set status = 'active'.
+
+    club_admin approves as-is (club_member in their own club; the body is
+    ignored). system_admin may send {role, club_id} to assign them in the
+    same step — that is how a club-less registration gets placed. Fields
+    left out of the body keep what the registrant chose.
+    """
     with get_db() as conn:
         with conn.cursor() as cur:
             if user["role"] == "club_admin":
@@ -1209,8 +1228,29 @@ def approve_user(username: str, user: dict = Depends(require_club_admin_or_above
                 )
             else:  # system_admin
                 cur.execute(
-                    "UPDATE users SET status='active' WHERE username=%s AND status='pending'",
+                    "SELECT role, club_id FROM users WHERE username=%s AND status='pending'",
                     (username,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    raise HTTPException(status_code=404, detail="找不到此待審核用戶或無權限")
+                fields = (getattr(req, "model_fields_set", None)       # Pydantic v2
+                          or getattr(req, "__fields_set__", set())) if req else set()
+                role    = req.role if req and req.role is not None else row[0]
+                club_id = req.club_id if "club_id" in fields else row[1]
+                if role not in ("system_admin", "club_admin", "club_member"):
+                    raise HTTPException(status_code=400, detail="無效的角色")
+                # A club_admin's every permission is scoped by club_id.
+                if role == "club_admin" and club_id is None:
+                    raise HTTPException(status_code=400, detail="分會管理員必須指定所屬分會")
+                if club_id is not None:
+                    cur.execute("SELECT 1 FROM clubs WHERE id=%s", (club_id,))
+                    if not cur.fetchone():
+                        raise HTTPException(status_code=400, detail="找不到這個分會，請重新選擇")
+                cur.execute(
+                    "UPDATE users SET status='active', role=%s, club_id=%s"
+                    " WHERE username=%s AND status='pending'",
+                    (role, club_id, username),
                 )
             if cur.rowcount == 0:
                 raise HTTPException(status_code=404, detail="找不到此待審核用戶或無權限")
@@ -3761,7 +3801,12 @@ def authorization_server_metadata(request: Request):
         # OAuth 2.1: PKCE is required, and plain is not a method we accept.
         "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": ["none"],
-        "client_id_metadata_document_supported": True,
+        # Not advertised: some clients host their CIMD document behind bot
+        # protection that answers our server's fetch with 403 (ChatGPT was
+        # reported failing this way), and the failure cannot be fixed from
+        # here. Without the flag clients fall back to DCR above, which needs no
+        # fetch. A client that sends a URL client_id anyway is still served.
+        "client_id_metadata_document_supported": False,
         "authorization_response_iss_parameter_supported": True,
     }
 

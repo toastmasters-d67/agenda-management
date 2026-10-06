@@ -875,7 +875,7 @@ https://<你的網域>/api/mcp
 
 | 項目 | 做法 |
 |------|------|
-| 客戶端註冊（CIMD） | **Client ID Metadata Documents**：`client_id` 本身是 https 網址，伺服器去抓、驗證 `client_id` 與網址相符、`redirect_uri` 在清單內。抓取限 https、**DNS 解析後**擋內部位址（私有、loopback、link-local 等）、**不跟隨轉址**、64 KB 上限、8 秒逾時 |
+| 客戶端註冊（CIMD） | **Client ID Metadata Documents**：`client_id` 本身是 https 網址，伺服器去抓、驗證 `client_id` 與網址相符、`redirect_uri` 在清單內。抓取限 https、**DNS 解析後**擋內部位址（私有、loopback、link-local 等）、**不跟隨轉址**、64 KB 上限、8 秒逾時。**探索文件不宣告支援**（`client_id_metadata_document_supported: false`）：ChatGPT 的中繼資料網址會對我們伺服器的抓取回 403，改讓客戶端走 DCR；仍主動送網址 client_id 的客戶端照常處理 |
 | 客戶端註冊（DCR） | 給還不支援 CIMD 的客戶端（例如 Claude Desktop 的 connector）：`POST /api/oauth/register`（RFC 7591）。**不存資料表**：`client_id` 是 `dcr:` 加上用 `MCP_TOKEN_SECRET` 簽的 JWT，內含 redirect_uris 與名稱，改了就驗不過。redirect_uri 限 https，或 localhost 的 http（CLI 類客戶端）。任何人都能註冊、名稱可以亂取，所以同意畫面會另外顯示「授權後會導回哪個網域」 |
 | PKCE | 必填，只收 `S256` |
 | 授權碼 | 5 分鐘有效，只存 SHA-256 雜湊，`DELETE … RETURNING` 保證只能用一次 |
@@ -941,6 +941,8 @@ https://<你的網域>/api/mcp
 
 - `admin` 帳號由 migration `0002` 初始化，**不可刪除，不可變更角色**
 - 自行註冊的用戶預設 `status = 'pending'`，**無法登入**，需由 `club_admin` 或 `system_admin` 審核通過 (`approve`) 才能登入
+- 註冊時「所屬分會」為**選填**（全新部署還沒有分會時也能註冊）：有選分會的申請由該分會的 `club_admin` 審核；沒選的只有 `system_admin` 看得到
+- `system_admin` 審核時可同時指定角色與分會（`club_admin` 必須有分會）；`club_admin` 審核一律以 `club_member` 身分加入自己的分會
 - 管理員直接建立（`POST /api/users`）的帳號 `must_change_pw = true`，首次登入後系統強制導向改密碼頁面
 - `club_admin` 建立用戶或議程時，`club_id` 自動設為其所屬分會（不可指定其他分會）
 - `club_admin` 只能刪除同分會的 `club_member`，不可刪除其他管理員
@@ -1282,7 +1284,7 @@ DATABASE_URL=postgresql://user:pass@ep-xxx-pooler.../neondb?sslmode=require
 
 | 方法 | 路徑 | 說明 | 權限 |
 |------|------|------|------|
-| POST | `/api/auth/register` | 自行註冊；帳號預設 `status=pending`，**需審核後才能登入** | 無 |
+| POST | `/api/auth/register` | 自行註冊；帳號預設 `status=pending`，**需審核後才能登入**；`club_id` 選填 | 無 |
 | POST | `/api/auth/login` | 登入，回傳 JWT token（有效期 24 小時）；`pending` 帳號拒絕登入 | 無 |
 | GET  | `/api/auth/verify` | 驗證 token，回傳 username / role / club_id / must_change_pw / has_password | 已登入 |
 | PUT  | `/api/auth/change-password` | 修改自己的密碼；成功後清除 `must_change_pw` 旗標。帳號沒有密碼時不需 `old_password` | 已登入 |
@@ -1369,7 +1371,7 @@ DATABASE_URL=postgresql://user:pass@ep-xxx-pooler.../neondb?sslmode=require
 | POST   | `/api/users/bulk` | 批量建立 `club_member`（username 自動從 name_en 產生） | `club_admin` 以上 |
 | PUT    | `/api/users/{username}` | 更新用戶資料（club_admin：name / level / email；system_admin：另含 role / club_id）。`email` 省略不變、`""` 清空，重複回 400 | `club_admin` 以上 |
 | PUT    | `/api/users/{username}/reset-password` | 管理員替用戶重設密碼（至少 6 字元；club_admin 限同分會） | `club_admin` 以上 |
-| PUT    | `/api/users/{username}/approve` | 審核通過 pending 用戶（設 status = 'active'） | `club_admin` 以上 |
+| PUT    | `/api/users/{username}/approve` | 審核通過 pending 用戶（設 status = 'active'）；`system_admin` 可帶 `{role, club_id}` 同時分派角色與分會 | `club_admin` 以上 |
 | DELETE | `/api/users/{username}/reject` | 拒絕並刪除 pending 用戶 | `club_admin` 以上 |
 | DELETE | `/api/users/{username}` | 刪除用戶（`admin` 不可刪；club_admin 只能刪同分會 club_member） | `club_admin` 以上 |
 
