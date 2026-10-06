@@ -39,6 +39,20 @@ const CLIENTS = [
     ],
   },
   {
+    key: 'claude-code',
+    name: 'Claude Code（CLI）',
+    needs: '需要已安裝並登入的 Claude Code（終端機裡的 claude 指令）。',
+    // Shown above the steps with a copy button; the endpoint is filled in.
+    command: (endpoint) => `claude mcp add --transport http --scope user club-mgmt ${endpoint}`,
+    steps: [
+      '在終端機執行上面這行指令（--scope user 讓你所有專案都能用；只想在目前專案用就拿掉它）。',
+      '啟動 Claude Code，輸入 /mcp，選擇 club-mgmt，再選「Authenticate」。',
+      '瀏覽器會開到本站的授權畫面（沒登入會先登入），勾選權限後按「允許」。',
+      '看到授權成功的訊息後回到終端機，就能直接用中文請 Claude Code 操作。',
+      '之後要重新授權（例如系統新增了權限項目），一樣在 /mcp 裡對 club-mgmt 重新 Authenticate。',
+    ],
+  },
+  {
     key: 'chatgpt',
     name: 'ChatGPT',
     needs: '需要 ChatGPT Plus、Pro、Business、Enterprise 或 Edu 方案；公司或學校管理的工作區要管理員開放自訂連接器。',
@@ -96,7 +110,7 @@ function SetupSection({ endpoint, toast }) {
   return (
     <section className="mcp-card">
       <h3 className="mcp-title">串接步驟</h3>
-      <p className="mcp-hint">伺服器網址（三種 AI 助理都用這一個）：</p>
+      <p className="mcp-hint">伺服器網址（每種 AI 助理都用這一個）：</p>
       <Copyable text={endpoint} toast={toast} />
 
       <div className="mcp-tabs" role="tablist">
@@ -109,6 +123,7 @@ function SetupSection({ endpoint, toast }) {
         ))}
       </div>
       <p className="mcp-hint">{client.needs}</p>
+      {client.command && <Copyable text={client.command(endpoint)} toast={toast} />}
       <ol className="mcp-steps">
         {client.steps.map((s, i) => <li key={i}>{s}</li>)}
       </ol>
