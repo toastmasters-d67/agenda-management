@@ -42,7 +42,8 @@ const CLIENTS = [
     key: 'claude-code',
     name: 'Claude Code（CLI）',
     needs: '需要已安裝並登入的 Claude Code（終端機裡的 claude 指令）。',
-    // Shown above the steps with a copy button; the endpoint is filled in.
+    // Shown above the steps, each with a copy button; the endpoint is filled
+    // in. A string, or an array for several commands run in order.
     command: (endpoint) => `claude mcp add --transport http --scope user club-mgmt ${endpoint}`,
     steps: [
       '在終端機執行上面這行指令（--scope user 讓你所有專案都能用；只想在目前專案用就拿掉它）。',
@@ -50,6 +51,21 @@ const CLIENTS = [
       '瀏覽器會開到本站的授權畫面（沒登入會先登入），勾選權限後按「允許」。',
       '看到授權成功的訊息後回到終端機，就能直接用中文請 Claude Code 操作。',
       '之後要重新授權（例如系統新增了權限項目），一樣在 /mcp 裡對 club-mgmt 重新 Authenticate。',
+    ],
+  },
+  {
+    key: 'codex-cli',
+    name: 'Codex CLI',
+    needs: '需要已安裝並登入的 Codex CLI（終端機裡的 codex 指令）。Codex CLI 與 Codex App 共用同一份設定，在其中一邊加過就不用再加。',
+    command: (endpoint) => [
+      `codex mcp add club-mgmt --url ${endpoint}`,
+      'codex mcp login club-mgmt',
+    ],
+    steps: [
+      '執行第一行指令，把這個系統加進 Codex。',
+      '執行第二行指令，瀏覽器會開到本站的授權畫面（沒登入會先登入），勾選權限後按「允許」。',
+      '回到終端機看到登入成功後，啟動 codex 就能直接用中文請它操作。',
+      '之後要重新授權（例如系統新增了權限項目），先執行 codex mcp logout club-mgmt，再執行一次第二行指令。',
     ],
   },
   {
@@ -123,7 +139,9 @@ function SetupSection({ endpoint, toast }) {
         ))}
       </div>
       <p className="mcp-hint">{client.needs}</p>
-      {client.command && <Copyable text={client.command(endpoint)} toast={toast} />}
+      {client.command && [].concat(client.command(endpoint)).map((cmd) => (
+        <Copyable key={cmd} text={cmd} toast={toast} />
+      ))}
       <ol className="mcp-steps">
         {client.steps.map((s, i) => <li key={i}>{s}</li>)}
       </ol>
