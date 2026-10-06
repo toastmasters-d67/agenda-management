@@ -3799,7 +3799,12 @@ def authorization_server_metadata(request: Request):
         # OAuth 2.1: PKCE is required, and plain is not a method we accept.
         "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": ["none"],
-        "client_id_metadata_document_supported": True,
+        # Not advertised: some clients host their CIMD document behind bot
+        # protection that answers our server's fetch with 403 (ChatGPT was
+        # reported failing this way), and the failure cannot be fixed from
+        # here. Without the flag clients fall back to DCR above, which needs no
+        # fetch. A client that sends a URL client_id anyway is still served.
+        "client_id_metadata_document_supported": False,
         "authorization_response_iss_parameter_supported": True,
     }
 

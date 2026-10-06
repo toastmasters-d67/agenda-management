@@ -875,7 +875,7 @@ https://<你的網域>/api/mcp
 
 | 項目 | 做法 |
 |------|------|
-| 客戶端註冊（CIMD） | **Client ID Metadata Documents**：`client_id` 本身是 https 網址，伺服器去抓、驗證 `client_id` 與網址相符、`redirect_uri` 在清單內。抓取限 https、**DNS 解析後**擋內部位址（私有、loopback、link-local 等）、**不跟隨轉址**、64 KB 上限、8 秒逾時 |
+| 客戶端註冊（CIMD） | **Client ID Metadata Documents**：`client_id` 本身是 https 網址，伺服器去抓、驗證 `client_id` 與網址相符、`redirect_uri` 在清單內。抓取限 https、**DNS 解析後**擋內部位址（私有、loopback、link-local 等）、**不跟隨轉址**、64 KB 上限、8 秒逾時。**探索文件不宣告支援**（`client_id_metadata_document_supported: false`）：ChatGPT 的中繼資料網址會對我們伺服器的抓取回 403，改讓客戶端走 DCR；仍主動送網址 client_id 的客戶端照常處理 |
 | 客戶端註冊（DCR） | 給還不支援 CIMD 的客戶端（例如 Claude Desktop 的 connector）：`POST /api/oauth/register`（RFC 7591）。**不存資料表**：`client_id` 是 `dcr:` 加上用 `MCP_TOKEN_SECRET` 簽的 JWT，內含 redirect_uris 與名稱，改了就驗不過。redirect_uri 限 https，或 localhost 的 http（CLI 類客戶端）。任何人都能註冊、名稱可以亂取，所以同意畫面會另外顯示「授權後會導回哪個網域」 |
 | PKCE | 必填，只收 `S256` |
 | 授權碼 | 5 分鐘有效，只存 SHA-256 雜湊，`DELETE … RETURNING` 保證只能用一次 |
