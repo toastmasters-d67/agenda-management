@@ -845,6 +845,7 @@ https://<你的網域>/api/mcp
 | `get_agenda` | `posts:read` | 一份議程的完整 `data` |
 | `create_agenda` | `agendas:write` | 建立議程。時間地點沿用該分會上一份議程（再退到分會設定）；同一天已有議程時拒絕並回傳既有 id。`import_roles: true` 從角色試算表帶入 |
 | `update_agenda` | `agendas:write` | 只改有給的欄位；`speeches`／`evaluators` 依位置合併（`null` 表示該位置不變），刪減篇數用 `speech_count`／`evaluator_count`。`import_roles` 只補空白的角色，`overwrite_roles` 才覆蓋 |
+| `delete_agenda` | `agendas:write` | 刪除議程，與 `DELETE /api/agendas/{id}` 同規則（分會管理員以上、只能刪自己分會）。綁定這場的貼文保留、改為未綁定（FK `ON DELETE SET NULL`），回覆會列出是哪幾則 |
 | `export_agenda` | `posts:read` | 議程輸出 PDF／JPG（每頁一張），回傳 R2 公開連結。見下方「議程輸出」 |
 | `set_agenda_theme_image` | `agendas:write` | 設定（或 `clear` 移除）議程的主題圖 `themeImgUrl`，圖片來源同 `add_post_image`。只有 `standard`、`entrepreneur` 版型會顯示主題圖，其他版型直接拒絕 |
 | `generate_agenda_theme_image` | `ai:generate` | 用平台 OpenAI 生成主題圖並套用；沒給 prompt 時依例會主題產生。版型不顯示主題圖時**先拒絕、不花錢** |
