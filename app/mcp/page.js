@@ -141,7 +141,7 @@ function SetupSection({ endpoint, toast }) {
       <p className="mcp-hint">{client.needs}</p>
       {client.command && [].concat(client.command(endpoint)).map((cmd) => (
         <Copyable key={cmd} text={cmd} toast={toast} />
-      ))}}
+      ))}
       <ol className="mcp-steps">
         {client.steps.map((s, i) => <li key={i}>{s}</li>)}
       </ol>
