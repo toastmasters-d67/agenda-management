@@ -5571,6 +5571,31 @@ def _tool_whoami(caller, args):
     return _tool_text("\n".join(lines), info)
 
 
+# ------------------------------------------------------------------ delete agenda
+def _tool_delete_agenda(caller, args):
+    """
+    DELETE /api/agendas/{id}, with the same rule: an officer, own club only.
+    Posts bound to the agenda survive — the FK is ON DELETE SET NULL — but a
+    promo post loses the date/venue/fee it would generate copy from, so the
+    answer says which ones were unbound.
+    """
+    _officer_only(caller)
+    aid = int(args["agenda_id"])
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            data, cid = _agenda_for(cur, aid, caller)       # 404 / 403 first
+            cur.execute("SELECT id, title FROM social_posts WHERE agenda_id=%s", (aid,))
+            posts = cur.fetchall()
+            cur.execute("DELETE FROM agendas WHERE id=%s", (aid,))
+    text = f"已刪除議程 #{aid}：{data.get('meetingDate', '')} 第{data.get('meetingNo', '')}次" \
+           f"「{data.get('meetingTheme', '')}」"
+    if posts:
+        text += "\n這些貼文原本綁定這場例會，已改為未綁定（貼文本身保留）：" + "、".join(
+            f"#{p[0]}{('「' + p[1] + '」') if p[1] else ''}" for p in posts)
+    return _tool_text(text, {"agendaId": aid, "clubId": cid,
+                             "unboundPosts": [p[0] for p in posts]})
+
+
 # ------------------------------------------------------------------ catalogue
 # Spelled out because a system admin's omitted club_id silently means "every
 # club", and a model that does not know that reads the mix as one club.
@@ -5780,6 +5805,17 @@ MCP_TOOLS = [
         "annotations": {"readOnlyHint": False, "destructiveHint": True,
                         "idempotentHint": True, "openWorldHint": False},
         "handler": _tool_update_agenda,
+    },
+    {
+        "name": "delete_agenda", "scope": "agendas:write", "title": "刪除議程",
+        "description": "刪除一份議程（無法復原，刪除前請先跟使用者確認是哪一份）。"
+                       "與網頁相同：分會管理員以上、只能刪自己分會的。綁定這場的貼文會保留，但改為未綁定。",
+        "inputSchema": {"type": "object", "properties": {
+            "agenda_id": {"type": "integer", "description": "議程 id，來自 list_meetings"},
+        }, "required": ["agenda_id"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True,
+                        "idempotentHint": True, "openWorldHint": False},
+        "handler": _tool_delete_agenda,
     },
     {
         "name": "export_agenda", "scope": "posts:read", "title": "下載議程 PDF／JPG",
