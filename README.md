@@ -868,6 +868,7 @@ https://<你的網域>/api/mcp
 - **分會隔離**：`club_member` 與 `club_admin` 的 `club_id` 固定是自己的分會，帶別的一律 403；用 `post_id`／`agenda_id` 直接指也會先比對所屬分會。只有 `system_admin` 能跨分會，而它**不帶 `club_id` 時會拿到所有分會混在一起的結果**，所以清單每筆都標分會，工具說明也要求帶 `club_id`。
 - **scope 只會收窄、不會放寬權限。** 每支工具底下照跑網頁版用的同一套 helper 與角色檢查（`_social_scope`、分會管理員限制）；`club_member` 拿到 `posts:write` 也一樣寫不了。
 - `tools/list` **一律列出全部工具**，並帶 `annotations`（`readOnlyHint` / `destructiveHint` / `openWorldHint`），客戶端（例如 ChatGPT）據此決定哪些呼叫要先問使用者。呼叫沒 scope 的工具會收到 403 + `insufficient_scope` 挑戰，挑戰裡的 scope 是「現有的＋缺的」，客戶端補授權後不會掉掉原本的權限。
+- **說明頁 `/mcp`** 的工具清單直接讀 `MCP_TOOLS`，新增工具會自動出現。新增時順手在 `_TOOL_SUMMARY` 寫一句給人看的說明、在 `_TOOL_GROUPS` 放進分組；需要一般會員或系統管理員權限的，也要更新 `_TOOL_MIN_ROLE`（它只是說明，實際權限仍由各工具裡的 `_officer_only`／`_system_admin_only` 決定）。
 - 工具層級的失敗（找不到貼文、平台未連接、缺欄位）回 `isError: true` 的結果讓模型自行修正，不回 JSON-RPC 錯誤。
 
 ### 授權伺服器的設計
@@ -1226,6 +1227,7 @@ DATABASE_URL=postgresql://user:pass@ep-xxx-pooler.../neondb?sslmode=require
 | `/club` | `app/club/page.js` | 分會管理：新增／刪除分會、品牌、版型設定、社群帳號（Meta App）設定 | `system_admin`（寫入） |
 | `/pathways` | `app/pathways/page.js` | Pathways 路徑管理：路徑、各級必修、專案中英名稱、選修清單 | `system_admin` |
 | `/change-password` | `app/change-password/page.js` | 修改密碼；admin 建立帳號後首次登入強制跳轉；沒有密碼的帳號在這裡設定第一組（不需舊密碼） | 任何登入用戶 |
+| `/mcp` | `app/mcp/page.js` | 「AI 助理串接」：Claude／ChatGPT／Codex 串接步驟、授權選項說明、全部 MCP 功能與所需授權和角色（依登入者角色標出可用的項目）。網址、scope、工具清單都由 `GET /api/mcp/catalog` 提供 | 任何登入用戶 |
 | `/oauth/authorize` | `app/oauth/authorize/page.js` | MCP 客戶端的授權同意畫面，scope 逐項勾選 | 任何登入用戶 |
 | `/settings` | `app/settings/page.js` | 設定：修改自己的中英文姓名；查看帳號、Email、分會、角色；設定／變更密碼；連結／解除 Microsoft 帳號；列出並撤銷已授權的應用程式 | 任何登入用戶 |
 
@@ -1368,6 +1370,7 @@ DATABASE_URL=postgresql://user:pass@ep-xxx-pooler.../neondb?sslmode=require
 | GET  | `/api/me/oauth-grants` | 自己目前有效的授權列表 | 已登入 |
 | DELETE | `/api/me/oauth-grants/{id}` | 撤銷自己的一筆授權 | 已登入 |
 | DELETE | `/api/me/oauth-grants` | 撤銷自己的全部授權 | 已登入 |
+| GET  | `/api/mcp/catalog` | 給 `/mcp` 說明頁：伺服器網址、scope、依分組的工具清單（白話說明 `_TOOL_SUMMARY`、最低角色 `_TOOL_MIN_ROLE`） | 登入 JWT |
 | POST | `/api/mcp` | MCP JSON-RPC：`tools/list`、`tools/call` | MCP access token |
 | GET / DELETE | `/api/mcp` | 一律 405 | — |
 

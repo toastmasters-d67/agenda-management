@@ -6047,6 +6047,97 @@ MCP_TOOLS = [
 ]
 
 
+# ------------------------------------------------------------------ catalogue page
+# What the /mcp help page shows: the endpoint to paste into a client, the
+# scopes on the consent screen, and every tool with what it takes to use it.
+# Served from MCP_TOOLS itself so the page cannot drift from the server.
+#
+# `_TOOL_MIN_ROLE` is documentation of the gates in the handlers
+# (_officer_only, _system_admin_only), not a gate of its own — the handlers
+# stay the only enforcement. Tools not listed need club_admin or above.
+_TOOL_MIN_ROLE = {
+    **{n: "club_member" for n in (
+        "whoami", "list_clubs", "get_club", "list_members", "list_meetings",
+        "get_meeting", "get_agenda", "export_agenda", "get_roles",
+        "list_posts", "get_post")},
+    **{n: "system_admin" for n in ("update_club", "create_club", "set_club_image")},
+}
+# What the help page says about each tool. The `description` in MCP_TOOLS is
+# written for the model (ids, argument shapes, when to call it); people need
+# a sentence. A tool missing here falls back to its description's first one.
+_TOOL_SUMMARY = {
+    "whoami": "查看你的帳號、角色、所屬分會，以及這次授權可以做哪些事。",
+    "list_clubs": "列出分會。一般使用者只會看到自己的分會。",
+    "get_club": "查看分會的名稱、版型、地點、時間、QR code 等設定。",
+    "update_club": "修改分會設定，例如預設地點、時間、標語。",
+    "create_club": "建立新分會。",
+    "set_club_image": "更換分會 Logo、各種 QR code、議程第二頁圖片。",
+    "list_meetings": "列出分會的例會，最近的在前。",
+    "get_meeting": "查看一場例會的日期、時間、地點、入場費與主題，並指出做宣傳還缺什麼。",
+    "get_agenda": "查看一份議程的完整內容（所有角色、演講、講評員）。",
+    "create_agenda": "建立議程；時間地點沿用上一場，可以從 Google Sheet 帶入角色。",
+    "update_agenda": "修改議程，只改你指定的欄位。",
+    "delete_agenda": "刪除議程；綁定這場的貼文會保留。",
+    "export_agenda": "把議程輸出成 PDF 與 JPG，取得下載連結（與網頁「下載」相同）。",
+    "set_agenda_theme_image": "把一張圖設成議程主題圖（standard、entrepreneur 版型）。",
+    "generate_agenda_theme_image": "依例會主題用 AI 產生主題圖並套用，會用到 OpenAI 額度。",
+    "get_roles": "查看接下來幾場例會的角色安排。",
+    "assign_roles": "為一場例會安排角色，人名會自動對照會員名單。",
+    "import_roles_sheet": "從分會的 Google Sheet 角色規劃表一次匯入整季。",
+    "list_members": "列出會員的中英文名與等級，安排角色時對照用。",
+    "list_posts": "列出社群貼文（草稿與已發布）。",
+    "get_post": "查看一則貼文的文案、各平台版本、圖片與發布紀錄。",
+    "create_post": "建立貼文草稿，可以綁定一場例會。",
+    "update_post": "修改貼文的標題、文案、狀態或各平台版本。",
+    "delete_post": "從系統刪除貼文；已發到社群上的不受影響。",
+    "generate_copy": "用 AI 依例會資料產生文案並存進貼文，會用到 AI 額度。",
+    "add_post_image": "把圖片加進貼文（AI 助理做的圖、圖片網址或檔案）。",
+    "remove_post_image": "從貼文移除一張圖片。",
+    "generate_post_image": "用 AI 產生圖片並加進貼文，會用到 OpenAI 額度。",
+    "publish_post": "發布到 Facebook、Instagram、Threads。公開且無法透過本系統收回。",
+}
+_TOOL_GROUPS = (
+    ("身分", ("whoami",)),
+    ("分會", ("list_clubs", "get_club", "update_club", "create_club", "set_club_image")),
+    ("議程", ("list_meetings", "get_meeting", "get_agenda", "create_agenda", "update_agenda",
+              "delete_agenda", "export_agenda", "set_agenda_theme_image",
+              "generate_agenda_theme_image")),
+    ("角色安排", ("get_roles", "assign_roles", "import_roles_sheet", "list_members")),
+    ("社群貼文", ("list_posts", "get_post", "create_post", "update_post", "delete_post",
+                  "generate_copy", "add_post_image", "remove_post_image",
+                  "generate_post_image", "publish_post")),
+)
+
+
+@app.get("/api/mcp/catalog")
+def mcp_catalog(request: Request, user: dict = Depends(get_current_user)):
+    by_name = {t["name"]: t for t in MCP_TOOLS}
+    placed = {n for _, names in _TOOL_GROUPS for n in names}
+    groups = list(_TOOL_GROUPS)
+    rest = tuple(t["name"] for t in MCP_TOOLS if t["name"] not in placed)
+    if rest:
+        groups.append(("其他", rest))     # a new tool shows up even before it is filed
+
+    def tool(t):
+        return {
+            "name": t["name"], "title": t.get("title") or t["name"],
+            "description": _TOOL_SUMMARY.get(t["name"])
+                           or t["description"].split("。")[0] + "。",
+            "scope": t["scope"], "scopeLabel": MCP_SCOPES.get(t["scope"], "") if t["scope"] else "",
+            "minRole": _TOOL_MIN_ROLE.get(t["name"], "club_admin"),
+            "readOnly": bool((t.get("annotations") or {}).get("readOnlyHint")),
+        }
+
+    return {
+        "endpoint": _mcp_resource(request),
+        "scopes": [{"key": k, "label": v, "default": k in MCP_DEFAULT_SCOPES}
+                   for k, v in MCP_SCOPES.items()],
+        "groups": [{"name": g, "tools": [tool(by_name[n]) for n in names if n in by_name]}
+                   for g, names in groups],
+        "role": user["role"],
+    }
+
+
 # ------------------------------------------------------------------ the endpoint
 @app.post("/api/mcp")
 async def mcp_endpoint(request: Request):
