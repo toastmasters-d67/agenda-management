@@ -941,6 +941,8 @@ https://<你的網域>/api/mcp
 
 - `admin` 帳號由 migration `0002` 初始化，**不可刪除，不可變更角色**
 - 自行註冊的用戶預設 `status = 'pending'`，**無法登入**，需由 `club_admin` 或 `system_admin` 審核通過 (`approve`) 才能登入
+- 註冊時「所屬分會」為**選填**（全新部署還沒有分會時也能註冊）：有選分會的申請由該分會的 `club_admin` 審核；沒選的只有 `system_admin` 看得到
+- `system_admin` 審核時可同時指定角色與分會（`club_admin` 必須有分會）；`club_admin` 審核一律以 `club_member` 身分加入自己的分會
 - 管理員直接建立（`POST /api/users`）的帳號 `must_change_pw = true`，首次登入後系統強制導向改密碼頁面
 - `club_admin` 建立用戶或議程時，`club_id` 自動設為其所屬分會（不可指定其他分會）
 - `club_admin` 只能刪除同分會的 `club_member`，不可刪除其他管理員
@@ -1241,7 +1243,7 @@ DATABASE_URL=postgresql://user:pass@ep-xxx-pooler.../neondb?sslmode=require
 
 | 方法 | 路徑 | 說明 | 權限 |
 |------|------|------|------|
-| POST | `/api/auth/register` | 自行註冊；帳號預設 `status=pending`，**需審核後才能登入** | 無 |
+| POST | `/api/auth/register` | 自行註冊；帳號預設 `status=pending`，**需審核後才能登入**；`club_id` 選填 | 無 |
 | POST | `/api/auth/login` | 登入，回傳 JWT token（有效期 24 小時）；`pending` 帳號拒絕登入 | 無 |
 | GET  | `/api/auth/verify` | 驗證 token，回傳 username / role / club_id / must_change_pw / has_password | 已登入 |
 | PUT  | `/api/auth/change-password` | 修改自己的密碼；成功後清除 `must_change_pw` 旗標。帳號沒有密碼時不需 `old_password` | 已登入 |
@@ -1328,7 +1330,7 @@ DATABASE_URL=postgresql://user:pass@ep-xxx-pooler.../neondb?sslmode=require
 | POST   | `/api/users/bulk` | 批量建立 `club_member`（username 自動從 name_en 產生） | `club_admin` 以上 |
 | PUT    | `/api/users/{username}` | 更新用戶資料（club_admin：name / level / email；system_admin：另含 role / club_id）。`email` 省略不變、`""` 清空，重複回 400 | `club_admin` 以上 |
 | PUT    | `/api/users/{username}/reset-password` | 管理員替用戶重設密碼（至少 6 字元；club_admin 限同分會） | `club_admin` 以上 |
-| PUT    | `/api/users/{username}/approve` | 審核通過 pending 用戶（設 status = 'active'） | `club_admin` 以上 |
+| PUT    | `/api/users/{username}/approve` | 審核通過 pending 用戶（設 status = 'active'）；`system_admin` 可帶 `{role, club_id}` 同時分派角色與分會 | `club_admin` 以上 |
 | DELETE | `/api/users/{username}/reject` | 拒絕並刪除 pending 用戶 | `club_admin` 以上 |
 | DELETE | `/api/users/{username}` | 刪除用戶（`admin` 不可刪；club_admin 只能刪同分會 club_member） | `club_admin` 以上 |
 
