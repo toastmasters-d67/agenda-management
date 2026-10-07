@@ -733,9 +733,26 @@ def ms_register(req: MsRegisterRequest):
 
 
 # ------------------------------------------------------------------ my profile
+class MyRoleItem(BaseModel):
+    club_id: int
+    role:    str
+
+
 class ProfileUpdateRequest(BaseModel):
     name_en: str
     name_zh: str
+    level:   Optional[str] = None
+    email:   Optional[str] = None               # "" clears it; managers only
+    roles:   Optional[List[MyRoleItem]] = None  # own role in own clubs
+
+
+def _manages_something(cur, username: str) -> bool:
+    """A system admin, or a club admin in at least one club."""
+    cur.execute("SELECT role = 'system_admin' OR EXISTS (SELECT 1 FROM club_memberships m"
+                " WHERE m.username = u.username AND m.role = 'club_admin')"
+                " FROM users u WHERE u.username=%s", (username,))
+    row = cur.fetchone()
+    return bool(row and row[0])
 
 
 @app.get("/api/me")
@@ -754,25 +771,61 @@ def get_my_profile(user: dict = Depends(get_current_user)):
             ms = [{"clubId": x[0], "clubName": x[1], "role": x[2]} for x in cur.fetchall()]
             cur.execute("SELECT name FROM clubs WHERE id=%s", (user["club_id"],))
             club_name = (cur.fetchone() or [""])[0]
+            can_email = _manages_something(cur, user["username"])
     # role / club are the CURRENT club's; `memberships` lists all of them.
     return {"username": r[0], "nameZh": r[1] or "", "nameEn": r[2] or "",
             "email": r[3] or "", "level": r[4] or "", "role": user["role"],
             "clubId": user["club_id"], "clubName": club_name or "",
-            "memberships": ms,
+            "memberships": ms, "canEditEmail": can_email,
             "microsoftLinked": r[5], "hasPassword": r[6],
             "microsoftEnabled": _ms_enabled()}
 
 
 @app.put("/api/me")
 def update_my_profile(req: ProfileUpdateRequest, user: dict = Depends(get_current_user)):
-    """Name only — role, club, level and email are set by admins."""
+    """
+    Your own profile. Anyone: name, education level, and stepping down in a
+    club you belong to (club_admin -> club_member only; promotion, and the
+    system-admin role, are granted by admins). Email only for managers (a
+    system admin, or a club admin somewhere): it is what a first Microsoft
+    sign-in matches on, so a member who could set any address could take
+    over someone else's sign-in. Which clubs you belong to stays with admins.
+    """
     name_en, name_zh = req.name_en.strip(), req.name_zh.strip()
     if not name_en or not name_zh:
         raise HTTPException(status_code=400, detail="請提供中英文姓名")
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("UPDATE users SET name_en=%s, name_zh=%s WHERE username=%s",
-                        (name_en[:100], name_zh[:100], user["username"]))
+    for item in req.roles or []:
+        if item.role not in ("club_admin", "club_member"):
+            raise HTTPException(status_code=400, detail="角色只能是「一般會員」或「分會管理員」")
+    me = user["username"]
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE users SET name_en=%s, name_zh=%s WHERE username=%s",
+                            (name_en[:100], name_zh[:100], me))
+                if req.level is not None:
+                    cur.execute("UPDATE users SET level=%s WHERE username=%s",
+                                ((req.level.strip() or "TM")[:20], me))
+                if req.email is not None:
+                    if not _manages_something(cur, me):
+                        raise HTTPException(status_code=403,
+                                            detail="Email 需由管理員修改，請聯絡分會管理員")
+                    cur.execute("UPDATE users SET email=%s WHERE username=%s",
+                                (_normalize_email(req.email), me))
+                if req.roles:
+                    mine = _memberships(cur, me)
+                    for item in req.roles:
+                        if item.club_id not in mine:
+                            raise HTTPException(status_code=403, detail="只能修改自己所屬分會的角色")
+                        if item.role == "club_admin" and mine[item.club_id] != "club_admin":
+                            raise HTTPException(status_code=403,
+                                                detail="不能把自己升為分會管理員，請聯絡分會管理員")
+                        cur.execute("UPDATE club_memberships SET role=%s"
+                                    " WHERE username=%s AND club_id=%s",
+                                    (item.role, me, item.club_id))
+                    _sync_primary(cur, me)
+    except psycopg2.errors.UniqueViolation:
+        raise HTTPException(status_code=400, detail="此 Email 已被其他帳號使用")
     return {"ok": True}
 
 

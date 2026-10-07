@@ -111,3 +111,12 @@ body {
   .st-grid { grid-template-columns: 1fr; }
   .st-row, .st-app-head, .st-title-row { flex-direction: column; align-items: stretch; }
 }
+
+/* ---------------------------------------------------------------- own roles */
+.st-roles { display: flex; flex-direction: column; gap: 6px; padding-top: 2px; }
+.st-role-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.st-role-club { font-size: 13px; color: #334155; min-width: 0; }
+.st-role-row select {
+  flex-shrink: 0; padding: 6px 8px; border: 1px solid #cbd5e1; border-radius: 7px;
+  font-size: 12px; background: #fff;
+}

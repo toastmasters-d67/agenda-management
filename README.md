@@ -1327,8 +1327,8 @@ DATABASE_URL=postgresql://user:pass@ep-xxx-pooler.../neondb?sslmode=require
 
 | 方法 | 路徑 | 說明 | 權限 |
 |------|------|------|------|
-| GET    | `/api/me` | 自己的個人資料、是否有密碼、是否連結 Microsoft | 已登入 |
-| PUT    | `/api/me` | 修改自己的中英文姓名（其他欄位由管理員設定） | 已登入 |
+| GET    | `/api/me` | 自己的個人資料、各分會會籍、是否有密碼、是否連結 Microsoft、`canEditEmail` | 已登入 |
+| PUT    | `/api/me` | 修改自己的中英文姓名、等級；`roles` 只能把自己在某分會從 club_admin 降為 club_member（不能自己升級）；`email` 只有 system_admin 或在任一分會是 club_admin 的人能改 | 已登入 |
 | DELETE | `/api/me/microsoft` | 解除 Microsoft 連結（沒有密碼時拒絕） | 已登入 |
 
 ### 議程管理（需 Bearer Token）

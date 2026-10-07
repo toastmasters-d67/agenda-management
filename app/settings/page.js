@@ -28,17 +28,39 @@ function fmt(iso) {
 }
 
 // ---------------------------------------------------------------- profile
+// Your own data. Anyone: names, education level, and stepping down from club
+// admin to member. Email only for managers (system admin, or a club admin
+// somewhere) — the backend enforces the same (PUT /api/me). Promotion, which
+// clubs you belong to, and the system-admin role stay with the admins.
 function ProfileSection({ me, onSaved, toast }) {
   const [nameZh, setNameZh] = useState(me.nameZh);
   const [nameEn, setNameEn] = useState(me.nameEn);
+  const [level, setLevel] = useState(me.level || 'TM');
+  const [email, setEmail] = useState(me.email || '');
+  const startRoles = Object.fromEntries((me.memberships || []).map((m) => [m.clubId, m.role]));
+  const [roles, setRoles] = useState(startRoles);
   const [busy, setBusy] = useState(false);
-  const dirty = nameZh.trim() !== me.nameZh || nameEn.trim() !== me.nameEn;
+
+  const changedRoles = Object.entries(roles)
+    .filter(([cid, r]) => startRoles[cid] !== r)
+    .map(([cid, r]) => ({ club_id: Number(cid), role: r }));
+  const dirty = nameZh.trim() !== me.nameZh || nameEn.trim() !== me.nameEn
+    || level.trim() !== (me.level || 'TM')
+    || (me.canEditEmail && email.trim() !== (me.email || ''))
+    || changedRoles.length > 0;
 
   async function save() {
     if (!nameZh.trim() || !nameEn.trim()) { toast('請填入中英文姓名', true); return; }
+    const losesAdmin = changedRoles.some((c) => c.role === 'club_member' && startRoles[c.club_id] === 'club_admin');
+    if (losesAdmin && !confirm('你把自己在某個分會改成一般會員，儲存後就沒有那個分會的管理權限了。確定嗎？')) return;
+    const body = { name_zh: nameZh.trim(), name_en: nameEn.trim(), level: level.trim() || 'TM' };
+    if (me.canEditEmail) body.email = email.trim();
+    if (changedRoles.length) body.roles = changedRoles;
     setBusy(true);
     try {
-      await apiJson('/me', { method: 'PUT', body: { name_zh: nameZh.trim(), name_en: nameEn.trim() } });
+      await apiJson('/me', { method: 'PUT', body });
+      // A role change alters what the whole app shows (sidebar, buttons).
+      if (changedRoles.length) { window.location.reload(); return; }
       toast('已儲存');
       onSaved();
     } catch (e) {
@@ -64,29 +86,56 @@ function ProfileSection({ me, onSaved, toast }) {
           <span>帳號</span>
           <div className="st-value">{me.username}</div>
         </div>
-        <div className="st-field">
-          <span>Email</span>
-          <div className="st-value">{me.email || <span className="st-muted">未設定</span>}</div>
-        </div>
+        {me.canEditEmail ? (
+          <label className="st-field">
+            <span>Email</span>
+            <input type="email" value={email} onChange={(e) => setEmail(e.target.value)}
+                   placeholder="name@example.com" maxLength={254} />
+          </label>
+        ) : (
+          <div className="st-field">
+            <span>Email</span>
+            <div className="st-value">{me.email || <span className="st-muted">未設定</span>}</div>
+          </div>
+        )}
         <div className="st-field">
           <span>所屬分會與角色</span>
-          <div className="st-value">
-            {me.role === 'system_admin' && <div>系統管理員（全站）</div>}
-            {(me.memberships || []).length ? me.memberships.map((m) => (
-              <div key={m.clubId}>
-                {m.clubName}・{ROLE_LABELS[m.role] || m.role}
-                {m.clubId === me.clubId && me.memberships.length > 1
-                  ? <span className="st-muted">（目前）</span> : null}
+          <div className="st-roles">
+            {me.role === 'system_admin' && <div className="st-value">系統管理員（全站）</div>}
+            {(me.memberships || []).map((m) => (
+              <div className="st-role-row" key={m.clubId}>
+                <span className="st-role-club">
+                  {m.clubName}
+                  {m.clubId === me.clubId && me.memberships.length > 1
+                    ? <span className="st-muted">（目前）</span> : null}
+                </span>
+                {startRoles[m.clubId] === 'club_admin' ? (
+                  <select value={roles[m.clubId]}
+                          onChange={(e) => setRoles({ ...roles, [m.clubId]: e.target.value })}>
+                    <option value="club_admin">{ROLE_LABELS.club_admin}</option>
+                    <option value="club_member">{ROLE_LABELS.club_member}</option>
+                  </select>
+                ) : (
+                  <span className="st-value">{ROLE_LABELS[m.role] || m.role}</span>
+                )}
               </div>
-            )) : (me.role === 'system_admin' ? null : <span className="st-muted">—</span>)}
+            ))}
+            {!(me.memberships || []).length && me.role !== 'system_admin'
+              ? <div className="st-value st-muted">—</div> : null}
           </div>
         </div>
-        <div className="st-field">
+        <label className="st-field">
           <span>等級</span>
-          <div className="st-value">{me.level || 'TM'}</div>
-        </div>
+          <input value={level} onChange={(e) => setLevel(e.target.value)} maxLength={20}
+                 placeholder="TM / L1 / … / DTM" />
+        </label>
       </div>
-      <p className="st-hint">Email、分會、角色與等級由管理員設定，需要更改請聯絡分會管理員。</p>
+      <p className="st-hint">
+        {me.canEditEmail
+          ? 'Email 是第一次用 Microsoft 帳號登入時用來找到你帳號的依據，請填你自己的信箱。'
+          : 'Email 由管理員設定，需要更改請聯絡分會管理員。'}
+        角色只能自行降為一般會員；要升為分會管理員、加入或退出分會，請聯絡分會管理員。
+      </p>
       <div className="st-actions">
         <button className="btn-primary" disabled={!dirty || busy} onClick={save}>
           {busy ? '儲存中…' : '儲存'}
@@ -95,7 +144,6 @@ function ProfileSection({ me, onSaved, toast }) {
     </section>
   );
 }
-
 // ---------------------------------------------------------------- sign-in methods
 function SignInSection({ me, onChanged, toast }) {
   const [confirmUnlink, setConfirmUnlink] = useState(false);
