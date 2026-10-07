@@ -133,11 +133,11 @@ body {
 }
 .st-role-row.has-remove { grid-template-columns: 1fr 160px 30px; }
 .st-role-club { font-size: 13px; color: #334155; min-width: 0; }
-.st-role-row select {
+.st-role-row > select {
   width: 100%; padding: 7px 9px; border: 1px solid #cbd5e1; border-radius: 7px;
   font-size: 13px; background: #fff;
 }
-.st-role-row select:disabled { background: #f8fafc; color: #64748b; cursor: not-allowed; }
+.st-role-row > select:disabled { background: #f8fafc; color: #64748b; cursor: not-allowed; }
 .st-role-remove {
   width: 30px; height: 30px; border-radius: 6px;
   border: 1px solid #fecaca; background: #fff; color: #b91c1c; cursor: pointer;
@@ -152,3 +152,10 @@ body {
   .st-role-row { grid-template-columns: 1fr 120px; padding: 8px; gap: 8px; }
   .st-role-row.has-remove { grid-template-columns: 1fr 120px 30px; }
 }
+/* The club picker (SearchableSelect) on a new row: match the role dropdown. */
+.st-role-club .ss-wrap { display: block; width: 100%; min-width: 0; }
+.st-role-club .ss-input {
+  padding: 7px 9px; border: 1px solid #cbd5e1; border-radius: 7px;
+  font-size: 13px; color: #0f172a; background-color: #fff; font-family: inherit;
+}
+.st-role-club .ss-input:focus { outline: none; border-color: #004165; }
