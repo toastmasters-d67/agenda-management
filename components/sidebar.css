@@ -24,6 +24,15 @@
 .sidebar-brand-sub { font-size: 10px; color: #64748b; margin-top: 2px; }
 
 .sidebar-nav { padding: 12px 10px; flex: 1; }
+/* Club switcher (members of several clubs): a dark take on SearchableSelect. */
+.club-switcher { padding: 12px 10px 0; }
+.club-switcher .ss-wrap { display: block; min-width: 0; }
+.club-switch-input {
+  padding: 8px 10px; border-radius: 8px; font-size: 12px;
+  background-color: #1e293b; border: 1px solid #334155; color: #f1f5f9;
+}
+.club-switch-input:focus { outline: none; border-color: #60a5fa; }
+.club-switcher .ss-list { min-width: 0; }
 .nav-section-label {
   font-size: 10px; font-weight: 600; color: #475569;
   letter-spacing: 0.8px; text-transform: uppercase;
@@ -113,6 +122,7 @@
   .nav-section-label, .nav-item span,
   .user-info { display: none; }
   .nav-item { justify-content: center; padding: 10px; }
+  .club-switcher { display: none; }
   .sidebar-footer { padding: 10px 8px; }
   .sidebar-user { padding: 6px; justify-content: center; }
   .btn-logout-sidebar { display: none; }
@@ -138,6 +148,7 @@
   .sidebar-brand-name, .sidebar-brand-sub,
   .nav-section-label, .nav-item span,
   .user-info { display: revert; }
+  .club-switcher { display: block; }
   .nav-item { justify-content: flex-start; padding: 9px 10px; }
   .sidebar-footer { padding: 14px 10px; }
   .sidebar-user { padding: 8px 10px; justify-content: flex-start; }

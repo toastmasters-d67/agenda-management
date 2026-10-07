@@ -69,12 +69,21 @@ function ProfileSection({ me, onSaved, toast }) {
           <div className="st-value">{me.email || <span className="st-muted">未設定</span>}</div>
         </div>
         <div className="st-field">
-          <span>所屬分會</span>
-          <div className="st-value">{me.clubName || <span className="st-muted">—</span>}</div>
+          <span>所屬分會與角色</span>
+          <div className="st-value">
+            {me.role === 'system_admin' && <div>系統管理員（全站）</div>}
+            {(me.memberships || []).length ? me.memberships.map((m) => (
+              <div key={m.clubId}>
+                {m.clubName}・{ROLE_LABELS[m.role] || m.role}
+                {m.clubId === me.clubId && me.memberships.length > 1
+                  ? <span className="st-muted">（目前）</span> : null}
+              </div>
+            )) : (me.role === 'system_admin' ? null : <span className="st-muted">—</span>)}
+          </div>
         </div>
         <div className="st-field">
-          <span>角色／等級</span>
-          <div className="st-value">{ROLE_LABELS[me.role] || me.role} · {me.level || 'TM'}</div>
+          <span>等級</span>
+          <div className="st-value">{me.level || 'TM'}</div>
         </div>
       </div>
       <p className="st-hint">Email、分會、角色與等級由管理員設定，需要更改請聯絡分會管理員。</p>
@@ -272,7 +281,7 @@ export default function SettingsPage() {
     (async function init() {
       try {
         const data = await apiJson('/auth/verify');
-        setAuth(data.username, data.role, data.club_id, data.must_change_pw);
+        setAuth(data.username, data.role, data.club_id, data.must_change_pw, data.memberships);
         if (data.must_change_pw) { location.href = withBase('/change-password'); return; }
         applyRoleUI();
         await loadMe();

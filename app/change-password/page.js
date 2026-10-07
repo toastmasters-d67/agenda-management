@@ -23,7 +23,7 @@ export default function ChangePasswordPage() {
     (async function onLoad() {
       try {
         const data = await apiJson('/auth/verify');
-        setAuth(data.username, data.role, data.club_id, data.must_change_pw);
+        setAuth(data.username, data.role, data.club_id, data.must_change_pw, data.memberships);
         setForced(!!data.must_change_pw);
         setHasPassword(data.has_password !== false);
         setNotice(

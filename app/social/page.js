@@ -11,6 +11,7 @@ import { POST_KINDS, KIND_KEYS, KIND_REQUIRED, kindSpec, kindLabel,
 import Sidebar from '@/components/Sidebar';
 import './social.css';
 import { withBase } from '@/lib/basePath';
+import SearchableSelect from '@/components/SearchableSelect';
 
 // ================================================================
 // 社群發文 — composer, draft box, and publishing
@@ -82,7 +83,7 @@ const STATUS_LABELS = { draft: '草稿', ready: '待發布', posted: '已發布'
 async function checkSocialAuth() {
   try {
     const data = await apiJson('/auth/verify');
-    setAuth(data.username, data.role, data.club_id, data.must_change_pw);
+    setAuth(data.username, data.role, data.club_id, data.must_change_pw, data.memberships);
     if (data.must_change_pw) { location.href = withBase('/change-password'); return false; }
     document.getElementById('navUser').textContent = data.username;
     document.getElementById('userAvatar').textContent = data.username.slice(0, 1).toUpperCase();
@@ -1561,9 +1562,9 @@ export default function SocialPage() {
             <div id="clubPickerBar" style={{ display: 'none' }}>
               <span className="picker-label">
                 分會
-                <select id="clubPickerSelect" className="picker-select" onChange={onClubChange} style={{ marginLeft: 6 }}>
+                <SearchableSelect id="clubPickerSelect" className="picker-select" onChange={onClubChange} style={{ marginLeft: 6 }} placeholder="輸入分會名稱搜尋…" emptyText="找不到符合的分會">
                   <option value="">— 請選擇分會 —</option>
-                </select>
+                </SearchableSelect>
               </span>
             </div>
             <div className="toolbar-spacer"></div>

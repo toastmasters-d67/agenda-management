@@ -1,6 +1,8 @@
 'use client';
 
-import { logout } from '@/lib/auth';
+import { useEffect, useState } from 'react';
+import { logout, getMemberships, getClubId, getRole, switchClub } from '@/lib/auth';
+import SearchableSelect from '@/components/SearchableSelect';
 import './sidebar.css';
 import { withBase } from '@/lib/basePath';
 
@@ -39,6 +41,40 @@ const NAV_ITEMS = [
   },
 ];
 
+const ROLE_LABEL = { system_admin: '系統管理員', club_admin: '分會管理員', club_member: '一般會員' };
+
+// Current club + the role there, re-read whenever setAuth() runs (each page
+// calls it once /auth/verify answers — after this component has mounted).
+function useAuthState() {
+  const [state, setState] = useState({ memberships: [], clubId: null, role: '' });
+  useEffect(() => {
+    const load = () => setState({ memberships: getMemberships(), clubId: getClubId(), role: getRole() });
+    load();
+    window.addEventListener('auth-changed', load);
+    return () => window.removeEventListener('auth-changed', load);
+  }, []);
+  return state;
+}
+
+// A member of several clubs acts in one at a time; this picks which. System
+// admins act everywhere and choose a club on each page, so they get none.
+function ClubSwitcher({ memberships, clubId, role }) {
+  if (role === 'system_admin' || memberships.length < 2) return null;
+  return (
+    <div className="club-switcher">
+      <div className="nav-section-label">目前分會</div>
+      <SearchableSelect key={clubId ?? 'none'} defaultValue={clubId != null ? String(clubId) : ''}
+                        className="club-switch-input"
+                        onChange={(e) => { if (e.target.value) switchClub(e.target.value); }}
+                        placeholder="輸入分會名稱搜尋…" emptyText="找不到符合的分會">
+        {memberships.map((m) => (
+          <option key={m.clubId} value={m.clubId}>{m.clubName}</option>
+        ))}
+      </SearchableSelect>
+    </div>
+  );
+}
+
 function toggleSidebar() {
   const sidebar = document.getElementById('sidebar');
   const backdrop = document.getElementById('sidebarBackdrop');
@@ -52,6 +88,10 @@ function toggleSidebar() {
 // `navOverrides`: optional { [key]: () => void } — when a nav item's key has
 // an override, clicking it runs the handler instead of a plain navigation.
 export default function Sidebar({ active, navOverrides = {} }) {
+  const auth = useAuthState();
+  const current = auth.memberships.find((m) => m.clubId === auth.clubId);
+  // With the switcher showing the club, the line under the name is just the role.
+  const switching = auth.role !== 'system_admin' && auth.memberships.length > 1;
   return (
     <>
       <div className="sidebar-backdrop" id="sidebarBackdrop" onClick={toggleSidebar}></div>
@@ -66,6 +106,8 @@ export default function Sidebar({ active, navOverrides = {} }) {
             <div className="sidebar-brand-sub">Club Management</div>
           </div>
         </div>
+
+        <ClubSwitcher {...auth} />
 
         <nav className="sidebar-nav">
           <div className="nav-section-label">主選單</div>
@@ -88,7 +130,11 @@ export default function Sidebar({ active, navOverrides = {} }) {
             <div className="user-avatar" id="userAvatar">—</div>
             <div className="user-info">
               <div className="user-name" id="navUser">—</div>
-              <div className="user-role">成員</div>
+              <div className="user-role">
+                {auth.role === 'system_admin' ? ROLE_LABEL.system_admin
+                  : switching ? ROLE_LABEL[auth.role]
+                  : [current?.clubName, ROLE_LABEL[auth.role]].filter(Boolean).join('・') || '成員'}
+              </div>
             </div>
             <button className="btn-changepw-sidebar" onClick={() => { location.href = withBase('/change-password'); }} title="變更密碼">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>

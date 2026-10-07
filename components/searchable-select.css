@@ -1,0 +1,28 @@
+/* components/SearchableSelect.js — type-to-filter wrapper around a <select>. */
+.ss-wrap { position: relative; display: inline-block; vertical-align: middle; min-width: 180px; }
+.ss-wrap > .ss-native {
+  position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none;
+  left: 0; bottom: 0;
+}
+.ss-input {
+  width: 100%; box-sizing: border-box; cursor: text;
+  padding-right: 26px !important;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 9px center;
+}
+.ss-input:disabled { cursor: default; opacity: 0.6; }
+.ss-list {
+  position: absolute; z-index: 1000; left: 0; right: 0; top: calc(100% + 4px);
+  min-width: 220px; max-height: 280px; overflow-y: auto;
+  margin: 0; padding: 4px; list-style: none;
+  background: #fff; border: 1px solid #e2e8f0; border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+}
+.ss-list[hidden] { display: none; }
+.ss-item {
+  padding: 7px 10px; border-radius: 6px; font-size: 13px; color: #0f172a;
+  cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ss-item:hover, .ss-item.ss-active { background: #f1f5f9; }
+.ss-item.ss-selected { font-weight: 600; color: #004165; }
+.ss-empty { padding: 8px 10px; font-size: 12px; color: #94a3b8; }
