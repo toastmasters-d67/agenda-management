@@ -1026,9 +1026,11 @@ Push 到 GitHub 的 **`master`** 分支，Vercel 自動部署到正式站；其�
 > - **只在本 repo 的 `master` 開發。** 更新 `master` 後，手動同步到組織 repo（兩個 repo 沒有 fork 關係，不能直接從這裡的 `master` 開 PR，所以先推一個同步分支）：
 >
 >   ```
->   git push https://github.com/toastmasters-d67/agenda-management.git master:sync/master --force
+>   git push org master:sync/master --force
 >   gh pr create --repo toastmasters-d67/agenda-management --base main --head sync/master --title "同步 master"
 >   ```
+>
+>   `org` 是在本機加的第二個 remote，指向組織 repo（只需設定一次）：`git remote add org https://github.com/toastmasters-d67/agenda-management.git`。之後 `git fetch org` 就能在這裡看到組織的 `main`，`git log org/main..master` 列出還沒同步過去的 commit。
 >
 >   第一行讓組織 repo 的 `sync/master` 完全等於這裡的 `master`（它只是同步用的分支，`--force` 不影響 `main`）；第二行開「`sync/master` → `main`」的 PR，也可以在組織 repo 網頁上開。上一張同步 PR 還沒合併時只要第一行，那張 PR 會自動帶上新 commit。組織 repo 的 CI 會跑在 PR 上，**合併後才部署到 Azure**。
 > - 不要直接在組織 repo 改程式碼；真的改了，請把同樣的修改也提交到這裡的 `master`，否則下次同步的 PR 會把它蓋掉或產生衝突。
