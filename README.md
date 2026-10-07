@@ -1021,7 +1021,12 @@ Push 到 GitHub 的 **`master`** 分支，Vercel 自動部署到正式站；其�
 
 > 正式部署的分支設定在 Vercel 專案 **Settings → Environments → Production → Branch Tracking**，目前是 `master`。改 git 預設分支名稱時這裡要一起改，否則推上去不會部署到正式站。
 
-> **同步到組織 repo**：[toastmasters-d67/agenda-management](https://github.com/toastmasters-d67/agenda-management) 把本 repo 設成 `upstream`。在那個 repo 執行 `git pull upstream master`，再 `git push origin main`（那邊的分支仍叫 `main`）。
+> **同步到組織 repo（Azure）**：兩個 repo 放的是**同一份程式碼**——本 repo 的 `master` 部署到 Vercel，[toastmasters-d67/agenda-management](https://github.com/toastmasters-d67/agenda-management) 的 `main` 部署到 Azure VM。兩邊的差異只靠環境變數（`NEXT_PUBLIC_BASE_PATH`、`PUBLIC_BASE_URL`、`CHROME_EXECUTABLE_PATH`…）與只有 Docker 會讀的檔案（`Dockerfile.*`、`deploy/`），不再各自改程式碼。
+>
+> - **只在本 repo 的 `master` 開發。** 每次推上 `master`，`.github/workflows/sync-to-org.yml` 會把同一份程式碼推到組織 repo 的 `sync/master` 分支，並開一張「同步 EntrepreneurAgenda master」PR（已經開著就只是加進新 commit）。組織 repo 的 CI 會跑在這張 PR 上，**合併後才部署到 Azure**。
+> - 需要在本 repo 設定 secret `ORG_SYNC_TOKEN`：對 `toastmasters-d67/agenda-management` 有 **Contents** 與 **Pull requests** 讀寫權限的 fine-grained personal access token。沒設定時 workflow 只會留警告、不會失敗。
+> - 不要直接在組織 repo 改程式碼；真的改了，請把同樣的修改也提交到這裡的 `master`，否則下次同步的 PR 會把它蓋掉或產生衝突。
+> - 組織 repo 的 `.github/workflows/ci-cd.yml` 也在本 repo 裡：它的部署步驟只在 `main` 分支執行，在這裡只會在 PR 上跑建置檢查。
 
 > ⚠️ Vercel **不會自動執行 migration**。每次新增 migration 版本後，請手動在正式 DB 執行 `alembic upgrade head`。
 

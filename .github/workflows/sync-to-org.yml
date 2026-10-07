@@ -1,0 +1,88 @@
+# Keep the org repo (Azure VM deploy) on the same code as this repo's master
+# (Vercel deploy).
+#
+# Every push to master is pushed, unchanged, to the org repo's `sync/master`
+# branch, and a PR from it into `main` is opened there if one is not already
+# open (an open one just picks up the new commits). The org repo's own CI runs
+# on that PR; merging it is what deploys to Azure. Nothing here deploys.
+#
+# Needs the secret ORG_SYNC_TOKEN: a fine-grained personal access token for
+# toastmasters-d67/agenda-management with Contents and Pull requests set to
+# read/write. A token is required rather than GITHUB_TOKEN because that one
+# cannot reach another repo, and events it causes would not start the org
+# repo's CI. Without the secret the job logs a warning and stops.
+#
+# The org repo carries this file too (the two repos hold the same code); the
+# repository check below keeps it from running there.
+
+name: Sync to org repo (PR)
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-to-org
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'yutishih/EntrepreneurAgenda'
+    runs-on: ubuntu-latest
+    env:
+      ORG_REPO: toastmasters-d67/agenda-management
+      SYNC_BRANCH: sync/master
+      GH_TOKEN: ${{ secrets.ORG_SYNC_TOKEN }}
+    steps:
+      - name: Check the token
+        id: token
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::ORG_SYNC_TOKEN 未設定，略過同步到組織 repo。"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.token.outputs.ok == 'true'
+        with:
+          fetch-depth: 0
+          # The persisted GITHUB_TOKEN header would override the org token on
+          # the push below.
+          persist-credentials: false
+
+      - name: Push master to the sync branch
+        if: steps.token.outputs.ok == 'true'
+        run: |
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${ORG_REPO}.git"
+          git push --force "$remote" "HEAD:refs/heads/${SYNC_BRANCH}"
+          git fetch --quiet "$remote" main:refs/remotes/org/main
+
+      - name: Open the sync PR (an open one is updated by the push above)
+        if: steps.token.outputs.ok == 'true'
+        run: |
+          if [ -z "$(git log --oneline org/main..HEAD)" ]; then
+            echo "組織 repo 的 main 已包含這個版本，不需要 PR。"
+            exit 0
+          fi
+          open=$(gh pr list --repo "$ORG_REPO" --head "$SYNC_BRANCH" --base main \
+                 --state open --json number --jq '.[0].number // empty')
+          if [ -n "$open" ]; then
+            echo "已有同步 PR #$open，這次的 commit 已推上去。"
+            exit 0
+          fi
+          {
+            echo "自動同步 [yutishih/EntrepreneurAgenda](https://github.com/yutishih/EntrepreneurAgenda) 的 \`master\`。"
+            echo "合併後才會部署到 Azure；之後推上 master 的 commit 會自動加進這張 PR。"
+            echo
+            echo "## 這次包含的 commit"
+            echo
+            git log --no-merges --format='- %h %s' org/main..HEAD
+          } > body.md
+          gh pr create --repo "$ORG_REPO" --base main --head "$SYNC_BRANCH" \
+            --title "同步 EntrepreneurAgenda master" --body-file body.md
