@@ -169,6 +169,11 @@ details[open] summary::before { content: "▼ "; }
 }
 .btn-add:hover { background: #cde0ee; }
 
+/* Read-only editor (club member): buttons are disabled by applyRoleUI(). */
+.form-scroll-body button:disabled {
+  opacity: 0.45; cursor: not-allowed; pointer-events: none;
+}
+
 /* Time override rows */
 .time-override-hint {
   font-size: 11px;
