@@ -113,10 +113,42 @@ body {
 }
 
 /* ---------------------------------------------------------------- own roles */
-.st-roles { display: flex; flex-direction: column; gap: 6px; padding-top: 2px; }
-.st-role-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.st-span2 { grid-column: 1 / -1; }
+.st-field input:disabled { background: #f8fafc; color: #64748b; cursor: not-allowed; }
+.st-hint-inline { font-size: 11px; color: #94a3b8; line-height: 1.6; }
+.st-subhead {
+  display: flex; align-items: center; gap: 10px;
+  margin: 20px 0 10px; padding-top: 16px; border-top: 1px solid #f1f5f9;
+  font-size: 11px; color: #64748b;
+}
+.st-badge {
+  font-size: 11px; font-weight: 600; color: #772432;
+  background: #fdf2f4; border: 1px solid #f5d0d7; border-radius: 999px; padding: 2px 10px;
+}
+.st-roles { display: flex; flex-direction: column; gap: 8px; }
+.st-roles-empty { font-size: 13px; }
+.st-role-row {
+  display: grid; grid-template-columns: 1fr 160px; align-items: center; gap: 12px;
+  padding: 8px 12px; border: 1px solid #e2e8f0; border-radius: 8px; background: #fff;
+}
+.st-role-row.has-remove { grid-template-columns: 1fr 160px 30px; }
 .st-role-club { font-size: 13px; color: #334155; min-width: 0; }
 .st-role-row select {
-  flex-shrink: 0; padding: 6px 8px; border: 1px solid #cbd5e1; border-radius: 7px;
-  font-size: 12px; background: #fff;
+  width: 100%; padding: 7px 9px; border: 1px solid #cbd5e1; border-radius: 7px;
+  font-size: 13px; background: #fff;
+}
+.st-role-row select:disabled { background: #f8fafc; color: #64748b; cursor: not-allowed; }
+.st-role-remove {
+  width: 30px; height: 30px; border-radius: 6px;
+  border: 1px solid #fecaca; background: #fff; color: #b91c1c; cursor: pointer;
+}
+.st-role-remove:hover { background: #fef2f2; }
+.st-role-add {
+  align-self: flex-start; padding: 6px 12px; border-radius: 6px; font-size: 12px;
+  border: 1px dashed #94a3b8; background: #fff; color: #334155; cursor: pointer;
+}
+.st-role-add:hover { background: #f8fafc; }
+@media (max-width: 640px) {
+  .st-role-row { grid-template-columns: 1fr 120px; padding: 8px; gap: 8px; }
+  .st-role-row.has-remove { grid-template-columns: 1fr 120px 30px; }
 }

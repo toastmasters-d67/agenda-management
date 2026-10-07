@@ -285,6 +285,10 @@ table.member-list td { padding: 12px 16px; vertical-align: middle; }
 .btn-add:hover { background: #5a1a25; }
 
 .modal-wide { width: 480px; }
+/* Edit-member modal: room for the membership rows; scrolls on short screens. */
+.modal-edit { width: 640px; max-height: 92vh; overflow-y: auto; }
+.modal-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
+@media (max-width: 640px) { .modal-grid { grid-template-columns: 1fr; } }
 .modal-tabs {
   display: flex; margin-bottom: 18px;
   border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden;
@@ -366,13 +370,11 @@ th.sort-asc .sort-icon, th.sort-desc .sort-icon { opacity: 1; color: #004165; }
 .btn-add-existing:hover { background: #f1f5f9; }
 .mc-other-clubs { font-size: 11px; color: #64748b; margin-top: 2px; }
 
-.ms-sysadmin { display: flex; align-items: center; gap: 8px; font-weight: 500; cursor: pointer; }
-.ms-sysadmin input { width: auto; margin: 0; }
 .ms-editor { display: flex; flex-direction: column; gap: 8px; }
 .ms-empty { font-size: 12px; color: #94a3b8; }
 .ms-row { display: flex; align-items: center; gap: 8px; }
 .ms-row .ss-wrap { flex: 1; min-width: 0; }
-.ms-row > select { width: 104px; flex-shrink: 0; }
+.ms-row > select { width: 130px; flex-shrink: 0; }
 .ms-remove {
   flex-shrink: 0; width: 30px; height: 30px; border-radius: 6px;
   border: 1px solid #fecaca; background: #fff; color: #b91c1c; cursor: pointer;

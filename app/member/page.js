@@ -485,8 +485,11 @@ function openModal(username) {
   // System admin: global admin flag + every membership. Club admin: the
   // person's role in the current club (not for a system admin).
   const sysBox = document.getElementById('fSysAdmin');
-  sysBox.checked = m.role === 'system_admin';
+  sysBox.value = m.role === 'system_admin' ? 'system_admin' : '';
   sysBox.disabled = username === 'admin';    // the backend rejects changing it
+  document.getElementById('fSysAdminHint').textContent = username === 'admin'
+    ? 'admin 帳號固定是系統管理員。'
+    : username === getUsername() ? '這是你自己：取消後就沒有全站權限了。' : '';
   const clubRoleField = document.getElementById('fClubRoleField');
   clubRoleField.style.display = !isSystemAdmin() && isClubAdmin() ? '' : 'none';
   const clubRole = document.getElementById('fClubRole');
@@ -549,7 +552,7 @@ async function saveMember() {
   const m = members.find((x) => x.username === editingUsername) || {};
   let memberships = null;
   if (isSystemAdmin()) {
-    const sys = document.getElementById('fSysAdmin').checked;
+    const sys = document.getElementById('fSysAdmin').value === 'system_admin';
     if (sys !== (m.role === 'system_admin')) body.role = sys ? 'system_admin' : 'club_member';
     const rows = editingMemberships.filter((r) => r.clubId);
     const ids = rows.map((r) => r.clubId);
@@ -898,7 +901,7 @@ export default function MemberPage() {
       </div>
 
       <div className="modal-overlay" id="modal">
-        <div className="modal">
+        <div className="modal modal-edit">
           <div className="modal-header">
             <h3>編輯會員資料</h3>
             <button className="modal-close" onClick={closeModal}>✕</button>
@@ -907,6 +910,7 @@ export default function MemberPage() {
             <div className="modal-user-info-name" id="mUsername"></div>
             <div className="modal-user-info-sub" id="mUserFullname"></div>
           </div>
+          <div className="modal-grid">
           <div className="modal-field">
             <label>中文姓名</label>
             <input type="text" id="fNameZh" placeholder="蔡宜容" />
@@ -926,6 +930,7 @@ export default function MemberPage() {
               用 Microsoft 帳號第一次登入時，會依這個 Email 找到對應的帳號。
             </div>
           </div>
+          </div>
           <div className="modal-field" id="fClubRoleField" style={{ display: 'none' }}>
             <label>在本分會的角色</label>
             <select id="fClubRole">
@@ -935,15 +940,19 @@ export default function MemberPage() {
             <div id="fClubRoleHint" style={{ fontSize: 11, color: '#94a3b8', marginTop: 4, lineHeight: 1.5 }}></div>
           </div>
           <div className="modal-field system-admin-only" style={{ display: 'none' }}>
-            <label className="ms-sysadmin">
-              <input type="checkbox" id="fSysAdmin" /> 系統管理員（全站權限，可操作所有分會）
-            </label>
+            <label>全站權限</label>
+            <select id="fSysAdmin">
+              <option value="">無（依下方各分會的角色）</option>
+              <option value="system_admin">系統管理員（可操作所有分會）</option>
+            </select>
+            <div id="fSysAdminHint" style={{ fontSize: 11, color: '#94a3b8', marginTop: 4, lineHeight: 1.5 }}></div>
           </div>
           <div className="modal-field system-admin-only" style={{ display: 'none' }}>
             <label>所屬分會與角色</label>
             <MembershipEditor />
             <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4, lineHeight: 1.5 }}>
-              一個人可以屬於多個分會，在每個分會的角色可以不同。
+              一個人可以屬於多個分會，在每個分會的角色可以不同。系統管理員也可以加入分會，
+              加入後才會出現在該分會的會員名單與議程角色選單。
             </div>
           </div>
           <div className="modal-field modal-field-resetpw">
