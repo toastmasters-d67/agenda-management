@@ -1,12 +1,13 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import Script from 'next/script';
 import { apiJson } from '@/lib/api';
-import { setAuth, clearAuth, applyRoleUI, isSystemAdmin, canWrite } from '@/lib/auth';
+import { setAuth, clearAuth, applyRoleUI, isSystemAdmin, isClubAdmin, canWrite, getUsername, getClubId } from '@/lib/auth';
 import Sidebar from '@/components/Sidebar';
 import './member.css';
 import { withBase } from '@/lib/basePath';
+import SearchableSelect from '@/components/SearchableSelect';
 
 // This page is the single entry point for managing people. It used to be split
 // into /member (names, levels, bulk import) and /admin (roles, club assignment),
@@ -23,6 +24,13 @@ let sortKey = null;
 let sortDir = 'asc';
 let filterStatus = 'active'; // 'active' | 'pending'
 let addTab = 'single';
+// System admin's membership editor in the edit modal: rows of {key, clubId, role},
+// owned by <MembershipEditor> and mirrored here for saveMember().
+let editingMemberships = [];
+let msRowKey = 0;
+
+const escHtml = (v) => String(v ?? '').replace(/[&<>"']/g,
+  (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 const LEVEL_CONFIG = [
   { key: 'TM', label: 'TM', color: '#a9b2b1' },
@@ -36,9 +44,11 @@ const LEVEL_CONFIG = [
 
 const ROLE_LABEL = { system_admin: '系統管理員', club_admin: '分會管理員', club_member: '一般會員' };
 
-// The 角色 column only renders for system_admin, so colspan has to follow.
+// The 角色 column renders for system and club admins, so colspan follows.
+// In a club view it is the role IN THAT CLUB (a member may hold different
+// roles in different clubs).
 function colCount() {
-  return isSystemAdmin() ? 5 : 4;
+  return canWrite() ? 5 : 4;
 }
 
 function parseLevel(level) {
@@ -52,7 +62,7 @@ function parseLevel(level) {
 async function checkMemberAuth() {
   try {
     const data = await apiJson('/auth/verify');
-    setAuth(data.username, data.role, data.club_id, data.must_change_pw);
+    setAuth(data.username, data.role, data.club_id, data.must_change_pw, data.memberships);
     if (data.must_change_pw) { location.href = withBase('/change-password'); return false; }
     document.getElementById('navUser').textContent = data.username;
     document.getElementById('userAvatar').textContent = data.username.slice(0, 1).toUpperCase();
@@ -74,7 +84,6 @@ async function loadClubs() {
     document.getElementById('clubPickerBar').style.display = '';
     // Same club list feeds the 所屬分會 selects in both modals.
     document.getElementById('addClubId').innerHTML = '<option value="">— 未分配 —</option>' + options;
-    document.getElementById('fClubId').innerHTML = '<option value="">— 未分配 —</option>' + options;
     document.getElementById('apClubId').innerHTML = '<option value="">— 未分配 —</option>' + options;
   } catch {
     console.error('載入分會失敗');
@@ -345,11 +354,19 @@ function renderList() {
   }
 
   const canEdit = canWrite();
-  const showRole = isSystemAdmin();
+  const showRole = canWrite();
   tbody.innerHTML = filtered.map((m) => {
     const isPending = filterStatus === 'pending';
     // The seeded `admin` account must stay deletable-proof (backend rejects it too).
     const isRootAdmin = m.username === 'admin';
+    // A club admin removes people from their club (not deletes accounts), and
+    // only ordinary members — never another admin, never themselves.
+    const asClubAdmin = !isSystemAdmin();
+    const cantRemove = isRootAdmin
+      || (asClubAdmin && (m.role !== 'club_member' || m.username === getUsername()));
+    const removeTitle = isRootAdmin ? 'admin 帳號不可刪除'
+      : asClubAdmin ? (cantRemove ? '只能移出一般會員（不含自己）' : '移出本分會') : '刪除會員';
+    const others = (m.memberships || []).filter((x) => x.clubId !== m.clubId);
     const roleLabel = ROLE_LABEL[m.role] || m.role;
     const actions = isPending
       ? `<button class="btn-approve-row" onclick="window.__memberApprove('${m.username}')">批准</button>
@@ -359,7 +376,7 @@ function renderList() {
               <svg class="btn-edit-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
               <span class="btn-edit-label">編輯</span>
              </button>
-             <button class="btn-del-row" onclick="window.__memberDelete('${m.username}')" title="${isRootAdmin ? 'admin 帳號不可刪除' : '刪除會員'}" ${isRootAdmin ? 'disabled' : ''}>
+             <button class="btn-del-row" onclick="window.__memberDelete('${m.username}')" title="${removeTitle}" ${cantRemove ? 'disabled' : ''}>
                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
              </button>`
           : '—');
@@ -378,7 +395,7 @@ function renderList() {
       </td>
       <td class="col-level"><span class="level-badge">${m.level || 'TM'}</span></td>
       ${showRole ? `<td class="col-role"><span class="role-badge ${m.role}">${roleLabel}</span></td>` : ''}
-      <td class="col-club" style="font-size:12px;color:${m.clubName ? '#0f172a' : '#94a3b8'}">${m.clubName || (isPending ? '未選擇（待系統管理員分派）' : '—')}</td>
+      <td class="col-club" style="font-size:12px;color:${m.clubName ? '#0f172a' : '#94a3b8'}">${escHtml(m.clubName) || (isPending ? '未選擇（待系統管理員分派）' : '—')}${others.length ? `<div class="mc-other-clubs">另屬：${others.map((o) => escHtml(o.clubName)).join('、')}</div>` : ''}</td>
       <td class="col-actions td-actions">${actions}</td>
     </tr>`;
   }).join('');
@@ -443,7 +460,10 @@ async function rejectUser(username) {
 
 async function deleteMember(username) {
   if (username === 'admin') return;
-  if (!confirm(`確定要刪除會員「${username}」嗎？此操作無法復原。`)) return;
+  const question = isSystemAdmin()
+    ? `確定要刪除會員「${username}」嗎？此操作無法復原。`
+    : `確定要把「${username}」移出本分會嗎？\n他在其他分會的會籍不受影響；如果他只屬於本分會，帳號會一併刪除。`;
+  if (!confirm(question)) return;
   try {
     await apiJson(`/users/${username}`, { method: 'DELETE' });
     await fetchMembers(isSystemAdmin() ? selectedClubId : undefined);
@@ -462,10 +482,28 @@ function openModal(username) {
   document.getElementById('fLevel').value = m.level || 'TM';
   document.getElementById('fEmail').value = m.email || '';
   document.getElementById('fMsLinked').textContent = m.microsoftLinked ? '已連結 Microsoft 帳號' : '';
-  document.getElementById('fRole').value = m.role || 'club_member';
-  document.getElementById('fClubId').value = m.clubId ?? '';
-  // admin's role is fixed — the backend rejects changing it.
-  document.getElementById('fRole').disabled = username === 'admin';
+  // System admin: global admin flag + every membership. Club admin: the
+  // person's role in the current club (not for a system admin).
+  const sysBox = document.getElementById('fSysAdmin');
+  sysBox.value = m.role === 'system_admin' ? 'system_admin' : '';
+  sysBox.disabled = username === 'admin';    // the backend rejects changing it
+  document.getElementById('fSysAdminHint').textContent = username === 'admin'
+    ? 'admin 帳號固定是系統管理員。'
+    : username === getUsername() ? '這是你自己：取消後就沒有全站權限了。' : '';
+  const clubRoleField = document.getElementById('fClubRoleField');
+  clubRoleField.style.display = !isSystemAdmin() && isClubAdmin() ? '' : 'none';
+  const clubRole = document.getElementById('fClubRole');
+  clubRole.value = m.role === 'club_admin' ? 'club_admin' : 'club_member';
+  clubRole.disabled = m.role === 'system_admin';
+  document.getElementById('fClubRoleHint').textContent = m.role === 'system_admin'
+    ? '系統管理員的角色不能在這裡修改。'
+    : m.username === getUsername()
+      ? '這是你自己：改成一般會員後，你在本分會就沒有管理權限了。'
+      : '只影響他在本分會的角色，其他分會不受影響。';
+  if (isSystemAdmin()) {
+    window.__memberSetMs?.((m.memberships || []).map((x) => (
+      { key: ++msRowKey, clubId: String(x.clubId), role: x.role })));
+  }
   document.getElementById('fResetPw').value = '';
   const resetMsg = document.getElementById('resetPwMsg');
   resetMsg.textContent = '';
@@ -511,17 +549,113 @@ async function saveMember() {
     email: document.getElementById('fEmail').value.trim(),
   };
   if (!body.name_zh || !body.name_en) { alert('請填入中英文姓名'); return; }
+  const m = members.find((x) => x.username === editingUsername) || {};
+  let memberships = null;
   if (isSystemAdmin()) {
-    const clubVal = document.getElementById('fClubId').value;
-    body.role = document.getElementById('fRole').value;
-    body.club_id = clubVal ? parseInt(clubVal) : null;
+    const sys = document.getElementById('fSysAdmin').value === 'system_admin';
+    if (sys !== (m.role === 'system_admin')) body.role = sys ? 'system_admin' : 'club_member';
+    const rows = editingMemberships.filter((r) => r.clubId);
+    const ids = rows.map((r) => r.clubId);
+    if (new Set(ids).size !== ids.length) { alert('同一個分會只能出現一次'); return; }
+    memberships = rows.map((r) => ({ club_id: parseInt(r.clubId), role: r.role }));
+  } else if (isClubAdmin() && m.role !== 'system_admin') {
+    body.role = document.getElementById('fClubRole').value;
   }
+  const selfRoleChange = editingUsername === getUsername() && body.role && body.role !== m.role;
+  if (selfRoleChange && !confirm('你要變更自己在本分會的角色，變更後權限會立即改變。確定嗎？')) return;
   try {
     await apiJson(`/users/${editingUsername}`, { method: 'PUT', body });
+    // After the user update: memberships decide the per-club roles last.
+    if (memberships) {
+      await apiJson(`/users/${editingUsername}/memberships`, { method: 'PUT', body: { memberships } });
+    }
     closeModal();
+    if (selfRoleChange) { window.location.reload(); return; }
     await fetchMembers(isSystemAdmin() ? selectedClubId : undefined);
   } catch (e) {
     alert(e.message);
+  }
+}
+
+// System admin's editor for every club a person belongs to and the role in
+// each. React-rendered so each club field can be a SearchableSelect; the rest
+// of this page is imperative, so openModal() feeds it through window.__memberSetMs.
+function MembershipEditor() {
+  const [rows, setRows] = useState([]);
+  useEffect(() => {
+    window.__memberSetMs = (next) => { editingMemberships = next; setRows(next); };
+    return () => { delete window.__memberSetMs; };
+  }, []);
+  const update = (next) => { editingMemberships = next; setRows(next); };
+  const patch = (key, change) => update(rows.map((r) => (r.key === key ? { ...r, ...change } : r)));
+  return (
+    <div className="ms-editor">
+      {rows.length === 0 && <div className="ms-empty">尚未加入任何分會</div>}
+      {rows.map((r) => (
+        <div className="ms-row" key={r.key}>
+          <SearchableSelect key={`${r.key}-${allClubs.length}`} defaultValue={r.clubId}
+                            onChange={(e) => patch(r.key, { clubId: e.target.value })}
+                            placeholder="輸入分會名稱搜尋…" emptyText="找不到符合的分會">
+            <option value="">— 選擇分會 —</option>
+            {allClubs.map((c) => <option key={c.id} value={String(c.id)}>{c.name}</option>)}
+          </SearchableSelect>
+          <select value={r.role} onChange={(e) => patch(r.key, { role: e.target.value })}>
+            <option value="club_member">一般會員</option>
+            <option value="club_admin">分會管理員</option>
+          </select>
+          <button type="button" className="ms-remove" title="移出這個分會"
+                  onClick={() => update(rows.filter((x) => x.key !== r.key))}>✕</button>
+        </div>
+      ))}
+      <button type="button" className="ms-add"
+              onClick={() => update([...rows, { key: ++msRowKey, clubId: '', role: 'club_member' }])}>
+        ＋ 加入分會
+      </button>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------- add existing
+// Someone who already has an account (in another club, or none) joins the
+// club being viewed — a system admin's picked club, or a club admin's own.
+function existingTargetClub() {
+  return isSystemAdmin() ? selectedClubId : getClubId();
+}
+
+function openExistingModal() {
+  const cid = existingTargetClub();
+  if (cid == null) { alert('請先在上方選擇要加入的分會'); return; }
+  const club = allClubs.find((c) => c.id === cid);
+  document.getElementById('exClubName').textContent = club ? club.name : '本分會';
+  document.getElementById('exWho').value = '';
+  document.getElementById('exRole').value = 'club_member';
+  const msg = document.getElementById('exMsg');
+  msg.textContent = '';
+  msg.className = 'resetpw-msg';
+  document.getElementById('existingModal').classList.add('open');
+  document.getElementById('exWho').focus();
+}
+
+function closeExistingModal() {
+  document.getElementById('existingModal').classList.remove('open');
+}
+
+async function submitExisting() {
+  const cid = existingTargetClub();
+  const who = document.getElementById('exWho').value.trim();
+  const msg = document.getElementById('exMsg');
+  msg.className = 'resetpw-msg';
+  if (!who) { msg.textContent = '請輸入帳號或 Email'; msg.classList.add('is-error'); return; }
+  try {
+    const r = await apiJson(`/clubs/${cid}/members`, {
+      method: 'POST', body: { who, role: document.getElementById('exRole').value },
+    });
+    closeExistingModal();
+    await fetchMembers(isSystemAdmin() ? selectedClubId : undefined);
+    alert(`已將 ${[r.nameZh, r.nameEn].filter(Boolean).join(' / ') || r.username} 加入本分會`);
+  } catch (e) {
+    msg.textContent = e.message;
+    msg.classList.add('is-error');
   }
 }
 
@@ -547,6 +681,10 @@ export default function MemberPage() {
     document.getElementById('addModal').addEventListener('click', addModalOutsideClick);
     document.getElementById('modal').addEventListener('click', modalOutsideClick);
     document.getElementById('approveModal').addEventListener('click', approveModalOutsideClick);
+    const existingModalOutsideClick = (e) => {
+      if (e.target === document.getElementById('existingModal')) closeExistingModal();
+    };
+    document.getElementById('existingModal').addEventListener('click', existingModalOutsideClick);
 
     applyRoleUI();
 
@@ -583,6 +721,11 @@ export default function MemberPage() {
         <header className="topbar">
           <div className="topbar-title">會員管理</div>
           <div className="topbar-actions">
+            <button className="btn-add btn-add-existing write-action" onClick={openExistingModal}
+                    title="把已經有帳號的人（例如其他分會的會員）加進這個分會">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M22 11h-6"/></svg>
+              加入既有會員
+            </button>
             <button className="btn-add write-action" onClick={openAddModal}>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5v14M5 12h14"/></svg>
               新增會員
@@ -597,9 +740,9 @@ export default function MemberPage() {
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
                 查看分會
               </span>
-              <select id="clubPickerSelect" className="picker-select" onChange={onClubPickerChange}>
+              <SearchableSelect id="clubPickerSelect" className="picker-select" onChange={onClubPickerChange} placeholder="輸入分會名稱搜尋…" emptyText="找不到符合的分會">
                 <option value="">— 請選擇分會 —</option>
-              </select>
+              </SearchableSelect>
             </div>
           </div>
 
@@ -678,7 +821,7 @@ export default function MemberPage() {
                   <tr>
                     <th className="sortable" data-key="nameZh" onClick={() => sortBy('nameZh')}>會員 <i className="sort-icon">↕</i></th>
                     <th className="sortable col-level" data-key="level" onClick={() => sortBy('level')}>等級 <i className="sort-icon">↕</i></th>
-                    <th className="sortable col-role system-admin-only" data-key="role" style={{ display: 'none' }} onClick={() => sortBy('role')}>角色 <i className="sort-icon">↕</i></th>
+                    <th className="sortable col-role write-action" data-key="role" style={{ display: 'none' }} onClick={() => sortBy('role')}>角色 <i className="sort-icon">↕</i></th>
                     <th className="sortable col-club" data-key="clubName" onClick={() => sortBy('clubName')}>分會 <i className="sort-icon">↕</i></th>
                     <th className="col-actions" style={{ textAlign: 'right' }}>操作</th>
                   </tr>
@@ -733,9 +876,9 @@ export default function MemberPage() {
             </div>
             <div className="modal-field system-admin-only" style={{ display: 'none' }}>
               <label>所屬分會</label>
-              <select id="addClubId">
+              <SearchableSelect id="addClubId" placeholder="輸入分會名稱搜尋…" emptyText="找不到符合的分會">
                 <option value="">— 未分配 —</option>
-              </select>
+              </SearchableSelect>
             </div>
           </div>
           <div id="addBulk" style={{ display: 'none' }}>
@@ -758,7 +901,7 @@ export default function MemberPage() {
       </div>
 
       <div className="modal-overlay" id="modal">
-        <div className="modal">
+        <div className="modal modal-edit">
           <div className="modal-header">
             <h3>編輯會員資料</h3>
             <button className="modal-close" onClick={closeModal}>✕</button>
@@ -767,6 +910,7 @@ export default function MemberPage() {
             <div className="modal-user-info-name" id="mUsername"></div>
             <div className="modal-user-info-sub" id="mUserFullname"></div>
           </div>
+          <div className="modal-grid">
           <div className="modal-field">
             <label>中文姓名</label>
             <input type="text" id="fNameZh" placeholder="蔡宜容" />
@@ -786,19 +930,30 @@ export default function MemberPage() {
               用 Microsoft 帳號第一次登入時，會依這個 Email 找到對應的帳號。
             </div>
           </div>
-          <div className="modal-field system-admin-only" style={{ display: 'none' }}>
-            <label>角色</label>
-            <select id="fRole">
-              <option value="club_member">club_member — 一般會員（唯讀）</option>
-              <option value="club_admin">club_admin — 分會管理員（可編輯本分會）</option>
-              <option value="system_admin">system_admin — 系統管理員（全權限）</option>
+          </div>
+          <div className="modal-field" id="fClubRoleField" style={{ display: 'none' }}>
+            <label>在本分會的角色</label>
+            <select id="fClubRole">
+              <option value="club_member">一般會員（唯讀）</option>
+              <option value="club_admin">分會管理員（可編輯本分會）</option>
             </select>
+            <div id="fClubRoleHint" style={{ fontSize: 11, color: '#94a3b8', marginTop: 4, lineHeight: 1.5 }}></div>
           </div>
           <div className="modal-field system-admin-only" style={{ display: 'none' }}>
-            <label>所屬分會</label>
-            <select id="fClubId">
-              <option value="">— 未分配 —</option>
+            <label>全站權限</label>
+            <select id="fSysAdmin">
+              <option value="">無（依下方各分會的角色）</option>
+              <option value="system_admin">系統管理員（可操作所有分會）</option>
             </select>
+            <div id="fSysAdminHint" style={{ fontSize: 11, color: '#94a3b8', marginTop: 4, lineHeight: 1.5 }}></div>
+          </div>
+          <div className="modal-field system-admin-only" style={{ display: 'none' }}>
+            <label>所屬分會與角色</label>
+            <MembershipEditor />
+            <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4, lineHeight: 1.5 }}>
+              一個人可以屬於多個分會，在每個分會的角色可以不同。系統管理員也可以加入分會，
+              加入後才會出現在該分會的會員名單與議程角色選單。
+            </div>
           </div>
           <div className="modal-field modal-field-resetpw">
             <label>重設密碼</label>
@@ -811,6 +966,36 @@ export default function MemberPage() {
           <div className="modal-actions">
             <button className="btn-modal-cancel" onClick={closeModal}>取消</button>
             <button className="btn-modal-save" onClick={saveMember}>儲存</button>
+          </div>
+        </div>
+      </div>
+
+      <div className="modal-overlay" id="existingModal">
+        <div className="modal">
+          <div className="modal-header">
+            <h3>加入既有會員</h3>
+            <button className="modal-close" onClick={closeExistingModal}>✕</button>
+          </div>
+          <p style={{ fontSize: 12, color: '#64748b', margin: '0 0 12px', lineHeight: 1.6 }}>
+            把已經有帳號的人加進「<strong id="exClubName"></strong>」，例如同時參加多個分會的會員。
+            他在其他分會的會籍與角色不受影響。
+          </p>
+          <div className="modal-field">
+            <label>帳號或 Email</label>
+            <input type="text" id="exWho" placeholder="例如 leahkao 或 leah@example.com" autoComplete="off"
+                   onKeyDown={(e) => { if (e.key === 'Enter') submitExisting(); }} />
+          </div>
+          <div className="modal-field">
+            <label>在本分會的角色</label>
+            <select id="exRole" defaultValue="club_member">
+              <option value="club_member">一般會員（唯讀）</option>
+              <option value="club_admin">分會管理員（可編輯本分會）</option>
+            </select>
+          </div>
+          <div id="exMsg" className="resetpw-msg"></div>
+          <div className="modal-actions">
+            <button className="btn-modal-cancel" onClick={closeExistingModal}>取消</button>
+            <button className="btn-modal-save" onClick={submitExisting}>加入</button>
           </div>
         </div>
       </div>
@@ -835,9 +1020,9 @@ export default function MemberPage() {
           </div>
           <div className="modal-field">
             <label>所屬分會</label>
-            <select id="apClubId">
+            <SearchableSelect id="apClubId" placeholder="輸入分會名稱搜尋…" emptyText="找不到符合的分會">
               <option value="">— 未分配 —</option>
-            </select>
+            </SearchableSelect>
             <div id="apClubHint" style={{ fontSize: 11, color: '#94a3b8', marginTop: 4, lineHeight: 1.5 }}></div>
           </div>
           <div className="modal-actions">

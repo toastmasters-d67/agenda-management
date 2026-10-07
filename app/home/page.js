@@ -6,6 +6,7 @@ import { setAuth, clearAuth, applyRoleUI, isSystemAdmin } from '@/lib/auth';
 import Sidebar from '@/components/Sidebar';
 import './home.css';
 import { withBase } from '@/lib/basePath';
+import SearchableSelect from '@/components/SearchableSelect';
 
 // Module-level state mirrors the original inline <script> globals — this
 // page is a deliberate lift-and-shift port (imperative DOM ops kept as-is)
@@ -113,7 +114,7 @@ async function checkHomeAuth() {
   applyRoleUI();
   try {
     const data = await apiJson('/auth/verify');
-    setAuth(data.username, data.role, data.club_id, data.must_change_pw);
+    setAuth(data.username, data.role, data.club_id, data.must_change_pw, data.memberships);
     if (data.must_change_pw) { location.href = withBase('/change-password'); return; }
     document.getElementById('navUser').textContent = data.username;
     document.getElementById('userAvatar').textContent = data.username.slice(0, 1).toUpperCase();
@@ -339,9 +340,9 @@ export default function HomePage() {
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
                 查看分會
               </span>
-              <select id="clubPickerSelect" className="picker-select" onChange={onClubPickerChange}>
+              <SearchableSelect id="clubPickerSelect" className="picker-select" onChange={onClubPickerChange} placeholder="輸入分會名稱搜尋…" emptyText="找不到符合的分會">
                 <option value="">— 請選擇分會 —</option>
-              </select>
+              </SearchableSelect>
             </div>
           </div>
 

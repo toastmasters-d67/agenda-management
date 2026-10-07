@@ -362,7 +362,7 @@ function discard() {
 async function checkPathwaysAuth() {
   try {
     const data = await apiJson('/auth/verify');
-    setAuth(data.username, data.role, data.club_id, data.must_change_pw);
+    setAuth(data.username, data.role, data.club_id, data.must_change_pw, data.memberships);
     if (data.must_change_pw) { location.href = withBase('/change-password'); return false; }
     document.getElementById('navUser').textContent = data.username;
     document.getElementById('userAvatar').textContent = data.username.slice(0, 1).toUpperCase();

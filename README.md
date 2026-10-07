@@ -830,7 +830,8 @@ https://<你的網域>/api/mcp
 | 工具 | scope | 說明 |
 |------|-------|------|
 | `whoami` | （不需要） | 目前操作 MCP 的身分：帳號、姓名、角色、所屬分會、客戶端，以及這個授權有／沒有哪些 scope。角色與分會是當下從 `users` 查的。任何有效 token 都能呼叫——它只讀呼叫者自己的資料 |
-| `list_clubs` | `posts:read` | 列出可操作的分會與 `club_id`（系統管理員看到全部，其他人只看到自己的分會）。讓模型能把「Entrepreneur TM」這類名稱對應到 id |
+| `switch_club` | （不需要） | 屬於多個分會時，切換這個授權之後要操作的分會（記在 `oauth_refresh_tokens.active_club_id`），等同網站側邊欄的切換器。只能切到自己所屬的分會 |
+| `list_clubs` | `posts:read` | 列出可操作的分會與 `club_id`（系統管理員看到全部；其他人看到自己所屬的分會、在各分會的角色與目前分會）。讓模型能把「Entrepreneur TM」這類名稱對應到 id |
 | `list_meetings` | `posts:read` | 列出分會例會（最近的在前），回傳 `agendaId`，每筆標明所屬分會 |
 | `get_meeting` | `posts:read` | 一場例會的日期、時間、地址、入場費、主題；缺宣傳必填欄位會指出 |
 | `list_posts` | `posts:read` | 列出貼文草稿與已發布貼文 |
@@ -934,8 +935,22 @@ https://<你的網域>/api/mcp
 | 角色 | 說明 |
 |------|------|
 | `system_admin` | 最高權限，可 CRUD 所有分會、所有用戶、所有議程 |
-| `club_admin` | 可新增 / 編輯 / 刪除**自己分會**的 `club_member`；可審核 / 拒絕自行註冊的 pending 用戶；可 CRUD 自己分會的議程 |
+| `club_admin` | 可新增 / 編輯**自己分會**的會員（含改他們在本分會的角色、等級，包括自己）、把既有帳號加進本分會、把一般會員移出本分會；可審核 / 拒絕自行註冊的 pending 用戶；可 CRUD 自己分會的議程 |
 | `club_member` | 僅能閱覽頁面，無法寫入任何資料 |
+
+`club_admin`／`club_member` 是**每個分會各自的角色**：一個人可以屬於多個分會，在每個分會的角色可以不同（例如在 A 分會是管理員、在 B 分會是一般會員）。`system_admin` 是全站角色，不分分會。
+
+### 多分會會籍
+
+- **資料**：`club_memberships`（`username`, `club_id`, `role`）每列一個「人 × 分會」。教育等級（`users.level`）跟著人，各分會共用。`users.club_id`／`users.role` 保留為**主要分會**與在那裡的角色（登入後一開始所在的分會），由 `api/index.py` 的 `_ensure_membership()`／`_sync_primary()` 與會籍表保持一致——建立、註冊、審核、系統管理員編輯都會呼叫，別處不直接寫 `club_memberships`。
+- **一次操作一個分會（「目前分會」）**：每個請求由 `get_current_user()` 依「目前分會」算出 `user["club_id"]` 與在該分會的 `user["role"]`，所以既有的權限檢查不用改、自動套用到目前分會。
+  - 網站：側邊欄的「目前分會」切換器（屬於兩個以上分會才會出現）寫入 `active_club` cookie，`/svc` 代理轉成 `X-Active-Club` 標頭。後端只在使用者**確實屬於**該分會時採用，否則退回主要分會——它是偏好，不是授權。
+  - MCP：`switch_club` 工具把目前分會記在該授權（`oauth_refresh_tokens.active_club_id`）上；`whoami`、`list_clubs` 會列出所有會籍與目前分會。
+  - 指定了自己所屬的另一個分會（例如工具帶 `club_id`），會回「請先切換到該分會」。
+  - 議程輸出（`/svc/agenda-export`）以議程所屬分會開啟頁面，不受使用者目前分會影響。
+- **會員管理頁**：清單依會籍列出，「角色」欄是在**該分會**的角色，另屬的分會顯示在分會欄下方。
+  - 分會管理員：編輯視窗多了「在本分會的角色」；「加入既有會員」用帳號或 Email 把已有帳號的人加進本分會；刪除改為「移出本分會」——對方還屬於其他分會時只移除本分會會籍，只屬於本分會才連帳號一起刪除。
+  - 系統管理員：編輯視窗的「所屬分會與角色」可新增／移除會籍並設定各分會角色（`PUT /api/users/{username}/memberships`），「系統管理員」勾選框控制全站角色。
 
 ### 特殊規則
 
@@ -944,8 +959,9 @@ https://<你的網域>/api/mcp
 - 註冊時「所屬分會」為**選填**（全新部署還沒有分會時也能註冊）：有選分會的申請由該分會的 `club_admin` 審核；沒選的只有 `system_admin` 看得到
 - `system_admin` 審核時可同時指定角色與分會（`club_admin` 必須有分會）；`club_admin` 審核一律以 `club_member` 身分加入自己的分會
 - 管理員直接建立（`POST /api/users`）的帳號 `must_change_pw = true`，首次登入後系統強制導向改密碼頁面
-- `club_admin` 建立用戶或議程時，`club_id` 自動設為其所屬分會（不可指定其他分會）
-- `club_admin` 只能刪除同分會的 `club_member`，不可刪除其他管理員
+- `club_admin` 建立用戶或議程時，`club_id` 自動設為其**目前分會**（不可指定其他分會）
+- `club_admin` 只能把**目前分會**的 `club_member` 移出（不能移出其他管理員或自己）；要移出管理員，先把他改成一般會員
+- `club_admin` 可以改目前分會會員的角色（一般會員 ⇄ 分會管理員，包含自己本人），但不能設為系統管理員，也不能動系統管理員
 
 ### 用戶 status 說明
 
@@ -1021,7 +1037,20 @@ Push 到 GitHub 的 **`master`** 分支，Vercel 自動部署到正式站；其�
 
 > 正式部署的分支設定在 Vercel 專案 **Settings → Environments → Production → Branch Tracking**，目前是 `master`。改 git 預設分支名稱時這裡要一起改，否則推上去不會部署到正式站。
 
-> **同步到組織 repo**：[toastmasters-d67/agenda-management](https://github.com/toastmasters-d67/agenda-management) 把本 repo 設成 `upstream`。在那個 repo 執行 `git pull upstream master`，再 `git push origin main`（那邊的分支仍叫 `main`）。
+> **同步到組織 repo（Azure）**：兩個 repo 放的是**同一份程式碼**——本 repo 的 `master` 部署到 Vercel，[toastmasters-d67/agenda-management](https://github.com/toastmasters-d67/agenda-management) 的 `main` 部署到 Azure VM。兩邊的差異只靠環境變數（`NEXT_PUBLIC_BASE_PATH`、`PUBLIC_BASE_URL`、`CHROME_EXECUTABLE_PATH`…）與只有 Docker 會讀的檔案（`Dockerfile.*`、`deploy/`），不再各自改程式碼。
+>
+> - **只在本 repo 的 `master` 開發。** 更新 `master` 後，手動同步到組織 repo（兩個 repo 沒有 fork 關係，不能直接從這裡的 `master` 開 PR，所以先推一個同步分支）：
+>
+>   ```
+>   git push org master:sync/master --force
+>   gh pr create --repo toastmasters-d67/agenda-management --base main --head sync/master --title "同步 master"
+>   ```
+>
+>   `org` 是在本機加的第二個 remote，指向組織 repo（只需設定一次）：`git remote add org https://github.com/toastmasters-d67/agenda-management.git`。之後 `git fetch org` 就能在這裡看到組織的 `main`，`git log org/main..master` 列出還沒同步過去的 commit。
+>
+>   第一行讓組織 repo 的 `sync/master` 完全等於這裡的 `master`（它只是同步用的分支，`--force` 不影響 `main`）；第二行開「`sync/master` → `main`」的 PR，也可以在組織 repo 網頁上開。上一張同步 PR 還沒合併時只要第一行，那張 PR 會自動帶上新 commit。組織 repo 的 CI 會跑在 PR 上，**合併後才部署到 Azure**。
+> - 不要直接在組織 repo 改程式碼；真的改了，請把同樣的修改也提交到這裡的 `master`，否則下次同步的 PR 會把它蓋掉或產生衝突。
+> - 組織 repo 的 `.github/workflows/ci-cd.yml` 也在本 repo 裡：它的部署步驟只在 `main` 分支執行，在這裡只會在 PR 上跑建置檢查。
 
 > ⚠️ Vercel **不會自動執行 migration**。每次新增 migration 版本後，請手動在正式 DB 執行 `alembic upgrade head`。
 
@@ -1170,6 +1199,7 @@ alembic upgrade head
 16. `0016` — 兩張 OAuth 表加 `client_name`（同意當下記下客戶端名稱，給「已授權的應用程式」顯示）
 17. `0017` — `users` 加 `email`（不分大小寫唯一）與 `ms_sub`（綁定的 Microsoft 身分，唯一）
 18. `0018` — `oauth_refresh_tokens` 加 `grant_id`（授權的固定識別碼，回填為原 `token_hash`，已發出的 access token 不受影響）與 `prev_token_hash`（refresh token 輪換與重複使用偵測）
+19. `0019` — 建立 `club_memberships`（多分會會籍，每列一個人 × 分會與在該分會的角色），以現有的 `users.club_id`／`users.role` 回填；`oauth_refresh_tokens` 加 `active_club_id`（MCP `switch_club`）
 
 ### 常用指令
 
@@ -1297,8 +1327,8 @@ DATABASE_URL=postgresql://user:pass@ep-xxx-pooler.../neondb?sslmode=require
 
 | 方法 | 路徑 | 說明 | 權限 |
 |------|------|------|------|
-| GET    | `/api/me` | 自己的個人資料、是否有密碼、是否連結 Microsoft | 已登入 |
-| PUT    | `/api/me` | 修改自己的中英文姓名（其他欄位由管理員設定） | 已登入 |
+| GET    | `/api/me` | 自己的個人資料、各分會會籍、是否有密碼、是否連結 Microsoft、`canEditEmail` | 已登入 |
+| PUT    | `/api/me` | 修改自己的中英文姓名、等級；`roles` 只能把自己在某分會從 club_admin 降為 club_member（不能自己升級）；`email` 只有 system_admin 或在任一分會是 club_admin 的人能改 | 已登入 |
 | DELETE | `/api/me/microsoft` | 解除 Microsoft 連結（沒有密碼時拒絕） | 已登入 |
 
 ### 議程管理（需 Bearer Token）
@@ -1373,7 +1403,9 @@ DATABASE_URL=postgresql://user:pass@ep-xxx-pooler.../neondb?sslmode=require
 | PUT    | `/api/users/{username}/reset-password` | 管理員替用戶重設密碼（至少 6 字元；club_admin 限同分會） | `club_admin` 以上 |
 | PUT    | `/api/users/{username}/approve` | 審核通過 pending 用戶（設 status = 'active'）；`system_admin` 可帶 `{role, club_id}` 同時分派角色與分會 | `club_admin` 以上 |
 | DELETE | `/api/users/{username}/reject` | 拒絕並刪除 pending 用戶 | `club_admin` 以上 |
-| DELETE | `/api/users/{username}` | 刪除用戶（`admin` 不可刪；club_admin 只能刪同分會 club_member） | `club_admin` 以上 |
+| DELETE | `/api/users/{username}` | system_admin：刪除帳號（`admin` 不可刪）。club_admin：把目前分會的 club_member 移出本分會，對方不屬於其他分會時才連帳號刪除（回傳 `removed: membership／account`） | `club_admin` 以上 |
+| POST   | `/api/clubs/{club_id}/members` | 把既有帳號（`who`：帳號或 Email）加進分會，`role` 為 `club_member`／`club_admin`。club_admin 只能加進目前分會 | `club_admin` 以上 |
+| PUT    | `/api/users/{username}/memberships` | 一次設定一個人的所有會籍與各分會角色 | `system_admin` |
 
 #### 批量建立（`/api/users/bulk`）
 
@@ -1482,7 +1514,8 @@ CREATE TABLE agendas (
 | `club_social_accounts` | `0012` | 分會已連接的 FB 粉專／IG／Threads，長效 token 加密存，`expires_at` 用來提前警告；`(club_id, platform)` 唯一 |
 | `pathways`、`pathway_projects`、`pathway_required`、`pathway_electives` | `0013` | Pathways 目錄，見「Pathways 路徑管理」 |
 | `oauth_codes` | `0015`、`0016` | MCP 授權碼（只存雜湊，5 分鐘） |
-| `oauth_refresh_tokens` | `0015`、`0016`、`0018` | MCP 的「授權」本身。`grant_id` 固定識別碼；`token_hash` 目前這把 refresh token 的雜湊（每次使用輪換）、`prev_token_hash` 上一把（用來偵測重複使用）；`client_name` 同意時的客戶端名稱、`revoked_at` 撤銷時間、`last_used_at` 最後使用時間、`expires_at` 閒置到期（60 天，每次使用往後延） |
+| `club_memberships` | `0019` | 多分會會籍：`username`、`club_id`、`role`（`club_admin`／`club_member`，在該分會的角色）。主鍵 `(username, club_id)`，刪帳號或分會時一併刪除。`users.club_id`／`users.role` 是主要分會的鏡像 |
+| `oauth_refresh_tokens` | `0015`、`0016`、`0018`、`0019` | MCP 的「授權」本身。`active_club_id`：`switch_club` 選的目前分會（空值＝主要分會）。`grant_id` 固定識別碼；`token_hash` 目前這把 refresh token 的雜湊（每次使用輪換）、`prev_token_hash` 上一把（用來偵測重複使用）；`client_name` 同意時的客戶端名稱、`revoked_at` 撤銷時間、`last_used_at` 最後使用時間、`expires_at` 閒置到期（60 天，每次使用往後延） |
 
 ### users 欄位說明
 

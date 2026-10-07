@@ -204,9 +204,92 @@ def parse_jsonb(val) -> dict:
     return val or {}
 
 
+# ------------------------------------------------------------------ club memberships
+# A member can belong to several clubs, with a role in each (club_memberships).
+# A request acts in ONE of them — the "current club", picked with the club
+# switcher (web: the `active_club` cookie, forwarded by /svc as X-Active-Club;
+# MCP: switch_club) — and `user["club_id"]` / `user["role"]` are that club and
+# the role there. So every permission check written against "the user's club
+# and role" keeps working unchanged, and simply applies to the current club.
+#
+# `users.club_id` / `users.role` hold the PRIMARY club and the role there: the
+# club a session starts in. _ensure_membership() and _sync_primary() keep the
+# two tables in step; nothing else writes club_memberships.
+
+ACTIVE_CLUB_HEADER = "x-active-club"
+
+
+def _memberships(cur, username: str) -> dict:
+    """{club_id: role} for every club the user belongs to, in club-id order."""
+    cur.execute("SELECT club_id, role FROM club_memberships WHERE username=%s ORDER BY club_id",
+                (username,))
+    return dict(cur.fetchall())
+
+
+def _acting_as(role: str, primary: Optional[int], ms: dict, wanted) -> tuple:
+    """
+    (role, club_id) a request acts as. A system_admin is a system_admin
+    everywhere; anyone else gets the wanted club only if they belong to it —
+    the header is a preference, never a grant — else their primary club.
+    """
+    if role == "system_admin":
+        return role, primary
+    try:
+        wanted = int(wanted) if wanted not in (None, "") else None
+    except (TypeError, ValueError):
+        wanted = None
+    for cid in (wanted, primary):
+        if cid in ms:
+            return ms[cid], cid
+    if ms:
+        cid = next(iter(ms))
+        return ms[cid], cid
+    return role, primary
+
+
+def _ensure_membership(cur, username: str):
+    """
+    Mirror users.club_id / users.role into club_memberships. Called after
+    anything that sets them (registration, creation, approval, a system
+    admin's edit), so the primary club is always also a membership.
+    """
+    cur.execute("SELECT role, club_id FROM users WHERE username=%s", (username,))
+    row = cur.fetchone()
+    if not row or row[1] is None:
+        return
+    role, cid = row
+    if role == "system_admin":
+        # Their power is global; the row only places them on the club roster.
+        cur.execute("INSERT INTO club_memberships (username, club_id, role)"
+                    " VALUES (%s, %s, 'club_admin') ON CONFLICT DO NOTHING", (username, cid))
+    else:
+        cur.execute("INSERT INTO club_memberships (username, club_id, role) VALUES (%s, %s, %s)"
+                    " ON CONFLICT (username, club_id) DO UPDATE SET role = EXCLUDED.role",
+                    (username, cid, role if role in ("club_admin", "club_member") else "club_member"))
+
+
+def _sync_primary(cur, username: str):
+    """
+    After memberships change: keep users.club_id on a club they still belong
+    to (else their first one, else none), and users.role on their role there.
+    """
+    cur.execute("SELECT role, club_id FROM users WHERE username=%s", (username,))
+    row = cur.fetchone()
+    if not row:
+        return
+    role, primary = row
+    ms = _memberships(cur, username)
+    if primary not in ms:
+        primary = next(iter(ms), None)
+    if role != "system_admin":
+        role = ms.get(primary, "club_member")
+    cur.execute("UPDATE users SET club_id=%s, role=%s WHERE username=%s", (primary, role, username))
+
+
 # ------------------------------------------------------------------ permission dependencies
-def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
-    """Decode token and fetch user's role + club_id from DB."""
+def get_current_user(request: Request,
+                     credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
+    """Decode the token; resolve the club this request acts in, and the role there."""
     username = decode_token(credentials.credentials)
     with get_db() as conn:
         with conn.cursor() as cur:
@@ -215,11 +298,14 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
                 (username,),
             )
             row = cur.fetchone()
+            ms = _memberships(cur, username) if row else {}
     if not row:
         raise HTTPException(status_code=401, detail="使用者不存在")
     if row[4] == "pending":
         raise HTTPException(status_code=403, detail="帳號尚待審核，請聯絡管理員")
-    return {"username": row[0], "role": row[1], "club_id": row[2], "must_change_pw": row[3]}
+    role, club_id = _acting_as(row[1], row[2], ms, request.headers.get(ACTIVE_CLUB_HEADER))
+    return {"username": row[0], "role": role, "club_id": club_id, "must_change_pw": row[3],
+            "memberships": ms}
 
 
 def require_system_admin(user: dict = Depends(get_current_user)) -> dict:
@@ -282,6 +368,7 @@ def register(req: RegisterRequest):
                      req.name_en.strip(), req.name_zh.strip(),
                      req.club_id),
                 )
+                _ensure_membership(cur, req.username)
     except psycopg2.errors.UniqueViolation:
         raise HTTPException(status_code=400, detail="帳號已存在")
     return {
@@ -311,12 +398,19 @@ def verify(user: dict = Depends(get_current_user)):
             cur.execute("SELECT password_hash <> '' FROM users WHERE username=%s",
                         (user["username"],))
             has_password = cur.fetchone()[0]
+            cur.execute("SELECT id, name FROM clubs WHERE id = ANY(%s)",
+                        (list(user["memberships"]),))
+            names = dict(cur.fetchall())
     return {
         "username":       user["username"],
+        # role / club_id are for the CURRENT club (see _acting_as).
         "role":           user["role"],
         "club_id":        user["club_id"],
         "must_change_pw": user["must_change_pw"],
         "has_password":   has_password,
+        # Every club the user belongs to, for the club switcher.
+        "memberships":    [{"clubId": cid, "clubName": names.get(cid, ""), "role": r}
+                           for cid, r in user["memberships"].items()],
     }
 
 
@@ -631,6 +725,7 @@ def ms_register(req: MsRegisterRequest):
                     " club_id, status, email, ms_sub)"
                     " VALUES (%s, '', %s, %s, 'club_member', %s, 'pending', %s, %s)",
                     (username, name_en, name_zh, req.club_id, email, t["sub"]))
+                _ensure_membership(cur, username)
     except psycopg2.errors.UniqueViolation:
         raise HTTPException(status_code=400, detail="這個 Email 已有帳號，請先用帳號密碼登入後在「設定」連結")
     return {"ok": True, "pending": True, "username": username,
@@ -638,9 +733,26 @@ def ms_register(req: MsRegisterRequest):
 
 
 # ------------------------------------------------------------------ my profile
+class MyRoleItem(BaseModel):
+    club_id: int
+    role:    str
+
+
 class ProfileUpdateRequest(BaseModel):
     name_en: str
     name_zh: str
+    level:   Optional[str] = None
+    email:   Optional[str] = None               # "" clears it; managers only
+    roles:   Optional[List[MyRoleItem]] = None  # own role in own clubs
+
+
+def _manages_something(cur, username: str) -> bool:
+    """A system admin, or a club admin in at least one club."""
+    cur.execute("SELECT role = 'system_admin' OR EXISTS (SELECT 1 FROM club_memberships m"
+                " WHERE m.username = u.username AND m.role = 'club_admin')"
+                " FROM users u WHERE u.username=%s", (username,))
+    row = cur.fetchone()
+    return bool(row and row[0])
 
 
 @app.get("/api/me")
@@ -648,28 +760,72 @@ def get_my_profile(user: dict = Depends(get_current_user)):
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT u.username, u.name_zh, u.name_en, u.email, u.level, u.role,"
-                " u.club_id, c.name, u.ms_sub IS NOT NULL, u.password_hash <> ''"
-                " FROM users u LEFT JOIN clubs c ON c.id=u.club_id WHERE u.username=%s",
+                "SELECT u.username, u.name_zh, u.name_en, u.email, u.level,"
+                " u.ms_sub IS NOT NULL, u.password_hash <> ''"
+                " FROM users u WHERE u.username=%s",
                 (user["username"],))
             r = cur.fetchone()
+            cur.execute("SELECT m.club_id, c.name, m.role FROM club_memberships m"
+                        " JOIN clubs c ON c.id = m.club_id WHERE m.username=%s"
+                        " ORDER BY lower(c.name)", (user["username"],))
+            ms = [{"clubId": x[0], "clubName": x[1], "role": x[2]} for x in cur.fetchall()]
+            cur.execute("SELECT name FROM clubs WHERE id=%s", (user["club_id"],))
+            club_name = (cur.fetchone() or [""])[0]
+            can_email = _manages_something(cur, user["username"])
+    # role / club are the CURRENT club's; `memberships` lists all of them.
     return {"username": r[0], "nameZh": r[1] or "", "nameEn": r[2] or "",
-            "email": r[3] or "", "level": r[4] or "", "role": r[5],
-            "clubId": r[6], "clubName": r[7] or "",
-            "microsoftLinked": r[8], "hasPassword": r[9],
+            "email": r[3] or "", "level": r[4] or "", "role": user["role"],
+            "clubId": user["club_id"], "clubName": club_name or "",
+            "memberships": ms, "canEditEmail": can_email,
+            "microsoftLinked": r[5], "hasPassword": r[6],
             "microsoftEnabled": _ms_enabled()}
 
 
 @app.put("/api/me")
 def update_my_profile(req: ProfileUpdateRequest, user: dict = Depends(get_current_user)):
-    """Name only — role, club, level and email are set by admins."""
+    """
+    Your own profile. Anyone: name, education level, and stepping down in a
+    club you belong to (club_admin -> club_member only; promotion, and the
+    system-admin role, are granted by admins). Email only for managers (a
+    system admin, or a club admin somewhere): it is what a first Microsoft
+    sign-in matches on, so a member who could set any address could take
+    over someone else's sign-in. Which clubs you belong to stays with admins.
+    """
     name_en, name_zh = req.name_en.strip(), req.name_zh.strip()
     if not name_en or not name_zh:
         raise HTTPException(status_code=400, detail="請提供中英文姓名")
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("UPDATE users SET name_en=%s, name_zh=%s WHERE username=%s",
-                        (name_en[:100], name_zh[:100], user["username"]))
+    for item in req.roles or []:
+        if item.role not in ("club_admin", "club_member"):
+            raise HTTPException(status_code=400, detail="角色只能是「一般會員」或「分會管理員」")
+    me = user["username"]
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE users SET name_en=%s, name_zh=%s WHERE username=%s",
+                            (name_en[:100], name_zh[:100], me))
+                if req.level is not None:
+                    cur.execute("UPDATE users SET level=%s WHERE username=%s",
+                                ((req.level.strip() or "TM")[:20], me))
+                if req.email is not None:
+                    if not _manages_something(cur, me):
+                        raise HTTPException(status_code=403,
+                                            detail="Email 需由管理員修改，請聯絡分會管理員")
+                    cur.execute("UPDATE users SET email=%s WHERE username=%s",
+                                (_normalize_email(req.email), me))
+                if req.roles:
+                    mine = _memberships(cur, me)
+                    for item in req.roles:
+                        if item.club_id not in mine:
+                            raise HTTPException(status_code=403, detail="只能修改自己所屬分會的角色")
+                        if item.role == "club_admin" and mine[item.club_id] != "club_admin":
+                            raise HTTPException(status_code=403,
+                                                detail="不能把自己升為分會管理員，請聯絡分會管理員")
+                        cur.execute("UPDATE club_memberships SET role=%s"
+                                    " WHERE username=%s AND club_id=%s",
+                                    (item.role, me, item.club_id))
+                    _sync_primary(cur, me)
+    except psycopg2.errors.UniqueViolation:
+        raise HTTPException(status_code=400, detail="此 Email 已被其他帳號使用")
     return {"ok": True}
 
 
@@ -878,7 +1034,9 @@ def list_clubs():
     agenda generator uses the branding/template fields."""
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute(f"SELECT {_CLUB_COLS} FROM clubs ORDER BY id")
+            # Alphabetical: every club picker in the app is filled from this
+            # list, in this order.
+            cur.execute(f"SELECT {_CLUB_COLS} FROM clubs ORDER BY lower(name), id")
             rows = cur.fetchall()
     return [_club_row_to_dict(r) for r in rows]
 
@@ -981,6 +1139,7 @@ def create_user(req: UserCreateRequest, user: dict = Depends(require_club_admin_
                      role, club_id,
                      req.level.strip() or "TM"),
                 )
+                _ensure_membership(cur, req.username.strip())
     except psycopg2.errors.UniqueViolation:
         raise HTTPException(status_code=400, detail="帳號已存在")
     return {"ok": True}
@@ -1024,6 +1183,7 @@ def create_users_bulk(req: BulkMemberRequest, user: dict = Depends(require_club_
                     " VALUES (%s, %s, %s, %s, 'club_member', %s, %s, true)",
                     (username, password_hash, name_en, name_zh, club_id, level),
                 )
+                _ensure_membership(cur, username)
                 results.append({"nameZh": name_zh, "nameEn": name_en, "username": username, "ok": True})
     return {"results": results, "defaultPassword": default_pw}
 
@@ -1034,53 +1194,59 @@ def list_users(
     user: dict = Depends(get_current_user),
 ):
     """
-    system_admin  → all users (no param), or filtered by ?club_id=X for member view
-    club_admin    → users in their club (club_id param ignored)
-    club_member   → users in their club (read-only, club_id param ignored)
+    One row per person.
+
+    A club view — a club admin's or member's current club, or a system admin's
+    ?club_id= — lists that club's members, with `role` being the role IN THAT
+    CLUB. A system admin's unfiltered view lists everyone with their primary
+    club and role. Either way each row carries all of the person's
+    memberships, so a multi-club member's other clubs are visible.
     """
+    scope = club_id if user["role"] == "system_admin" else user["club_id"]
+    if scope is None and user["role"] != "system_admin":
+        return []
+    cols = ("u.username, u.name_en, u.name_zh, u.role, u.club_id, u.level,"
+            " u.created_at, u.status, u.email, u.ms_sub IS NOT NULL")
     with get_db() as conn:
         with conn.cursor() as cur:
-            if user["role"] == "system_admin":
-                if club_id is not None:
-                    cur.execute("""
-                        SELECT u.username, u.name_en, u.name_zh, u.role, u.club_id,
-                               c.name, u.level, u.created_at, u.status, u.email, u.ms_sub IS NOT NULL
-                        FROM users u
-                        LEFT JOIN clubs c ON c.id = u.club_id
-                        WHERE u.club_id = %s
-                        ORDER BY u.status, u.created_at
-                    """, (club_id,))
-                else:
-                    cur.execute("""
-                        SELECT u.username, u.name_en, u.name_zh, u.role, u.club_id,
-                               c.name, u.level, u.created_at, u.status, u.email, u.ms_sub IS NOT NULL
-                        FROM users u
-                        LEFT JOIN clubs c ON c.id = u.club_id
-                        ORDER BY u.status, u.created_at
-                    """)
+            if scope is not None:
+                cur.execute(f"SELECT {cols}, m.role FROM club_memberships m"
+                            " JOIN users u ON u.username = m.username"
+                            " WHERE m.club_id = %s ORDER BY u.status, u.created_at", (scope,))
             else:
-                cur.execute("""
-                    SELECT u.username, u.name_en, u.name_zh, u.role, u.club_id,
-                           c.name, u.level, u.created_at, u.status, u.email, u.ms_sub IS NOT NULL
-                    FROM users u
-                    LEFT JOIN clubs c ON c.id = u.club_id
-                    WHERE u.club_id = %s
-                    ORDER BY u.status, u.created_at
-                """, (user["club_id"],))
+                cur.execute(f"SELECT {cols}, NULL FROM users u ORDER BY u.status, u.created_at")
             rows = cur.fetchall()
-    return [{
-        "username":  r[0],
-        "nameEn":    r[1],
-        "nameZh":    r[2],
-        "role":      r[3],
-        "clubId":    r[4],
-        "clubName":  r[5],
-        "level":     r[6],
-        "createdAt": r[7].isoformat() if r[7] else "",
-        "status":    r[8],
-        "email":     r[9] or "",
-        "microsoftLinked": r[10],
-    } for r in rows]
+            cur.execute("SELECT m.username, m.club_id, c.name, m.role FROM club_memberships m"
+                        " JOIN clubs c ON c.id = m.club_id"
+                        " WHERE m.username = ANY(%s) ORDER BY lower(c.name)",
+                        ([r[0] for r in rows],))
+            by_user: dict = {}
+            names: dict = {}
+            for un, cid, cname, mrole in cur.fetchall():
+                by_user.setdefault(un, []).append({"clubId": cid, "clubName": cname, "role": mrole})
+                names[cid] = cname
+            if scope is not None and scope not in names:
+                cur.execute("SELECT name FROM clubs WHERE id=%s", (scope,))
+                names[scope] = (cur.fetchone() or [""])[0]
+
+    def row_out(r):
+        cid = scope if scope is not None else r[4]
+        return {
+            "username":  r[0],
+            "nameEn":    r[1],
+            "nameZh":    r[2],
+            # A system admin is one everywhere; anyone else: their role here.
+            "role":      "system_admin" if r[3] == "system_admin" else (r[10] or r[3]),
+            "clubId":    cid,
+            "clubName":  names.get(cid, "") if cid is not None else "",
+            "level":     r[5],
+            "createdAt": r[6].isoformat() if r[6] else "",
+            "status":    r[7],
+            "email":     r[8] or "",
+            "microsoftLinked": r[9],
+            "memberships": by_user.get(r[0], []),
+        }
+    return [row_out(r) for r in rows]
 
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -1112,24 +1278,36 @@ def _update_user(username: str, req: UserUpdateRequest, user: dict):
     # a first Microsoft sign-in matches on, so letting anyone claim any address
     # would let them squat on someone else's sign-in.
     if user["role"] == "club_admin":
-        # club_admin: only update name / level / email for users in their own club
+        # club_admin: members of their current club — themselves included —
+        # name / level / email, and their role IN THIS CLUB (club_member ⇄
+        # club_admin). Never a system admin's role, never another club's.
         name_en = (req.name_en or "").strip()
         name_zh = (req.name_zh or "").strip()
         level   = (req.level   or "TM").strip()
         if not name_en or not name_zh:
             raise HTTPException(status_code=400, detail="請提供中英文姓名")
+        if req.role is not None and req.role not in ("club_admin", "club_member"):
+            raise HTTPException(status_code=400, detail="分會管理員只能設定「一般會員」或「分會管理員」")
         set_email = req.email is not None
         email = _normalize_email(req.email) if set_email else None
         with get_db() as conn:
             with conn.cursor() as cur:
+                cur.execute("SELECT u.role FROM club_memberships m JOIN users u USING (username)"
+                            " WHERE m.username=%s AND m.club_id=%s", (username, user["club_id"]))
+                target = cur.fetchone()
+                if target is None:
+                    raise HTTPException(status_code=404, detail="找不到此用戶或無權限修改")
                 cur.execute(
                     "UPDATE users SET name_en=%s, name_zh=%s, level=%s,"
-                    " email=CASE WHEN %s THEN %s ELSE email END"
-                    " WHERE username=%s AND club_id=%s",
-                    (name_en, name_zh, level, set_email, email, username, user["club_id"]),
+                    " email=CASE WHEN %s THEN %s ELSE email END WHERE username=%s",
+                    (name_en, name_zh, level, set_email, email, username),
                 )
-                if cur.rowcount == 0:
-                    raise HTTPException(status_code=404, detail="找不到此用戶或無權限修改")
+                if req.role is not None:
+                    if target[0] == "system_admin":
+                        raise HTTPException(status_code=400, detail="系統管理員的角色不能在這裡修改")
+                    cur.execute("UPDATE club_memberships SET role=%s WHERE username=%s AND club_id=%s",
+                                (req.role, username, user["club_id"]))
+                    _sync_primary(cur, username)
         return {"ok": True}
 
     # system_admin: partial update — only update fields that were explicitly provided
@@ -1172,6 +1350,10 @@ def _update_user(username: str, req: UserUpdateRequest, user: dict):
             )
             if cur.rowcount == 0:
                 raise HTTPException(status_code=404, detail="找不到此使用者")
+            # role / club_id here mean the PRIMARY club and the role there.
+            # Other memberships are managed with PUT /users/{u}/memberships.
+            if req.role is not None or "club_id" in in_fields:
+                _ensure_membership(cur, username)
     return {"ok": True}
 
 
@@ -1186,10 +1368,13 @@ def reset_password(username: str, req: ResetPasswordRequest, user: dict = Depend
     with get_db() as conn:
         with conn.cursor() as cur:
             if user["role"] == "club_admin":
-                # club_admin 只能重設同分會一般會員的密碼，不可動其他管理員帳號
+                # club_admin 只能重設「目前分會」一般會員的密碼，不可動其他管理員帳號
                 cur.execute(
                     """UPDATE users SET password_hash=%s, must_change_pw=true
-                       WHERE username=%s AND club_id=%s AND role='club_member'""",
+                       WHERE username=%s AND role <> 'system_admin'
+                         AND EXISTS (SELECT 1 FROM club_memberships m
+                                     WHERE m.username = users.username AND m.club_id = %s
+                                       AND m.role = 'club_member')""",
                     (new_hash, username, user["club_id"]),
                 )
             else:
@@ -1223,9 +1408,12 @@ def approve_user(username: str, req: Optional[ApproveRequest] = None,
             if user["role"] == "club_admin":
                 cur.execute(
                     "UPDATE users SET status='active'"
-                    " WHERE username=%s AND club_id=%s AND status='pending'",
+                    " WHERE username=%s AND status='pending'"
+                    " AND EXISTS (SELECT 1 FROM club_memberships m"
+                    "             WHERE m.username = users.username AND m.club_id = %s)",
                     (username, user["club_id"]),
                 )
+                approved = cur.rowcount
             else:  # system_admin
                 cur.execute(
                     "SELECT role, club_id FROM users WHERE username=%s AND status='pending'",
@@ -1252,7 +1440,14 @@ def approve_user(username: str, req: Optional[ApproveRequest] = None,
                     " WHERE username=%s AND status='pending'",
                     (role, club_id, username),
                 )
-            if cur.rowcount == 0:
+                approved = cur.rowcount
+                if approved:
+                    # The club assigned here replaces the one asked for at
+                    # registration, rather than adding to it.
+                    cur.execute("DELETE FROM club_memberships WHERE username=%s"
+                                " AND club_id IS DISTINCT FROM %s", (username, club_id))
+                    _ensure_membership(cur, username)
+            if not approved:
                 raise HTTPException(status_code=404, detail="找不到此待審核用戶或無權限")
     return {"ok": True}
 
@@ -1264,7 +1459,9 @@ def reject_user(username: str, user: dict = Depends(require_club_admin_or_above)
         with conn.cursor() as cur:
             if user["role"] == "club_admin":
                 cur.execute(
-                    "DELETE FROM users WHERE username=%s AND club_id=%s AND status='pending'",
+                    "DELETE FROM users WHERE username=%s AND status='pending'"
+                    " AND EXISTS (SELECT 1 FROM club_memberships m"
+                    "             WHERE m.username = users.username AND m.club_id = %s)",
                     (username, user["club_id"]),
                 )
             else:  # system_admin
@@ -1284,18 +1481,110 @@ def delete_user(username: str, user: dict = Depends(require_club_admin_or_above)
     with get_db() as conn:
         with conn.cursor() as cur:
             if user["role"] == "club_admin":
-                # club_admin 只能刪除同分會的一般會員，不可刪除其他管理員
+                # A club admin removes someone from THEIR club — only an
+                # ordinary member, never themselves. The account itself goes
+                # only if that was the person's last club; someone who also
+                # belongs elsewhere keeps their account and other clubs.
+                if username == user["username"]:
+                    raise HTTPException(status_code=400, detail="不能把自己移出分會")
                 cur.execute(
-                    """DELETE FROM users
-                       WHERE username=%s
-                         AND club_id=%s
-                         AND role='club_member'""",
+                    "DELETE FROM club_memberships m USING users u"
+                    " WHERE m.username = u.username AND m.username=%s AND m.club_id=%s"
+                    "   AND m.role='club_member' AND u.role <> 'system_admin'",
                     (username, user["club_id"]),
                 )
-            else:
+                if cur.rowcount == 0:
+                    raise HTTPException(status_code=404, detail="找不到此使用者或無權限移除")
+                if _memberships(cur, username):
+                    _sync_primary(cur, username)
+                    return {"ok": True, "removed": "membership"}
                 cur.execute("DELETE FROM users WHERE username=%s", (username,))
+                return {"ok": True, "removed": "account"}
+            cur.execute("DELETE FROM users WHERE username=%s", (username,))
             if cur.rowcount == 0:
                 raise HTTPException(status_code=404, detail="找不到此使用者或無權限刪除")
+    return {"ok": True, "removed": "account"}
+
+
+class AddMemberRequest(BaseModel):
+    who:  str                      # username or email of an existing account
+    role: str = "club_member"
+
+
+@app.post("/api/clubs/{club_id}/members")
+def add_club_member(club_id: int, req: AddMemberRequest,
+                    user: dict = Depends(require_club_admin_or_above)):
+    """
+    Add an EXISTING account to a club — how a member of one club joins
+    another. A system admin may add to any club; a club admin only to their
+    current club, and only as a member or club admin there. The person's
+    other clubs are untouched.
+    """
+    if user["role"] != "system_admin" and club_id != user["club_id"]:
+        raise HTTPException(status_code=403, detail="只能把會員加進你目前操作的分會")
+    if req.role not in ("club_admin", "club_member"):
+        raise HTTPException(status_code=400, detail="角色只能是「一般會員」或「分會管理員」")
+    who = (req.who or "").strip()
+    if not who:
+        raise HTTPException(status_code=400, detail="請輸入帳號或 Email")
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM clubs WHERE id=%s", (club_id,))
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="找不到此分會")
+            cur.execute("SELECT username, status, name_zh, name_en FROM users"
+                        " WHERE username=%s OR (email IS NOT NULL AND email=lower(%s))"
+                        " ORDER BY (username=%s) DESC",
+                        (who, who, who))
+            found = cur.fetchall()
+            if not found:
+                raise HTTPException(status_code=404, detail="找不到這個帳號或 Email，對方需要先有帳號")
+            username, status, name_zh, name_en = found[0]
+            if status == "pending":
+                raise HTTPException(status_code=400, detail="這個帳號還在審核中，請先完成審核")
+            cur.execute("INSERT INTO club_memberships (username, club_id, role) VALUES (%s, %s, %s)"
+                        " ON CONFLICT DO NOTHING", (username, club_id, req.role))
+            if cur.rowcount == 0:
+                raise HTTPException(status_code=400, detail="這位已經是這個分會的會員")
+            _sync_primary(cur, username)      # gives a club-less account its first club
+    return {"ok": True, "username": username, "nameZh": name_zh, "nameEn": name_en}
+
+
+class MembershipItem(BaseModel):
+    club_id: int
+    role:    str = "club_member"
+
+
+class MembershipsRequest(BaseModel):
+    memberships: List[MembershipItem]
+
+
+@app.put("/api/users/{username}/memberships")
+def set_memberships(username: str, req: MembershipsRequest,
+                    user: dict = Depends(require_system_admin)):
+    """A system admin sets every club a person belongs to, and the role in each."""
+    wanted = {}
+    for m in req.memberships:
+        if m.role not in ("club_admin", "club_member"):
+            raise HTTPException(status_code=400, detail="角色只能是「一般會員」或「分會管理員」")
+        wanted[m.club_id] = m.role
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM users WHERE username=%s", (username,))
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="找不到此使用者")
+            if wanted:
+                cur.execute("SELECT id FROM clubs WHERE id = ANY(%s)", (list(wanted),))
+                missing = set(wanted) - {r[0] for r in cur.fetchall()}
+                if missing:
+                    raise HTTPException(status_code=400, detail="找不到部分分會，請重新整理後再試")
+            cur.execute("DELETE FROM club_memberships WHERE username=%s AND NOT (club_id = ANY(%s))",
+                        (username, list(wanted)))
+            for cid, role in wanted.items():
+                cur.execute("INSERT INTO club_memberships (username, club_id, role) VALUES (%s, %s, %s)"
+                            " ON CONFLICT (username, club_id) DO UPDATE SET role = EXCLUDED.role",
+                            (username, cid, role))
+            _sync_primary(cur, username)
     return {"ok": True}
 
 
@@ -1665,6 +1954,12 @@ def _social_scope(user: dict, club_id: Optional[int]) -> Optional[int]:
     if user["role"] == "system_admin":
         return club_id
     if club_id is not None and club_id != user["club_id"]:
+        # One club at a time: a club you belong to but are not acting in has
+        # to be switched to first, so it is your role THERE that applies.
+        if club_id in (user.get("memberships") or {}):
+            raise HTTPException(status_code=403,
+                                detail="這是你所屬的另一個分會，請先切換到該分會再操作"
+                                       "（網站：側邊欄的分會切換；AI 助理：switch_club）")
         raise HTTPException(status_code=403, detail="無權存取其他分會的資料")
     return user["club_id"]
 
@@ -3496,18 +3791,22 @@ def mcp_caller(request: Request) -> dict:
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT u.username, u.role, u.club_id, u.status,"
-                " EXISTS (SELECT 1 FROM oauth_refresh_tokens t"
-                "         WHERE t.grant_id=%s AND t.username=u.username"
-                "           AND t.revoked_at IS NULL"
-                "           AND (t.expires_at IS NULL OR t.expires_at > NOW()))"
-                " FROM users u WHERE u.username=%s",
+                "SELECT u.username, u.role, u.club_id, u.status, t.active_club_id"
+                " FROM users u JOIN oauth_refresh_tokens t"
+                "   ON t.grant_id=%s AND t.username=u.username"
+                "  AND t.revoked_at IS NULL"
+                "  AND (t.expires_at IS NULL OR t.expires_at > NOW())"
+                " WHERE u.username=%s",
                 (claims.get("grant") or "", claims.get("sub")))
             row = cur.fetchone()
-    if not row or row[3] == "pending" or not row[4]:
+            ms = _memberships(cur, row[0]) if row else {}
+    if not row or row[3] == "pending":
         raise _unauthorized(request, error="invalid_token")
+    # The club this grant acts in: the one switch_club picked, if the person
+    # still belongs to it, else their primary club — same rule as the web.
+    role, club_id = _acting_as(row[1], row[2], ms, row[4])
 
-    return {"username": row[0], "role": row[1], "club_id": row[2],
+    return {"username": row[0], "role": role, "club_id": club_id, "memberships": ms,
             "scopes": set((claims.get("scope") or "").split()),
             "client_id": claims.get("client_id", ""),
             "grant": claims.get("grant") or "",
@@ -4231,19 +4530,51 @@ def _club_labels(cur) -> dict:
 
 
 def _tool_list_clubs(caller, args):
-    # A system admin sees every club; anyone else sees only their own, which
-    # is the only one _social_scope would let them name anyway.
+    # A system admin sees every club; anyone else the clubs they belong to,
+    # with their role in each and which one this grant is acting in.
     with get_db() as conn:
         with conn.cursor() as cur:
             labels = _club_labels(cur)
+    ms = caller.get("memberships") or {}
     if caller["role"] != "system_admin":
-        labels = {k: v for k, v in labels.items() if k == caller["club_id"]}
-    items = [{"clubId": k, "name": labels[k]} for k in sorted(labels)]
-    lines = [f"club_id={i['clubId']} · {i['name']}" for i in items] or ["（沒有分會）"]
+        labels = {k: v for k, v in labels.items() if k in ms}
+    items = [{"clubId": k, "name": labels[k],
+              **({"role": ms[k], "current": k == caller["club_id"]}
+                 if caller["role"] != "system_admin" else {})}
+             for k in sorted(labels, key=lambda k: labels[k].lower())]
+    lines = [f"club_id={i['clubId']} · {i['name']}"
+             + (f"｜{_ROLE_NAMES.get(i['role'], i['role'])}" if "role" in i else "")
+             + ("（目前操作中）" if i.get("current") else "")
+             for i in items] or ["（沒有分會）"]
     if caller["role"] == "system_admin":
         lines.append("\n你是系統管理員：其他工具不帶 club_id 時會混合所有分會，"
                      "請帶上要操作的分會的 club_id。")
+    elif len(items) > 1:
+        lines.append("\n你屬於多個分會，一次操作一個；要換分會請用 switch_club。")
     return _tool_text("\n".join(lines), {"clubs": items})
+
+
+def _tool_switch_club(caller, args):
+    """
+    The web's club switcher, for an MCP grant: which of the caller's clubs
+    this grant acts in from now on, and so the role it acts with.
+    """
+    cid = int(args["club_id"])
+    if caller["role"] == "system_admin":
+        return _tool_text("系統管理員可以在各工具直接帶 club_id 操作任何分會，不需要切換。",
+                          is_error=True)
+    ms = caller.get("memberships") or {}
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            labels = _club_labels(cur)
+            if cid not in ms:
+                mine = "、".join(f"{labels.get(k, k)}（club_id={k}）" for k in ms) or "沒有"
+                return _tool_text(f"你不是這個分會的會員。你所屬的分會：{mine}", is_error=True)
+            cur.execute("UPDATE oauth_refresh_tokens SET active_club_id=%s WHERE grant_id=%s",
+                        (cid, caller.get("grant") or ""))
+    return _tool_text(f"已切換到「{labels.get(cid, cid)}」，你在這個分會的角色是"
+                      f"{_ROLE_NAMES.get(ms[cid], ms[cid])}。之後的操作都會在這個分會進行。",
+                      {"clubId": cid, "role": ms[cid]})
 
 
 def _tool_list_meetings(caller, args):
@@ -4724,7 +5055,8 @@ def _club_role_context(club_id: int) -> dict:
             codes = {r[0].upper() for r in cur.fetchall()}
             cur.execute("SELECT template_key FROM clubs WHERE id=%s", (club_id,))
             tmpl = ((cur.fetchone() or [None])[0]) or "compact"
-            cur.execute("SELECT name_en, name_zh, level FROM users WHERE club_id=%s", (club_id,))
+            cur.execute("SELECT u.name_en, u.name_zh, u.level FROM club_memberships m"
+                        " JOIN users u ON u.username = m.username WHERE m.club_id=%s", (club_id,))
             roster = cur.fetchall()
     return {"codes": codes, "template": tmpl, "roster": roster}
 
@@ -4948,7 +5280,9 @@ def _tool_export_agenda(caller, args):
                        JWT_SECRET, algorithm=JWT_ALGORITHM)
     req = urllib.request.Request(
         f"{_render_origin(caller)}/svc/agenda-export",
-        data=json.dumps({"token": token, "agendaId": aid, "formats": formats,
+        # clubId: the page is opened acting in the agenda's club (the caller
+        # was just checked to have access there via _agenda_for).
+        data=json.dumps({"token": token, "agendaId": aid, "clubId": cid, "formats": formats,
                          "uploads": uploads}).encode(),
         headers={"Content-Type": "application/json"}, method="POST")
     try:
@@ -5301,9 +5635,11 @@ def _tool_list_members(caller, args):
         return _tool_text("系統管理員請指定 club_id（用 list_clubs 查）", is_error=True)
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT name_en, name_zh, level, role FROM users"
-                        " WHERE club_id=%s AND status <> 'pending'"
-                        " ORDER BY name_en", (cid,))
+            cur.execute("SELECT u.name_en, u.name_zh, u.level,"
+                        " CASE WHEN u.role = 'system_admin' THEN u.role ELSE m.role END"
+                        " FROM club_memberships m JOIN users u ON u.username = m.username"
+                        " WHERE m.club_id=%s AND u.status <> 'pending'"
+                        " ORDER BY u.name_en", (cid,))
             rows = cur.fetchall()
     items = [{"nameEn": r[0] or "", "nameZh": r[1] or "", "level": r[2] or "",
               "role": r[3]} for r in rows]
@@ -5585,9 +5921,10 @@ def _tool_whoami(caller, args):
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT u.name_en, u.name_zh, u.level, c.name, c.name_zh"
-                        " FROM users u LEFT JOIN clubs c ON c.id = u.club_id"
-                        " WHERE u.username=%s", (caller["username"],))
+                        " FROM users u LEFT JOIN clubs c ON c.id = %s"
+                        " WHERE u.username=%s", (caller["club_id"], caller["username"]))
             u = cur.fetchone() or (None,) * 5
+            labels = _club_labels(cur)
             cur.execute("SELECT client_name, created_at, expires_at FROM oauth_refresh_tokens"
                         " WHERE grant_id=%s", (caller.get("grant") or "",))
             gr = cur.fetchone() or (None, None, None)
@@ -5599,6 +5936,9 @@ def _tool_whoami(caller, args):
         "nameEn": u[0] or "", "nameZh": u[1] or "", "level": u[2] or "",
         "role": caller["role"], "roleName": _ROLE_NAMES.get(caller["role"], caller["role"]),
         "clubId": caller["club_id"], "club": club,
+        "memberships": [{"clubId": cid, "club": labels.get(cid, ""), "role": r,
+                         "current": cid == caller["club_id"]}
+                        for cid, r in (caller.get("memberships") or {}).items()],
         "scopes": [{"key": s, "label": MCP_SCOPES[s]} for s in scopes],
         "missingScopes": [s for s in MCP_SCOPES if s not in caller["scopes"]],
         "client": gr[0] or "", "grantedAt": iso(gr[1]), "grantExpiresAt": iso(gr[2]),
@@ -5608,6 +5948,10 @@ def _tool_whoami(caller, args):
         f"帳號：{info['username']}" + (f"（{name}{', ' + info['level'] if info['level'] else ''}）" if name else ""),
         f"角色：{info['roleName']}" + ("（可操作所有分會）" if caller["role"] == "system_admin"
                                       else f"｜分會：{club or '未設定'}（club_id={caller['club_id']}）"),
+        *([f"所屬分會：" + "、".join(
+            f"{m['club']}（{_ROLE_NAMES.get(m['role'], m['role'])}）" + ("← 目前" if m["current"] else "")
+            for m in info["memberships"]) + "。要換分會操作請用 switch_club"]
+          if len(info["memberships"]) > 1 else []),
         f"客戶端：{info['client'] or '未知'}，授權於 {info['grantedAt'][:10] or '?'}",
         "這個授權可以：" + "、".join(MCP_SCOPES[s] for s in scopes),
     ]
@@ -5702,6 +6046,17 @@ MCP_TOOLS = [
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
         "annotations": {"readOnlyHint": True, "openWorldHint": False},
         "handler": _tool_list_clubs,
+    },
+    {
+        "name": "switch_club", "scope": None, "title": "切換分會",
+        "description": "屬於多個分會的使用者，切換之後要操作的分會（等同網站側邊欄的分會切換）。"
+                       "之後的工具都在這個分會、以你在這個分會的角色執行。系統管理員不需要切換。",
+        "inputSchema": {"type": "object", "properties": {
+            "club_id": {"type": "integer", "description": "要切換到的分會，從 list_clubs 取得"},
+        }, "required": ["club_id"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": False,
+                        "idempotentHint": True, "openWorldHint": False},
+        "handler": _tool_switch_club,
     },
     {
         "name": "list_meetings", "scope": "posts:read", "title": "列出例會",
@@ -6104,7 +6459,7 @@ MCP_TOOLS = [
 # stay the only enforcement. Tools not listed need club_admin or above.
 _TOOL_MIN_ROLE = {
     **{n: "club_member" for n in (
-        "whoami", "list_clubs", "get_club", "list_members", "list_meetings",
+        "whoami", "switch_club", "list_clubs", "get_club", "list_members", "list_meetings",
         "get_meeting", "get_agenda", "export_agenda", "get_roles",
         "list_posts", "get_post")},
     **{n: "system_admin" for n in ("update_club", "create_club", "set_club_image")},
@@ -6114,7 +6469,8 @@ _TOOL_MIN_ROLE = {
 # a sentence. A tool missing here falls back to its description's first one.
 _TOOL_SUMMARY = {
     "whoami": "查看你的帳號、角色、所屬分會，以及這次授權可以做哪些事。",
-    "list_clubs": "列出分會。一般使用者只會看到自己的分會。",
+    "list_clubs": "列出分會。一般使用者看到自己所屬的分會與在各分會的角色。",
+    "switch_club": "屬於多個分會時，切換之後要操作的分會。",
     "get_club": "查看分會的名稱、版型、地點、時間、QR code 等設定。",
     "update_club": "修改分會設定，例如預設地點、時間、標語。",
     "create_club": "建立新分會。",
@@ -6144,7 +6500,7 @@ _TOOL_SUMMARY = {
     "publish_post": "發布到 Facebook、Instagram、Threads。公開且無法透過本系統收回。",
 }
 _TOOL_GROUPS = (
-    ("身分", ("whoami",)),
+    ("身分", ("whoami", "switch_club")),
     ("分會", ("list_clubs", "get_club", "update_club", "create_club", "set_club_image")),
     ("議程", ("list_meetings", "get_meeting", "get_agenda", "create_agenda", "update_agenda",
               "delete_agenda", "export_agenda", "set_agenda_theme_image",

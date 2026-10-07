@@ -73,12 +73,12 @@ const CLIENTS = [
     name: 'ChatGPT',
     needs: '需要 ChatGPT Plus、Pro、Business、Enterprise 或 Edu 方案；公司或學校管理的工作區要管理員開放自訂連接器。',
     steps: [
-      '打開 ChatGPT 的「設定」→「Apps」→「進階設定」，開啟「開發者模式」（Developer mode）。',
-      '按「建立」（Create）新增一個 App。',
-      '名稱隨意；「MCP 伺服器網址」貼上上面的網址；驗證方式選「OAuth」，其他欄位留空。',
-      '按「建立」，瀏覽器會開到本站的授權畫面（沒登入會先登入）。',
+      '打開 ChatGPT 的「設定」（Settings）→「Integrations」→「Plugins」。',
+      '按「Browse directory」，再按「Add」→「Add custom MCP Server」。',
+      '名稱隨意；伺服器網址貼上上面的網址；驗證方式選「OAuth」，其他欄位留空。',
+      '新增後，瀏覽器會開到本站的授權畫面（沒登入會先登入）。',
       '勾選要給 ChatGPT 的權限，按「允許」。',
-      '開新對話，在輸入框的「＋」選單選這個 App 就能使用。會修改資料的動作，ChatGPT 會先請你確認。',
+      '開新對話就能使用。會修改資料的動作，ChatGPT 會先請你確認。',
     ],
   },
   {
@@ -256,7 +256,7 @@ export default function McpPage() {
     (async function init() {
       try {
         const data = await apiJson('/auth/verify');
-        setAuth(data.username, data.role, data.club_id, data.must_change_pw);
+        setAuth(data.username, data.role, data.club_id, data.must_change_pw, data.memberships);
         if (data.must_change_pw) { location.href = `${BASE}/change-password`; return; }
         applyRoleUI();
         document.getElementById('navUser').textContent = data.username;

@@ -127,7 +127,7 @@ export async function POST(request) {
   } catch {
     return NextResponse.json({ detail: '請求格式錯誤' }, { status: 400 });
   }
-  const { token, agendaId, uploads } = body || {};
+  const { token, agendaId, clubId, uploads } = body || {};
   const formats = (body?.formats || FORMATS).filter((f) => FORMATS.includes(f));
   if (!token || !Number.isInteger(agendaId) || !formats.length) {
     return NextResponse.json({ detail: '缺少 token、agendaId 或 formats' }, { status: 400 });
@@ -173,6 +173,11 @@ export async function POST(request) {
       name: 'auth_token', value: token, url: origin,
       httpOnly: true, secure: origin.startsWith('https:'), sameSite: 'Lax',
     });
+    // Act in the agenda's club (a member of several clubs reads only the club
+    // they are acting in). Only a preference: the API checks membership.
+    if (Number.isInteger(clubId)) {
+      await page.setCookie({ name: 'active_club', value: String(clubId), url: origin, sameSite: 'Lax' });
+    }
 
     // Wait for the page to say it is ready, not for the network to go quiet.
     // `networkidle0` was the first try and timed out intermittently: the page

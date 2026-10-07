@@ -13,6 +13,10 @@ async function proxy(request, { params }) {
   const contentType = request.headers.get('content-type');
   if (contentType) headers['content-type'] = contentType;
   if (token) headers['authorization'] = `Bearer ${token}`;
+  // The club the user is acting in (sidebar club switcher). The API only
+  // honours it for a club the user actually belongs to.
+  const activeClub = request.cookies.get('active_club')?.value;
+  if (activeClub && /^\d+$/.test(activeClub)) headers['x-active-club'] = activeClub;
 
   const hasBody = !['GET', 'HEAD'].includes(request.method);
 

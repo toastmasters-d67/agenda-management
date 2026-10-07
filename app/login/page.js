@@ -2,9 +2,10 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { apiJson } from '@/lib/api';
-import { setAuth } from '@/lib/auth';
+import { setAuth, clearActiveClub } from '@/lib/auth';
 import './login.css';
 import { withBase } from '@/lib/basePath';
+import SearchableSelect from '@/components/SearchableSelect';
 
 /**
  * Where to go once logged in.
@@ -70,10 +71,11 @@ function ClubSelect({ selectRef, clubs, style }) {
   return (
     <div className="login-field">
       <label>所屬分會（選填）</label>
-      <select ref={selectRef} style={style}>
+      <SearchableSelect selectRef={selectRef} style={{ display: 'block', ...style }}
+                        placeholder="輸入分會名稱搜尋…" emptyText="找不到符合的分會">
         <option value="">— 不確定／清單中沒有 —</option>
         {clubs.map((c) => (<option key={c.id} value={c.id}>{c.name}</option>))}
-      </select>
+      </SearchableSelect>
       <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4, lineHeight: 1.5 }}>
         {clubs.length
           ? '未選擇分會時，由系統管理員審核並為你分派分會與角色。'
@@ -180,7 +182,10 @@ export default function LoginPage() {
     setLoginBusy(true);
     try {
       const data = await apiJson('/auth/login', { method: 'POST', body: { username, password } });
-      setAuth(data.username, data.role, data.club_id, data.must_change_pw);
+      // A fresh session starts in the primary club; the next page's
+      // /auth/verify fills in the memberships for the club switcher.
+      clearActiveClub();
+      setAuth(data.username, data.role, data.club_id, data.must_change_pw, []);
       window.location.href = withBase(data.must_change_pw ? '/change-password' : afterLogin());
     } catch (e) {
       setLoginError(e.message || '無法連線到伺服器，請確認後端已啟動');

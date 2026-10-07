@@ -27,6 +27,7 @@ import {
 } from '@/lib/pathways';
 import './agenda.css';
 import { withBase } from '@/lib/basePath';
+import SearchableSelect from '@/components/SearchableSelect';
 
 // ================================================================
 // This page is a deliberate lift-and-shift port of the legacy
@@ -1992,7 +1993,7 @@ function _updateClubPickerHint() {
 async function checkAuth() {
   try {
     const data = await apiJson('/auth/verify');
-    setAuth(data.username, data.role, data.club_id, data.must_change_pw);
+    setAuth(data.username, data.role, data.club_id, data.must_change_pw, data.memberships);
     if (data.must_change_pw) {
       window.location.href = withBase('/change-password');
       return false;
@@ -2167,9 +2168,9 @@ export default function AgendaIndexPage() {
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
                 所屬分會 Club
               </div>
-              <select id="agendaClubSelect" className="agenda-club-select" onChange={(e) => onAgendaClubChange(e.target.value)}>
+              <SearchableSelect id="agendaClubSelect" className="agenda-club-select" onChange={(e) => onAgendaClubChange(e.target.value)} placeholder="輸入分會名稱搜尋…" emptyText="找不到符合的分會">
                 <option value="">— 請選擇分會 —</option>
-              </select>
+              </SearchableSelect>
               <div id="agendaClubHint" className="agenda-club-hint"></div>
             </div>
 
