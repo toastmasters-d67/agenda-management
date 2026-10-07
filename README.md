@@ -1023,8 +1023,14 @@ Push 到 GitHub 的 **`master`** 分支，Vercel 自動部署到正式站；其�
 
 > **同步到組織 repo（Azure）**：兩個 repo 放的是**同一份程式碼**——本 repo 的 `master` 部署到 Vercel，[toastmasters-d67/agenda-management](https://github.com/toastmasters-d67/agenda-management) 的 `main` 部署到 Azure VM。兩邊的差異只靠環境變數（`NEXT_PUBLIC_BASE_PATH`、`PUBLIC_BASE_URL`、`CHROME_EXECUTABLE_PATH`…）與只有 Docker 會讀的檔案（`Dockerfile.*`、`deploy/`），不再各自改程式碼。
 >
-> - **只在本 repo 的 `master` 開發。** 每次推上 `master`，`.github/workflows/sync-to-org.yml` 會把同一份程式碼推到組織 repo 的 `sync/master` 分支，並開一張「同步 EntrepreneurAgenda master」PR（已經開著就只是加進新 commit）。組織 repo 的 CI 會跑在這張 PR 上，**合併後才部署到 Azure**。
-> - 需要在本 repo 設定 secret `ORG_SYNC_TOKEN`：對 `toastmasters-d67/agenda-management` 有 **Contents** 與 **Pull requests** 讀寫權限的 fine-grained personal access token。沒設定時 workflow 只會留警告、不會失敗。
+> - **只在本 repo 的 `master` 開發。** 更新 `master` 後，手動同步到組織 repo（兩個 repo 沒有 fork 關係，不能直接從這裡的 `master` 開 PR，所以先推一個同步分支）：
+>
+>   ```
+>   git push https://github.com/toastmasters-d67/agenda-management.git master:sync/master --force
+>   gh pr create --repo toastmasters-d67/agenda-management --base main --head sync/master --title "同步 master"
+>   ```
+>
+>   第一行讓組織 repo 的 `sync/master` 完全等於這裡的 `master`（它只是同步用的分支，`--force` 不影響 `main`）；第二行開「`sync/master` → `main`」的 PR，也可以在組織 repo 網頁上開。上一張同步 PR 還沒合併時只要第一行，那張 PR 會自動帶上新 commit。組織 repo 的 CI 會跑在 PR 上，**合併後才部署到 Azure**。
 > - 不要直接在組織 repo 改程式碼；真的改了，請把同樣的修改也提交到這裡的 `master`，否則下次同步的 PR 會把它蓋掉或產生衝突。
 > - 組織 repo 的 `.github/workflows/ci-cd.yml` 也在本 repo 裡：它的部署步驟只在 `main` 分支執行，在這裡只會在 PR 上跑建置檢查。
 
