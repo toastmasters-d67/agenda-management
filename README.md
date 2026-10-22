@@ -25,6 +25,7 @@ EntrepreneurAgenda/
 │   ├── social/               # 社群發文
 │   ├── member/               # 會員管理
 │   ├── club/                 # 分會管理（品牌、版型設定、社群帳號、分會 AI 金鑰）
+│   ├── machines/             # 機台管理（電子名牌配對、綁定會員）
 │   ├── pathways/             # Pathways 目錄管理（system_admin）
 │   ├── change-password/      # 修改密碼 / 首次登入強制改密碼
 │   ├── oauth/authorize/      # MCP 客戶端的 OAuth 同意畫面
@@ -1200,6 +1201,7 @@ alembic upgrade head
 17. `0017` — `users` 加 `email`（不分大小寫唯一）與 `ms_sub`（綁定的 Microsoft 身分，唯一）
 18. `0018` — `oauth_refresh_tokens` 加 `grant_id`（授權的固定識別碼，回填為原 `token_hash`，已發出的 access token 不受影響）與 `prev_token_hash`（refresh token 輪換與重複使用偵測）
 19. `0019` — 建立 `club_memberships`（多分會會籍，每列一個人 × 分會與在該分會的角色），以現有的 `users.club_id`／`users.role` 回填；`oauth_refresh_tokens` 加 `active_club_id`（MCP `switch_club`）
+20. `0020` — 建立 `machines`、`machine_pairings`、`machine_tokens`（電子名牌，見「機台管理」）
 
 ### 常用指令
 
@@ -1298,6 +1300,7 @@ DATABASE_URL=postgresql://user:pass@ep-xxx-pooler.../neondb?sslmode=require
 | `/social` | `app/social/page.js` | 社群發文，AI 產生文案／生圖、海報版型、各平台版本與規則檢查、發布；個人與分會共用 AI 金鑰也在這裡設定 | `club_admin`（寫入） |
 | `/member` | `app/member/page.js` | 會員管理，新增、編輯（含 Email）、批量匯入、審核、重設密碼、移除會員；system_admin 另可設定角色與所屬分會 | `club_admin`（寫入） |
 | `/club` | `app/club/page.js` | 分會管理：新增／刪除分會、品牌、版型設定、社群帳號（Meta App）設定 | `system_admin`（寫入） |
+| `/machines` | `app/machines/page.js` | 機台管理：輸入名牌上的配對碼綁定會員、換綁、停用、解除綁定、刪除；顯示最後上線時間 | `club_admin` |
 | `/pathways` | `app/pathways/page.js` | Pathways 路徑管理：路徑、各級必修、專案中英名稱、選修清單 | `system_admin` |
 | `/change-password` | `app/change-password/page.js` | 修改密碼；admin 建立帳號後首次登入強制跳轉；沒有密碼的帳號在這裡設定第一組（不需舊密碼） | 任何登入用戶 |
 | `/mcp` | `app/mcp/page.js` | 「AI 助理串接」：Claude／ChatGPT／Codex 串接步驟、授權選項說明、全部 MCP 功能與所需授權和角色（依登入者角色標出可用的項目）。網址、scope、工具清單都由 `GET /api/mcp/catalog` 提供 | 任何登入用戶 |
@@ -1429,6 +1432,41 @@ DATABASE_URL=postgresql://user:pass@ep-xxx-pooler.../neondb?sslmode=require
 | POST | `/api/upload/presign` | 取得 R2 Presigned URL（前端直傳） | `club_admin` 以上 |
 | GET  | `/api/image-proxy` | 代理取得 R2 私有圖片（`?url=...`） | 已登入 |
 
+### 機台管理（電子名牌）
+
+名牌本身沒有帳號，用自己的機台憑證（`mt_…`）；這把憑證**只能**打下面「名牌」三支，不能當會員登入用。管理端則是一般的登入 JWT。
+
+**名牌韌體流程**
+
+1. `POST /api/machines/register` `{"serial": "<序號>"}` → `{machine_id, pairing_code, poll_secret, expires_in: 600, poll_interval: 5}`。螢幕顯示 `pairing_code`。同一序號重新註冊會沿用同一台機台，只換新的配對碼。
+2. 每 `poll_interval` 秒 `POST /api/machines/token` `{machine_id, poll_secret}`：
+   - `{"status": "pending"}` → 繼續等
+   - `{"status": "paired", "access_token": "mt_…"}` → 存起來（只會給一次）
+   - 404 → 配對碼過期或被新的取代，回到第 1 步
+3. 約每 60 秒 `GET /api/machines/me/badge`，帶 `Authorization: Bearer mt_…`，以及上次拿到的 `If-None-Match`：
+   - 200 → `{machineName, member: {nameZh, nameEn, level}, club: {name, nameZh, nameEn, logoUrl}}`，回應標頭有 `ETag`
+   - 304 → 內容沒變
+   - 403 → 被停用，顯示「已停用」並繼續輪詢（重新啟用後就會恢復，不用重新配對）
+   - 401 → 被解除綁定、刪除，或綁定的會員已不在這個分會，回到第 1 步
+
+`logoUrl` 可能是完整網址，也可能是站內路徑（如 `/media/...`），名牌要自行補上網站來源。
+
+| 方法 | 路徑 | 說明 | 權限 |
+|------|------|------|------|
+| POST | `/api/machines/register` | 名牌註冊，取得配對碼 | 無（名牌） |
+| POST | `/api/machines/token` | 名牌輪詢取得憑證 | `poll_secret`（名牌） |
+| GET  | `/api/machines/me/badge` | 名牌要顯示的內容（ETag） | 機台憑證 |
+| GET  | `/api/machines` | 機台列表；system_admin 可帶 `?club_id=`，不帶則列出全部分會 | `club_admin` 以上 |
+| POST | `/api/machines/pair` | `{code, username, name?, club_id?}` 用配對碼綁定本分會會員；system_admin 必須帶 `club_id` | `club_admin` 以上 |
+| PUT  | `/api/machines/{id}` | `{name?, username?, unbind?, status?}` 改名、換綁（不需重新配對）、解除綁定（撤銷憑證）、啟用／停用 | `club_admin` 以上（本分會） |
+| DELETE | `/api/machines/{id}` | 刪除機台 | `club_admin` 以上（本分會） |
+
+規則：
+
+- 只能綁定**機台所屬分會**的會員；會員之後退出該分會，名牌就收到 401，列表上標示「已不是本分會會員」。
+- 名牌若已綁定在別的分會，club_admin 不能用配對碼直接搶走，要由原分會先解除綁定。system_admin 不受這個限制。
+- 註冊後超過一天都沒有配對到任何分會的機台，會在下次有名牌註冊時清掉。
+
 ### OAuth 與 MCP
 
 這組端點給 MCP 客戶端用，認證方式跟上面不同：MCP 端點吃的是 OAuth access token，不是登入 JWT。細節見「MCP：讓 AI 助理操作這個系統」。
@@ -1514,6 +1552,7 @@ CREATE TABLE agendas (
 | `club_social_accounts` | `0012` | 分會已連接的 FB 粉專／IG／Threads，長效 token 加密存，`expires_at` 用來提前警告；`(club_id, platform)` 唯一 |
 | `pathways`、`pathway_projects`、`pathway_required`、`pathway_electives` | `0013` | Pathways 目錄，見「Pathways 路徑管理」 |
 | `oauth_codes` | `0015`、`0016` | MCP 授權碼（只存雜湊，5 分鐘） |
+| `machines`、`machine_pairings`、`machine_tokens` | `0020` | 電子名牌。`machines`：`serial`（唯一）、`club_id`、`bound_username`、`status`（`pending`／`active`／`disabled`）、`last_seen_at`；`machine_pairings`：配對中的配對碼與輪詢密鑰（只存雜湊，10 分鐘）；`machine_tokens`：名牌憑證（只存雜湊，可撤銷） |
 | `club_memberships` | `0019` | 多分會會籍：`username`、`club_id`、`role`（`club_admin`／`club_member`，在該分會的角色）。主鍵 `(username, club_id)`，刪帳號或分會時一併刪除。`users.club_id`／`users.role` 是主要分會的鏡像 |
 | `oauth_refresh_tokens` | `0015`、`0016`、`0018`、`0019` | MCP 的「授權」本身。`active_club_id`：`switch_club` 選的目前分會（空值＝主要分會）。`grant_id` 固定識別碼；`token_hash` 目前這把 refresh token 的雜湊（每次使用輪換）、`prev_token_hash` 上一把（用來偵測重複使用）；`client_name` 同意時的客戶端名稱、`revoked_at` 撤銷時間、`last_used_at` 最後使用時間、`expires_at` 閒置到期（60 天，每次使用往後延） |
 
