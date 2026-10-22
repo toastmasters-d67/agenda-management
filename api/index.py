@@ -1588,6 +1588,337 @@ def set_memberships(username: str, req: MembershipsRequest,
     return {"ok": True}
 
 
+# ------------------------------------------------------------------ machines (電子名牌)
+# A machine is an electronic name badge (see migration 0020). Two kinds of
+# caller:
+#   - the badge itself, with no account: it registers, polls for its token,
+#     then reads what to show. Its token opens ONLY these machine endpoints —
+#     it is not a member's session, and get_current_user does not accept it.
+#   - club admins and above, on the 機台管理 page: pair a badge by the code on
+#     its screen, rebind, disable, delete.
+#
+# Flow: register → badge shows the code → an admin enters it and picks a
+# member → the badge's next /token poll collects its token → it reads
+# /machines/me/badge every minute or so (ETag, so an unchanged badge is a 304).
+# A 401 there means the badge is no longer paired: register again.
+
+MACHINE_CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"   # no 0/O, 1/I
+MACHINE_CODE_LEN = 6
+MACHINE_PAIR_TTL = timedelta(minutes=10)
+MACHINE_POLL_INTERVAL = 5          # seconds; a hint to the badge
+
+
+def _sha256(value: str) -> str:
+    import hashlib
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def _normalize_machine_code(code: str) -> str:
+    # People type what they read off a small screen: tolerate spaces, dashes
+    # and lowercase.
+    return re.sub(r"[^A-Za-z0-9]", "", code or "").upper()
+
+
+class MachineRegisterRequest(BaseModel):
+    serial: str
+
+
+class MachineTokenRequest(BaseModel):
+    machine_id:  int
+    poll_secret: str
+
+
+class MachinePairRequest(BaseModel):
+    code:     str
+    username: str
+    name:     Optional[str] = None
+    club_id:  Optional[int] = None     # system_admin only; a club admin pairs into their club
+
+
+class MachineUpdateRequest(BaseModel):
+    name:     Optional[str] = None
+    username: Optional[str] = None     # rebind to this member
+    unbind:   bool = False
+    status:   Optional[str] = None     # 'active' | 'disabled'
+
+
+@app.post("/api/machines/register")
+def machine_register(req: MachineRegisterRequest):
+    """
+    Called by the badge, unauthenticated. Registering again with the same
+    serial keeps the machine (and any binding) and just issues a new code —
+    what a badge does whenever it finds itself unpaired.
+    """
+    import secrets
+    serial = (req.serial or "").strip()
+    if not serial or len(serial) > 100:
+        raise HTTPException(status_code=400, detail="序號不得為空，且不可超過 100 字")
+    poll_secret = secrets.token_urlsafe(32)
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # Housekeeping: dead codes, and badges that registered but were
+            # never paired into any club.
+            cur.execute("DELETE FROM machine_pairings WHERE expires_at < NOW()")
+            cur.execute("DELETE FROM machines mc WHERE club_id IS NULL AND status = 'pending'"
+                        " AND created_at < NOW() - INTERVAL '1 day'"
+                        " AND NOT EXISTS (SELECT 1 FROM machine_pairings p WHERE p.machine_id = mc.id)")
+            cur.execute("INSERT INTO machines (serial) VALUES (%s)"
+                        " ON CONFLICT (serial) DO UPDATE SET serial = EXCLUDED.serial"
+                        " RETURNING id", (serial,))
+            machine_id = cur.fetchone()[0]
+            for _ in range(10):
+                code = "".join(secrets.choice(MACHINE_CODE_CHARS) for _ in range(MACHINE_CODE_LEN))
+                cur.execute("SELECT 1 FROM machine_pairings WHERE code_hash=%s", (_sha256(code),))
+                if not cur.fetchone():
+                    break
+            else:
+                raise HTTPException(status_code=503, detail="暫時無法產生配對碼，請稍後再試")
+            cur.execute(
+                "INSERT INTO machine_pairings (machine_id, code_hash, poll_secret_hash, expires_at)"
+                " VALUES (%s, %s, %s, %s)"
+                " ON CONFLICT (machine_id) DO UPDATE SET code_hash = EXCLUDED.code_hash,"
+                "   poll_secret_hash = EXCLUDED.poll_secret_hash, paired_at = NULL,"
+                "   expires_at = EXCLUDED.expires_at",
+                (machine_id, _sha256(code), _sha256(poll_secret),
+                 datetime.now(timezone.utc) + MACHINE_PAIR_TTL),
+            )
+    return {"machine_id": machine_id, "pairing_code": code, "poll_secret": poll_secret,
+            "expires_in": int(MACHINE_PAIR_TTL.total_seconds()),
+            "poll_interval": MACHINE_POLL_INTERVAL}
+
+
+@app.post("/api/machines/token")
+def machine_token(req: MachineTokenRequest):
+    """
+    The badge polls this while showing its code. {"status": "pending"} until
+    an admin pairs it; then the token, exactly once. 404: the code expired or
+    was replaced — register again.
+    """
+    import secrets
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT paired_at, expires_at > NOW() FROM machine_pairings"
+                        " WHERE machine_id=%s AND poll_secret_hash=%s",
+                        (req.machine_id, _sha256(req.poll_secret or "")))
+            row = cur.fetchone()
+            if not row or not row[1]:
+                raise HTTPException(status_code=404, detail="配對碼已失效，請重新註冊")
+            if row[0] is None:
+                return {"status": "pending"}
+            token = "mt_" + secrets.token_urlsafe(32)
+            cur.execute("INSERT INTO machine_tokens (token_hash, machine_id) VALUES (%s, %s)",
+                        (_sha256(token), req.machine_id))
+            cur.execute("DELETE FROM machine_pairings WHERE machine_id=%s", (req.machine_id,))
+    return {"status": "paired", "access_token": token, "token_type": "Bearer"}
+
+
+def get_current_machine(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
+    """The machine a badge token belongs to. Also records that it was seen."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE machine_tokens SET last_used_at = NOW()"
+                " WHERE token_hash=%s AND revoked_at IS NULL RETURNING machine_id",
+                (_sha256(credentials.credentials),),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=401, detail="機台憑證無效，請重新配對")
+            cur.execute("UPDATE machines SET last_seen_at = NOW() WHERE id=%s"
+                        " RETURNING id, status", (row[0],))
+            m = cur.fetchone()
+    if not m:
+        raise HTTPException(status_code=401, detail="機台憑證無效，請重新配對")
+    return {"id": m[0], "status": m[1]}
+
+
+@app.get("/api/machines/me/badge")
+def machine_badge(request: Request, machine: dict = Depends(get_current_machine)):
+    """
+    What the badge shows. 403 while disabled (keep polling — an admin may
+    re-enable it); 401 once it is unbound, or its member has left the club
+    (register again to be re-paired).
+    """
+    if machine["status"] == "disabled":
+        raise HTTPException(status_code=403, detail="此機台已停用")
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT mc.name, u.name_zh, u.name_en, u.level,"
+                "       c.name, c.name_zh, c.name_en, c.logo_url"
+                " FROM machines mc"
+                " JOIN users u ON u.username = mc.bound_username"
+                " JOIN club_memberships m ON m.username = mc.bound_username AND m.club_id = mc.club_id"
+                " JOIN clubs c ON c.id = mc.club_id"
+                " WHERE mc.id=%s AND mc.status = 'active'",
+                (machine["id"],),
+            )
+            r = cur.fetchone()
+    if not r:
+        raise HTTPException(status_code=401, detail="機台尚未綁定會員，請重新配對")
+    body = json.dumps({
+        "machineName": r[0] or "",
+        "member": {"nameZh": r[1] or "", "nameEn": r[2] or "", "level": r[3] or "TM"},
+        "club":   {"name": r[4] or "", "nameZh": r[5] or "", "nameEn": r[6] or "",
+                   "logoUrl": r[7] or ""},
+    }, ensure_ascii=False)
+    etag = f'"{_sha256(body)[:32]}"'
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers={"ETag": etag})
+    return Response(content=body, media_type="application/json", headers={"ETag": etag})
+
+
+def _machine_club_scope(user: dict, club_id: Optional[int]) -> Optional[int]:
+    """The club an admin works on: a club admin's current club; a system
+    admin's chosen one (None: all clubs)."""
+    if user["role"] == "system_admin":
+        return club_id
+    if user["club_id"] is None:
+        raise HTTPException(status_code=403, detail="你目前沒有所屬分會")
+    return user["club_id"]
+
+
+def _require_club_member(cur, username: str, club_id: int):
+    cur.execute("SELECT 1 FROM club_memberships m JOIN users u USING (username)"
+                " WHERE m.username=%s AND m.club_id=%s AND u.status <> 'pending'",
+                (username, club_id))
+    if not cur.fetchone():
+        raise HTTPException(status_code=400, detail="這位不是本分會的會員，無法綁定")
+
+
+def _load_machine_for(cur, machine_id: int, user: dict) -> tuple:
+    """(club_id, bound_username, status) of a machine this admin may manage."""
+    cur.execute("SELECT club_id, bound_username, status FROM machines WHERE id=%s", (machine_id,))
+    row = cur.fetchone()
+    if not row or (user["role"] != "system_admin" and row[0] != user["club_id"]):
+        raise HTTPException(status_code=404, detail="找不到此機台或無權限")
+    return row
+
+
+def _iso(ts) -> Optional[str]:
+    return ts.isoformat() if ts else None
+
+
+@app.get("/api/machines")
+def list_machines(club_id: Optional[int] = Query(None),
+                  user: dict = Depends(require_club_admin_or_above)):
+    scope = _machine_club_scope(user, club_id)
+    where, args = ("WHERE mc.club_id = %s", [scope]) if scope is not None else (
+        "WHERE mc.club_id IS NOT NULL", [])
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT mc.id, mc.serial, mc.name, mc.club_id, c.name, mc.bound_username,"
+                "       u.name_zh, u.name_en, u.level, mc.status, mc.bound_by, mc.bound_at,"
+                "       mc.last_seen_at, mc.created_at,"
+                "       EXISTS (SELECT 1 FROM club_memberships m"
+                "               WHERE m.username = mc.bound_username AND m.club_id = mc.club_id)"
+                " FROM machines mc"
+                " LEFT JOIN clubs c ON c.id = mc.club_id"
+                " LEFT JOIN users u ON u.username = mc.bound_username"
+                f" {where} ORDER BY c.name, mc.name NULLS LAST, mc.id",
+                args,
+            )
+            rows = cur.fetchall()
+    return [{
+        "id": r[0], "serial": r[1], "name": r[2] or "", "clubId": r[3], "clubName": r[4] or "",
+        "username": r[5], "nameZh": r[6] or "", "nameEn": r[7] or "", "level": r[8] or "",
+        "status": r[9], "boundBy": r[10], "boundAt": _iso(r[11]),
+        "lastSeenAt": _iso(r[12]), "createdAt": _iso(r[13]),
+        # False when the member has since left the club: the badge shows nothing.
+        "bindingValid": bool(r[5]) and r[14],
+    } for r in rows]
+
+
+@app.post("/api/machines/pair")
+def pair_machine(req: MachinePairRequest, user: dict = Depends(require_club_admin_or_above)):
+    """Bind the badge showing `code` to a member of the admin's club."""
+    club_id = _machine_club_scope(user, req.club_id)
+    if club_id is None:
+        raise HTTPException(status_code=400, detail="請先選擇分會")
+    code = _normalize_machine_code(req.code)
+    if len(code) != MACHINE_CODE_LEN:
+        raise HTTPException(status_code=400, detail=f"配對碼應為 {MACHINE_CODE_LEN} 碼")
+    name = (req.name or "").strip()[:100] or None
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT mc.id, mc.club_id, mc.status, mc.serial FROM machine_pairings p"
+                " JOIN machines mc ON mc.id = p.machine_id"
+                " WHERE p.code_hash=%s AND p.expires_at > NOW() AND p.paired_at IS NULL",
+                (_sha256(code),),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="配對碼錯誤或已過期，請確認名牌上顯示的配對碼")
+            machine_id, old_club, status, serial = row
+            if status == "disabled":
+                raise HTTPException(status_code=400, detail="此機台已停用，請先在列表中啟用")
+            # A badge still bound in another club stays theirs until they let go.
+            if (user["role"] != "system_admin" and old_club is not None
+                    and old_club != club_id and status == "active"):
+                raise HTTPException(status_code=403, detail="這台機台目前綁定在其他分會，請先由該分會解除綁定")
+            _require_club_member(cur, req.username, club_id)
+            cur.execute(
+                "UPDATE machines SET club_id=%s, bound_username=%s, status='active',"
+                " name=COALESCE(%s, name), bound_by=%s, bound_at=NOW() WHERE id=%s",
+                (club_id, req.username, name, user["username"], machine_id),
+            )
+            # Whatever token the badge held before is replaced by the one it
+            # collects on its next poll.
+            cur.execute("UPDATE machine_tokens SET revoked_at = NOW()"
+                        " WHERE machine_id=%s AND revoked_at IS NULL", (machine_id,))
+            cur.execute("UPDATE machine_pairings SET paired_at = NOW(), expires_at = %s"
+                        " WHERE machine_id=%s",
+                        (datetime.now(timezone.utc) + MACHINE_PAIR_TTL, machine_id))
+    return {"ok": True, "id": machine_id, "serial": serial}
+
+
+@app.put("/api/machines/{machine_id}")
+def update_machine(machine_id: int, req: MachineUpdateRequest,
+                   user: dict = Depends(require_club_admin_or_above)):
+    if req.status is not None and req.status not in ("active", "disabled"):
+        raise HTTPException(status_code=400, detail="狀態只能是「啟用」或「停用」")
+    if req.unbind and req.username:
+        raise HTTPException(status_code=400, detail="不能同時換綁與解除綁定")
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            club_id, bound, status = _load_machine_for(cur, machine_id, user)
+            if req.name is not None:
+                cur.execute("UPDATE machines SET name=%s WHERE id=%s",
+                            (req.name.strip()[:100] or None, machine_id))
+            if req.username and req.username != bound:
+                # Rebinding keeps the badge's token: it simply shows the new
+                # member on its next read.
+                _require_club_member(cur, req.username, club_id)
+                cur.execute("UPDATE machines SET bound_username=%s, bound_by=%s, bound_at=NOW()"
+                            " WHERE id=%s", (req.username, user["username"], machine_id))
+                bound = req.username
+            if req.unbind:
+                cur.execute("UPDATE machines SET bound_username=NULL, bound_by=NULL, bound_at=NULL"
+                            " WHERE id=%s", (machine_id,))
+                cur.execute("UPDATE machine_tokens SET revoked_at = NOW()"
+                            " WHERE machine_id=%s AND revoked_at IS NULL", (machine_id,))
+                bound = None
+            # 'active' needs someone to show; unbound it falls back to pending.
+            new_status = req.status or status
+            if new_status == "active" and not bound:
+                new_status = "pending"
+            elif new_status == "pending" and bound:
+                new_status = "active"
+            cur.execute("UPDATE machines SET status=%s WHERE id=%s", (new_status, machine_id))
+    return {"ok": True, "status": new_status}
+
+
+@app.delete("/api/machines/{machine_id}")
+def delete_machine(machine_id: int, user: dict = Depends(require_club_admin_or_above)):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            _load_machine_for(cur, machine_id, user)
+            cur.execute("DELETE FROM machines WHERE id=%s", (machine_id,))
+    return {"ok": True}
+
+
 # ------------------------------------------------------------------ upload
 @app.post("/api/upload/presign")
 def presign_upload(req: PresignRequest, user: dict = Depends(require_club_admin_or_above)):
