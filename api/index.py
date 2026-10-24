@@ -1023,7 +1023,7 @@ def _club_row_to_dict(r):
         "logo_url": r[7],
         "fb_qr_url": r[8],
         "line_qr_url": r[9],
-        "template_key": r[10] or "standard",
+        "template_key": r[10] or "compact",
         "settings": r[11] or {},
     }
 
@@ -1058,7 +1058,7 @@ def create_club(req: ClubRequest, user: dict = Depends(require_system_admin)):
                         req.name.strip(), req.name_zh, req.name_en, req.charter_no,
                         req.founded_date, req.fee,
                         req.logo_url, req.fb_qr_url, req.line_qr_url,
-                        req.template_key or "standard", settings_json,
+                        req.template_key or "compact", settings_json,
                     ),
                 )
                 new_id = cur.fetchone()[0]
@@ -1079,13 +1079,13 @@ def update_club(club_id: int, req: ClubRequest, user: dict = Depends(require_sys
                     "UPDATE clubs SET"
                     " name=%s, name_zh=%s, name_en=%s, charter_no=%s, founded_date=%s, fee=%s,"
                     " logo_url=%s, fb_qr_url=%s, line_qr_url=%s,"
-                    " template_key=%s, settings=%s::jsonb"
+                    " template_key=COALESCE(%s, template_key), settings=%s::jsonb"
                     " WHERE id=%s",
                     (
                         req.name.strip(), req.name_zh, req.name_en, req.charter_no,
                         req.founded_date, req.fee,
                         req.logo_url, req.fb_qr_url, req.line_qr_url,
-                        req.template_key or "standard", settings_json, club_id,
+                        req.template_key or None, settings_json, club_id,
                     ),
                 )
                 if cur.rowcount == 0:
@@ -6096,7 +6096,7 @@ def _tool_create_club(caller, args):
             with conn.cursor() as cur:
                 cur.execute("INSERT INTO clubs (name, template_key, settings)"
                             " VALUES (%s, %s, '{}'::jsonb) RETURNING id",
-                            (cols.pop("name"), cols.pop("template_key", None) or "standard"))
+                            (cols.pop("name"), cols.pop("template_key", None) or "compact"))
                 cid = cur.fetchone()[0]
                 _club_write(cur, cid, cols, sets)
                 c = _club_view(cur, cid)
@@ -6171,7 +6171,7 @@ def _theme_target(caller, agenda_id: int):
         with conn.cursor() as cur:
             data, cid = _agenda_for(cur, agenda_id, caller)
             cur.execute("SELECT template_key FROM clubs WHERE id=%s", (cid,))
-            tmpl = ((cur.fetchone() or [None])[0]) or "standard"
+            tmpl = ((cur.fetchone() or [None])[0]) or "compact"
     if tmpl not in _THEME_IMG_TEMPLATES:
         raise HTTPException(status_code=400,
                             detail=f"這個分會的版型（{tmpl}）沒有每場的主題圖，只有 "
