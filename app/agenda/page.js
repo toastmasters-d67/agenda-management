@@ -1651,6 +1651,20 @@ async function downloadJPG() {
 // ================================================================
 // RESET & INIT
 // ================================================================
+// Time/venue defaults: club's own setting → its template's fieldDefaults →
+// the compact template's fieldDefaults (last-resort, neutral — never another
+// club's real info). All defaults live in lib/agendaTemplates.js, so nothing
+// is hard-coded here.
+function clubFieldDefaults(club) {
+  const set = (club && club.settings) || {};
+  const fd = templateFieldDefaults(club ? club.template_key : 'compact');
+  const std = templateFieldDefaults('compact');
+  return {
+    timeRange: set.timeRange || fd.timeRange || std.timeRange || '',
+    venue: set.venue || fd.venue || std.venue || '',
+  };
+}
+
 function applyDefaultState() {
   const today = new Date();
   const pad = (n) => String(n).padStart(2, '0');
@@ -1668,16 +1682,9 @@ function applyDefaultState() {
   durationLabels = defaultDurationLabels();
   syncDurationLabelInputs();
   document.getElementById('meetingDate').value = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`;
-  // Time/venue defaults: club's own setting → its template's fieldDefaults →
-  // the compact template's fieldDefaults (last-resort, neutral — never another
-  // club's real info). All defaults live in lib/agendaTemplates.js, so nothing
-  // is hard-coded here.
-  const _club = getActiveClub();
-  const _set = (_club && _club.settings) || {};
-  const _fd = templateFieldDefaults(_club ? _club.template_key : 'compact');
-  const _std = templateFieldDefaults('compact');
-  document.getElementById('timeRange').value = _set.timeRange || _fd.timeRange || _std.timeRange || '';
-  document.getElementById('venueInfo').value = _set.venue || _fd.venue || _std.venue || '';
+  const _def = clubFieldDefaults(getActiveClub());
+  document.getElementById('timeRange').value = _def.timeRange;
+  document.getElementById('venueInfo').value = _def.venue;
   speeches = [
     { title: 'TBD', speaker: '', duration: "5'-7'", speechLang: 'en', pathwayCode: '', pathwayLevel: '', pathwayProject: '' },
     { title: '', speaker: '', duration: "5'-7'", speechLang: 'en', pathwayCode: '', pathwayLevel: '', pathwayProject: '' },
@@ -1969,7 +1976,16 @@ function confirmClubTemplateSwitch() {
 }
 
 function commitClubSwitch(newClubId) {
+  // Carry the new club's time/venue defaults over, but only into fields that
+  // are blank or still hold the previous club's default — never clobber what
+  // the user typed.
+  const oldDef = clubFieldDefaults(getActiveClub());
   selectedClubId = newClubId;
+  const newDef = clubFieldDefaults(getActiveClub());
+  [['timeRange', 'timeRange'], ['venueInfo', 'venue']].forEach(([id, k]) => {
+    const el = document.getElementById(id);
+    if (el && (!el.value.trim() || el.value === oldDef[k])) el.value = newDef[k];
+  });
   _updateClubPickerHint();
   setSaveStatus('unsaved');
   memberRoster = [];
