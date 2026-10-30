@@ -442,6 +442,12 @@ function fieldHtml(f) {
   if (f.type === 'textarea') {
     return `<div class="modal-field"><label>${f.label}</label><textarea rows="3" id="f_${f.key}"${ph}></textarea></div>`;
   }
+  if (f.type === 'color') {
+    return `<div class="modal-field"><label>${f.label}</label><input type="color" id="f_${f.key}" class="color-input"></div>`;
+  }
+  if (f.type === 'checkbox') {
+    return `<div class="modal-field"><label class="check-label"><input type="checkbox" id="f_${f.key}"> ${f.label}</label></div>`;
+  }
   return `<div class="modal-field"><label>${f.label}</label><input type="text" id="f_${f.key}"${ph}></div>`;
 }
 // Emit fields in order; insert a section label when it changes; group fields
@@ -484,6 +490,12 @@ function populateTemplateFields(c, tk) {
     if (f.type === 'image') {
       modalImgUrls[f.key] = stored || null;
       setPreview(`prev_${f.key}`, modalImgUrls[f.key] || dflt[f.key] || null);
+    } else if (f.type === 'checkbox') {
+      const el = document.getElementById(`f_${f.key}`);
+      if (el) el.checked = stored == null ? !!f.default : !!stored;
+    } else if (f.type === 'color') {
+      const el = document.getElementById(`f_${f.key}`);
+      if (el) el.value = stored || f.default || '#000000';
     } else {
       const el = document.getElementById(`f_${f.key}`);
       if (el) el.value = stored || '';
@@ -555,6 +567,9 @@ function buildClubPayload() {
     let val;
     if (f.type === 'image') {
       val = modalImgUrls[f.key] ?? null;
+    } else if (f.type === 'checkbox') {
+      const el = document.getElementById(`f_${f.key}`);
+      val = el ? el.checked : !!f.default;
     } else {
       const el = document.getElementById(`f_${f.key}`);
       const v = el ? el.value.trim() : '';

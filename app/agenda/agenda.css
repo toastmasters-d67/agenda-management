@@ -1063,13 +1063,19 @@ details[open] summary::before { content: "▼ "; }
 .tmpl-standard .s-banner {
   display: flex; align-items: center; gap: 6mm;
   height: 30mm; padding: 0 6mm 0 5mm; flex-shrink: 0;
-  color: #fff;
+  color: #fff; position: relative; overflow: hidden;
+  /* --s-c / --s-c-light / --s-c-dark come from the club's 主色 (render()) */
   background:
     linear-gradient(180deg, rgba(0,0,0,0.12) 0, rgba(0,0,0,0.12) 33%, rgba(255,255,255,0.04) 33%, rgba(255,255,255,0.04) 100%),
-    radial-gradient(ellipse 70mm 45mm at 22mm 4mm, #a8326e 0%, #7a1840 40%, transparent 75%),
-    linear-gradient(100deg, #6e1a3f 0%, #4a1630 38%, #4e1a33 100%);
+    radial-gradient(ellipse 70mm 45mm at 22mm 4mm, var(--s-c-light) 0%, var(--s-c) 40%, transparent 75%),
+    linear-gradient(100deg, var(--s-c) 0%, var(--s-c-dark) 38%, var(--s-c-dark) 100%);
   -webkit-print-color-adjust: exact; print-color-adjust: exact;
 }
+.tmpl-standard .s-banner-img {
+  position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; z-index: 0;
+}
+.tmpl-standard .s-banner > :not(.s-banner-img) { position: relative; z-index: 1; }
+.tmpl-standard .s-banner.has-img .s-banner-text { text-shadow: 0 1px 3px rgba(0,0,0,0.6); }
 .tmpl-standard .s-logo { height: 24mm; width: auto; flex-shrink: 0; }
 .tmpl-standard .s-banner-text { flex: 1; text-align: right; min-width: 0; }
 .tmpl-standard .s-club { font-size: 17pt; font-weight: 700; line-height: 1.15; }
@@ -1087,7 +1093,7 @@ details[open] summary::before { content: "▼ "; }
 .tmpl-standard .s-meeting-no { margin-top: 0.5mm; }
 .tmpl-standard .s-block { margin-top: 5mm; }
 .tmpl-standard .s-officer + .s-officer { margin-top: 2.5mm; }
-.tmpl-standard .s-label { color: #772432; font-weight: 700; }
+.tmpl-standard .s-label { color: var(--s-c); font-weight: 700; }
 .tmpl-standard .s-venue { margin-top: 1mm; }
 .tmpl-standard .s-link { color: #1a4fa0; text-decoration: underline; overflow-wrap: anywhere; }
 .tmpl-standard .s-mission .s-label { color: #000; }
@@ -1107,7 +1113,7 @@ details[open] summary::before { content: "▼ "; }
 .tmpl-standard .s-sub { padding-left: 0.9em; }
 .tmpl-standard .s-dur { color: #444; }
 .tmpl-standard .s-who { width: 11.5em; flex-shrink: 0; text-align: left; }
-.tmpl-standard .s-footer { margin-top: auto; padding-top: 1em; text-align: center; font-weight: 700; color: #772432; }
+.tmpl-standard .s-footer { margin-top: auto; padding-top: 1em; text-align: center; font-weight: 700; color: var(--s-c); }
 
 /* ============================================================
    TEMPLATE: CHILL HI HIGH  (.tmpl-chillhihigh)

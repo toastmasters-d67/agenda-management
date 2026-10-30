@@ -141,6 +141,12 @@ table.club-list td { padding: 14px 16px; vertical-align: middle; }
   font-size: 13px; transition: border-color 0.2s;
 }
 .modal-field textarea { font-family: inherit; resize: vertical; }
+.modal-field input.color-input { width: 64px; height: 36px; padding: 3px; cursor: pointer; }
+.modal-field .check-label {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; font-weight: 500; color: #334155; cursor: pointer; margin: 0;
+}
+.modal-field .check-label input { width: auto; padding: 0; }
 .modal-field input:focus,
 .modal-field textarea:focus { outline: none; border-color: #004165; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 22px; }
