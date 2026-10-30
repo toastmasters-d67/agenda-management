@@ -47,6 +47,15 @@ const NAV_ITEMS = [
 
 const ROLE_LABEL = { system_admin: '系統管理員', club_admin: '分會管理員', club_member: '一般會員' };
 
+// Same rule applyRoleUI() applies to .system-admin-only / .write-action.
+// `role` is '' until the component has read localStorage: restricted items
+// stay hidden for that first render.
+function navItemAllowed(item, role) {
+  if (item.systemAdminOnly) return role === 'system_admin';
+  if (item.clubAdminOnly) return role === 'system_admin' || role === 'club_admin';
+  return true;
+}
+
 // Current club + the role there, re-read whenever setAuth() runs (each page
 // calls it once /auth/verify answers — after this component has mounted).
 function useAuthState() {
@@ -115,15 +124,18 @@ export default function Sidebar({ active, navOverrides = {} }) {
 
         <nav className="sidebar-nav">
           <div className="nav-section-label">主選單</div>
-          {/* Restricted items start hidden; applyRoleUI() reveals them —
-              .write-action is "club admin and above". */}
+          {/* Restricted items follow the role remembered from the last
+              /auth/verify (localStorage), so they show at once instead of
+              after this page's own verify round trip; when that answers,
+              setAuth() → auth-changed corrects them. Only the menu — every
+              page and API checks the role itself. */}
           {NAV_ITEMS.map((item) => (
             <a
               key={item.key}
-              className={`nav-item ${item.key === active ? 'active' : ''} ${item.systemAdminOnly ? 'system-admin-only' : ''} ${item.clubAdminOnly ? 'write-action' : ''}`}
+              className={`nav-item ${item.key === active ? 'active' : ''}`}
               href={withBase(item.href)}
               onClick={navOverrides[item.key] ? (e) => { e.preventDefault(); navOverrides[item.key](); } : undefined}
-              style={item.systemAdminOnly || item.clubAdminOnly ? { display: 'none' } : undefined}
+              style={navItemAllowed(item, auth.role) ? undefined : { display: 'none' }}
             >
               {item.icon}
               <span>{item.label}</span>
