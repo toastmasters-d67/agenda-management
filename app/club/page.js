@@ -3,7 +3,7 @@
 import { useEffect } from 'react';
 import { apiJson } from '@/lib/api';
 import { setAuth, clearAuth, applyRoleUI } from '@/lib/auth';
-import { AGENDA_TEMPLATES, TEMPLATE_OPTIONS, templateAssetDefaults } from '@/lib/agendaTemplates';
+import { AGENDA_TEMPLATES, TEMPLATE_OPTIONS, LEGACY_TEMPLATE_KEYS, templateAssetDefaults } from '@/lib/agendaTemplates';
 import Sidebar from '@/components/Sidebar';
 import './club.css';
 import { withBase } from '@/lib/basePath';
@@ -27,10 +27,12 @@ let editingGroup = 'basic';
 // Pages returned by the OAuth round trip, waiting for the user to pick one.
 let metaPages = [];
 
-// Populate the template <select> from lib/agendaTemplates once on load.
-function populateTemplateOptions() {
+// Populate the template <select> from lib/agendaTemplates. Legacy templates
+// are listed only when `currentKey` (the club being edited) still uses one.
+function populateTemplateOptions(currentKey) {
   const sel = document.getElementById('fTemplate');
   sel.innerHTML = TEMPLATE_OPTIONS
+    .filter((o) => !LEGACY_TEMPLATE_KEYS.includes(o.key) || o.key === currentKey)
     .map((o) => `<option value="${o.key}">${o.label}</option>`)
     .join('');
 }
@@ -187,6 +189,7 @@ function openModal(id = null, group = 'basic') {
   document.getElementById('fNameZh').value = c ? (c.name_zh || '') : '';
   document.getElementById('fNameEn').value = c ? (c.name_en || '') : '';
   document.getElementById('fFee').value = c ? (c.fee || '') : '';
+  populateTemplateOptions(tk);
   document.getElementById('fTemplate').value = tk;
   // Template-specific fields: generate from the manifest, then fill values.
   renderTemplateFields(tk);

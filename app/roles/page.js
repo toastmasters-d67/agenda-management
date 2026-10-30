@@ -172,7 +172,7 @@ function activeClubId() {
 /** Drives which roles show up in the matrix — each template renders a different role set. */
 function activeTemplateKey() {
   const club = allClubs.find((c) => c.id === activeClubId());
-  return (club && club.template_key) || 'standard';
+  return (club && club.template_key) || 'compact';
 }
 
 /** The active club, or null before one is picked. */
@@ -393,7 +393,7 @@ function updateRangeLabel(total) {
     : `顯示 ${meetings.length} 場`;
 }
 
-const TEMPLATE_LABELS = { standard: '標準版', compact: '精簡版', entrepreneur: '企業家版', chillhihigh: 'Chill Hi High', china: 'CHINA' };
+const TEMPLATE_LABELS = { standard: '舊版（企業家）', compact: '標準版', entrepreneur: '企業家', chillhihigh: 'Chill Hi High', china: 'CHINA' };
 
 /** Display name for the active club's template — used in the toolbar label and locked-row tooltips. */
 function activeTemplateLabel() {
