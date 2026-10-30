@@ -1070,8 +1070,17 @@ let selectedClubId = null; // system_admin: which club this agenda belongs to
 let allClubs = [];
 let pendingClubSwitch = null; // { newClubId } awaiting confirmation in clubTemplateSwitchModal
 
+// The agenda's saved data as last loaded. A PUT replaces `data` wholesale, so
+// saving starts from it: fields this editor doesn't show — roles planned on
+// the 角色 page that the club's template doesn't print, the club's own roles
+// (customRoles) — survive an edit here instead of being wiped.
+let savedData = {};
+
 function collectSaveData() {
+  // `_`-prefixed keys are response metadata (e.g. _clubId), not agenda data.
+  const kept = Object.fromEntries(Object.entries(savedData).filter(([k]) => !k.startsWith('_')));
   return {
+    ...kept,
     ...collectData(),
     timeOverrides: { ...timeOverrides },
     durationOverrides: { ...durationOverrides },
@@ -1387,6 +1396,7 @@ async function loadAgenda(id, { ownLoading = true } = {}) {
     }
 
     applyAgendaData(data);
+    savedData = data;
     currentAgendaId = id;
     setSaveStatus('saved');
     closeLoadModal();
@@ -1657,7 +1667,8 @@ async function downloadWord() {
       ? await apiFetch(`/image-proxy?url=${encodeURIComponent(tplUrl)}`)
       : await fetch(WORD_DEFAULT_TEMPLATE);
     if (!res.ok) throw new Error('Word 範本下載失敗');
-    const data = collectData();
+    // Full data: also the roles this template doesn't show, for their marks.
+    const data = collectSaveData();
     const values = buildWordData(data, club, {
       times: calcTimes(data.speeches), displayMember, formatDate, varietySession, pathwayLabel: speechPathwayLabel,
     });
@@ -1703,6 +1714,7 @@ function clubFieldDefaults(club) {
 }
 
 function applyDefaultState() {
+  savedData = {}; // a new agenda carries nothing over
   const today = new Date();
   const pad = (n) => String(n).padStart(2, '0');
   const fields = [

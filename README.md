@@ -21,7 +21,7 @@ EntrepreneurAgenda/
 │   ├── login/                # 登入 / 自行註冊 / Microsoft 登入與申請（支援 ?next= 回跳）
 │   ├── home/                 # 會務 Dashboard
 │   ├── agenda/               # 議程表產生器（公開網址是 /index，見 next.config.mjs）
-│   ├── roles/                # 角色安排（多場例會 × 角色矩陣，ROLE_GROUPS / META_FIELDS）
+│   ├── roles/                # 角色安排（多場例會 × 角色矩陣，角色來自 lib/meetingRoles.json）
 │   ├── social/               # 社群發文
 │   ├── member/               # 會員管理
 │   ├── club/                 # 分會管理（品牌、版型設定、社群帳號、分會 AI 金鑰）
@@ -242,28 +242,49 @@ EntrepreneurAgenda/
 
 - ✅ 在此頁排定角色 → 該場議程表**立即**顯示同一個人。
 - ✅ 在議程產生器改角色 → 回到此頁重新載入即同步。
-- ⚠️ 角色清單（`app/roles/page.js` 的 `ROLE_GROUPS`）是**從議程欄位推導**的。議程若新增角色欄位，記得同步加進 `ROLE_GROUPS`。
+- ✅ 議程產生器只編輯它的版型用得到的欄位，但存檔時會**保留它沒顯示的欄位**（`app/agenda/page.js` 的 `savedData`）——在此頁排了、版型卻不印的角色，或分會自訂角色，不會被議程產生器的存檔洗掉。
 
-### 全站共用同一份角色 schema——不適用的欄位鎖住，不是拿掉
+### 角色目錄（`lib/meetingRoles.json`）——所有輸出共用的一份角色清單
 
-`agendas.data` 的角色欄位是**所有版型共用的同一份 schema**：每個角色（`ROLE_GROUPS` 裡的一筆定義）在每個分會的資料裡都是同一個欄位名，某個版型不需要的角色，該分會的資料裡就是空字串／未填，版型的 `render()` 自然不會讀它、也就不會印出來。
+所有可能出現的角色（各版型角色的聯集）只定義在 `lib/meetingRoles.json` 一處，所有地方都從這裡讀：
 
-角色安排矩陣**永遠顯示 `ROLE_GROUPS` 全部角色**（不會因為版型不同而整列消失）；只有「目前分會的版型不適用」的角色列會被**鎖住**（`role.locked`，灰階、輸入框 `disabled`，不管有沒有寫入權限都鎖），跟「這場例會剛好沒有這個名額」（`slotNote`，可以直接輸入把名額補上）是兩種不同的視覺語言，不要混淆。
+| 用到的地方 | 用來做什麼 |
+|------|------|
+| `/roles` 角色安排（`roleGroups()`） | 矩陣的分組與角色列、欄標題欄位（`meta` 裡 `header: true` 的） |
+| Word 匯出（`lib/wordExport.js`） | 每個角色的 `{{標記}}`（`word` 欄位）、「可用的標記」說明、上傳檢查、`{{#所有角色}}` 迴圈 |
+| 後端（`api/index.py` 啟動時讀同一份 JSON；`vercel.json` 以 `includeFiles` 一起打包） | MCP 的 `update_agenda` 欄位、`assign_roles` / `get_roles` / Google Sheet 匯入的角色 id 與「哪些版型會印出」 |
 
-角色定義可加 `templates: string[]`，列出「哪些版型會用到這個角色」（不寫＝所有版型都用得到）：`buildRows()` 依 `activeTemplateKey()` 算出每個角色的 `locked` 旗標。目前有 `templates` 限制的角色：
+每個角色：`key`（`agendas.data` 欄位名）、`zh`／`en`、`group`（分組）、`templates`（**哪些內建議程版型會印出**，`null`＝全部）、`word`（Word 標記）。**新增角色只要在這裡加一筆**；若要某個網頁版型印出它，再到該版型的 `render()` 讀 `data[key]`。
 
-| 角色 | 適用版型 | 為什麼 |
+角色的值不分版型，一律存在 `agendas.data[key]`——分會換版型、或 Word 範本用到網頁版型不印的角色，資料都在。
+
+### 角色安排頁：版型不印的角色預設收起
+
+矩陣預設只顯示**目前分會議程版型會印出**的角色；其餘角色收起，工具列的「顯示其他角色（N）」打開即可編輯（不是鎖住——排了人一樣會存，Word 範本等其他輸出可以使用，列名以斜體灰字標示）。某個收起的角色只要在載入的場次裡**已經排了人**，就會自動顯示，避免資料藏在看不到的地方。這和「這場例會剛好沒有這個名額」（`slotNote`，可直接輸入把名額補上）是兩件不同的事。
+
+目前有 `templates` 限制的角色：
+
+| 角色 | 會印出的版型 | 為什麼 |
 |------|------|------|
-| `callingToOrder` | standard／entrepreneur／china | Chill Hi High 的「致歡迎詞 Opening Remarks」那列讀的是 `welcomeTME`，不再需要這格 |
+| `callingToOrder` | standard／entrepreneur／china | Chill Hi High 的「致歡迎詞 Opening Remarks」那列讀的是 `welcomeTME` |
 | `boardWriter`／`photographer` | chillhihigh | 只有 Chill Hi High 議程把板書、攝影列成獨立角色 |
 | `timerAssistant` | chillhihigh | Chill Hi High 的例會角色表另外排一位計時員幫手 |
-| `voteCounter` | china | CHINA 專屬的計票員（歸在「計時 / 記錄」組） |
+| `voteCounter` | china | CHINA 專屬的計票員 |
 | `varietyHost` | standard／entrepreneur／chillhihigh | CHINA 沒有多元單元 |
-| `wordOfTheDay`／`quizHost` | china | CHINA 專屬的每日一字、問答遊戲主持（歸在「單元主持」組） |
+| `wordOfTheDay`／`quizHost` | china | CHINA 專屬的每日一字、問答遊戲主持 |
 
-其餘角色（`receptionHost`、`welcomeTME`、`tme`、`timer`、`ahCounter`、`tableTopicsMaster`、`speeches[i].speaker`、`evaluators[i]`、`langEvaluator`、`generalEvaluator`、`evalEvaluators[i]`、`awardsPresenter`、`sharingFeedback`）沒有 `templates` 限制，5 個版型都共用。
+### 分會自訂角色（`clubs.settings.custom_roles`）
 
-### 角色清單（`ROLE_GROUPS`）
+分會可以在「版型」設定的「分會自訂角色」區自己新增角色（例如笑話大師、祈禱），**不用改程式**：
+
+- 存成 `clubs.settings.custom_roles = [{ id, zh, en }]`；`id` 新增時產生、之後不變，所以改名不會遺失已排的人。
+- 每場的值存在 `agendas.data.customRoles[id]`。
+- 角色安排頁多出「分會自訂角色」分組；Word 範本用 `{{角色中文名}}` 帶入，也會出現在 `{{#所有角色}}`。
+- 名稱不能和內建角色或 Word 標記同名（因為名稱就是 Word 標記），存檔時檢查。
+- MCP 的角色 id 是 `custom_<id>`（`get_roles` 會列出該分會有哪些）。
+- 網頁議程版型目前**不會**印出自訂角色；要印的話是之後「版型可設定流程順序」的工作。
+
+### 角色清單
 
 | 分組 | 角色（`agendas.data` 欄位） |
 |------|------|
@@ -273,6 +294,7 @@ EntrepreneurAgenda/
 | 指定演講 | `speeches[i].speaker`（動態，至少 3 列） |
 | 講評 | `evaluators[i]`（動態，至少 3 列）、`langEvaluator`、`generalEvaluator`、`evalEvaluators[i]`（動態，0～3 列） |
 | 結尾 | `awardsPresenter`、`sharingFeedback` |
+| 分會自訂角色 | `customRoles[id]`（依分會設定） |
 
 演講 / 講評的列數取**目前載入場次中的最大值**（最少 3 列）——CHINA 的 3 篇指定演講／3 位個別講評也是走這同一套 `speeches`/`evaluators` 陣列，沒有另外的資料結構。
 
@@ -288,15 +310,7 @@ CHINA 議程表右側原本每列都有一欄「下一場負責人」（`assigne
 
 欄標題的**場次編號**（`meetingNo`）、**例會主題**（`meetingTheme`）、**主題題目**（`themeQuestion`）都可直接編輯，走與角色**完全相同**的 draft / dirty / merge 流程，但刻意**不列入角色列**——因此不算進「已指派」計數（主題不是人），且不套用會員自動完成。
 
-`META_FIELDS` 也吃 `templates` 允許清單，但與角色列相反：**不適用的欄位直接不顯示**（欄標題塞不下一排灰掉的空欄位），由 `activeMetaFields()` 過濾。要再開放其他每場欄位，加一筆即可：
-
-```js
-const META_FIELDS = [
-  { key: 'meetingNo',     label: '場次編號', placeholder: '場次編號' },
-  { key: 'meetingTheme',  label: '例會主題', placeholder: '未設定主題' },
-  { key: 'themeQuestion', label: '主題題目', placeholder: '主題題目', templates: ['chillhihigh'] },
-];
-```
+它們是角色目錄 `meta` 裡標了 `header: true` 的欄位，同樣吃 `templates`，但與角色列相反：**不適用的欄位直接不顯示**（欄標題塞不下一排灰掉的空欄位），由 `activeMetaFields()` 過濾。要再開放其他每場欄位，在 `lib/meetingRoles.json` 的 `meta` 加一筆並標 `header: true`。
 
 ### 從 Google Sheet 匯入（`roles_sheet_url`）
 

@@ -1,0 +1,38 @@
+{
+  "_comment": "Every meeting role any agenda template or Word template may use — the one list behind the 角色 page, the agenda editor, the Word marks and the backend (api/index.py reads this file too). A role's value lives at agendas.data[key] whatever template the club uses; `templates` only says which built-in agenda templates print it (null = all), which is what the 角色 page shows by default. `word` is the role's Word mark ({{word}}). Speeches, evaluators and 講評員講評 are lists with their own structure and aren't listed here. Clubs add their own roles in clubs.settings.custom_roles. `meta` are per-meeting text fields; the `header` ones are edited in the 角色 page column header.",
+  "groups": [
+    { "key": "host", "label": "會議主持" },
+    { "key": "record", "label": "計時 / 記錄" },
+    { "key": "session", "label": "單元主持" },
+    { "key": "speech", "label": "指定演講" },
+    { "key": "eval", "label": "講評" },
+    { "key": "closing", "label": "結尾" },
+    { "key": "custom", "label": "分會自訂角色" }
+  ],
+  "roles": [
+    { "key": "receptionHost", "zh": "報到接待", "en": "Reception Host", "group": "host", "templates": null, "word": "接待" },
+    { "key": "callingToOrder", "zh": "宣布例會開始", "en": "Calling to Order", "group": "host", "templates": ["standard", "entrepreneur", "china"], "word": "宣布開會" },
+    { "key": "welcomeTME", "zh": "會長致歡迎詞", "en": "Welcome Guests & TME", "group": "host", "templates": null, "word": "會長致詞" },
+    { "key": "tme", "zh": "總主持人", "en": "Toastmaster of the Evening", "group": "host", "templates": null, "word": "總主持人" },
+    { "key": "timer", "zh": "計時員", "en": "Timer", "group": "record", "templates": null, "word": "計時員" },
+    { "key": "timerAssistant", "zh": "計時員幫手", "en": "Assistant Timer", "group": "record", "templates": ["chillhihigh"], "word": "計時員幫手" },
+    { "key": "ahCounter", "zh": "贅語記錄員", "en": "Ah-Counter", "group": "record", "templates": null, "word": "贅語記錄員" },
+    { "key": "boardWriter", "zh": "板書", "en": "Board Writer", "group": "record", "templates": ["chillhihigh"], "word": "板書" },
+    { "key": "photographer", "zh": "攝影", "en": "Photographer", "group": "record", "templates": ["chillhihigh"], "word": "攝影" },
+    { "key": "voteCounter", "zh": "計票員", "en": "Vote Counter", "group": "record", "templates": ["china"], "word": "計票員" },
+    { "key": "varietyHost", "zh": "多元單元主持人", "en": "Variety Session Host", "group": "session", "templates": ["standard", "entrepreneur", "chillhihigh"], "word": "多元單元主持人", "kind": "variety" },
+    { "key": "tableTopicsMaster", "zh": "即席問答主持人", "en": "Table Topics Master", "group": "session", "templates": null, "word": "即席主持人" },
+    { "key": "wordOfTheDay", "zh": "每日一字", "en": "Word of the Day", "group": "session", "templates": ["china"], "word": "每日一字" },
+    { "key": "quizHost", "zh": "問答遊戲主持", "en": "Quiz Session", "group": "session", "templates": ["china"], "word": "問答遊戲主持" },
+    { "key": "langEvaluator", "zh": "語言講評", "en": "Language Evaluator", "group": "eval", "templates": null, "word": "語言講評" },
+    { "key": "generalEvaluator", "zh": "總講評", "en": "General Evaluator", "group": "eval", "templates": null, "word": "總講評" },
+    { "key": "awardsPresenter", "zh": "贈感謝狀", "en": "Awards Presenter", "group": "closing", "templates": null, "word": "頒獎人" },
+    { "key": "sharingFeedback", "zh": "會後分享 & 來賓回饋", "en": "Sharing & Feedback", "group": "closing", "templates": null, "word": "分享回饋" }
+  ],
+  "meta": [
+    { "key": "meetingNo", "zh": "場次編號", "templates": null, "header": true, "placeholder": "場次編號", "word": "例會次數" },
+    { "key": "meetingTheme", "zh": "例會主題", "templates": null, "header": true, "placeholder": "未設定主題", "word": "例會主題" },
+    { "key": "themeQuestion", "zh": "主題題目", "templates": ["chillhihigh"], "header": true, "placeholder": "主題題目", "word": "主題題目" },
+    { "key": "tableTopicsQuestion", "zh": "即席問答題目", "templates": null, "word": "即席題目" }
+  ]
+}

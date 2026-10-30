@@ -148,6 +148,13 @@ table.club-list td { padding: 14px 16px; vertical-align: middle; }
 }
 .modal-field .check-label input { width: auto; padding: 0; }
 
+/* 分會自訂角色 */
+.custom-roles-hint { font-size: 12px; color: #64748b; margin: 0 0 8px; line-height: 1.6; }
+.custom-roles-hint code { background: #f1f5f9; border-radius: 4px; padding: 0 4px; }
+.custom-roles { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+.custom-role-row { display: grid; grid-template-columns: 1fr 1fr auto; gap: 6px; align-items: center; }
+.custom-roles-empty { font-size: 12px; color: #94a3b8; }
+
 /* Word 匯出範本 */
 .word-tpl-status { font-size: 13px; color: #334155; margin-bottom: 6px; }
 .word-tpl-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }

@@ -4,7 +4,8 @@ import { useEffect } from 'react';
 import { apiJson } from '@/lib/api';
 import { setAuth, clearAuth, applyRoleUI } from '@/lib/auth';
 import { AGENDA_TEMPLATES, TEMPLATE_OPTIONS, templateAssetDefaults } from '@/lib/agendaTemplates';
-import { WORD_TEMPLATE_FIELD, WORD_FIELDS, WORD_LOOPS, WORD_DEFAULT_TEMPLATE, checkWordTemplate } from '@/lib/wordExport';
+import { WORD_TEMPLATE_FIELD, WORD_FIELDS, WORD_LOOPS, WORD_DEFAULT_TEMPLATE, checkWordTemplate, wordKnownTags } from '@/lib/wordExport';
+import { CUSTOM_ROLES_FIELD, MEETING_ROLES, newCustomRoleId } from '@/lib/meetingRoles';
 import Sidebar from '@/components/Sidebar';
 import './club.css';
 import { withBase } from '@/lib/basePath';
@@ -21,6 +22,8 @@ let modalImgUrls = {};
 // brand-new club's images land under media/clubs/{newId}/ (and nothing is
 // uploaded if the user cancels).
 let pendingFiles = {};
+// The club's own roles while the modal is open: [{ id, zh, en }].
+let modalCustomRoles = [];
 // Which pane of the shared modal is open: 'basic' | 'template' | 'social'.
 // The footer's 儲存 button dispatches on it, because the social pane writes
 // through its own endpoints rather than the club PUT.
@@ -443,6 +446,14 @@ function fieldHtml(f) {
   if (f.type === 'textarea') {
     return `<div class="modal-field"><label>${f.label}</label><textarea rows="3" id="f_${f.key}"${ph}></textarea></div>`;
   }
+  if (f.type === 'roles') {
+    return `<div class="modal-field">
+      <p class="custom-roles-hint">角色安排頁會多出這些角色可以排人；Word 範本裡用 <code>{{角色名稱}}</code> 帶入。
+        改名不會影響已排的人。</p>
+      <div id="roles_${f.key}" class="custom-roles"></div>
+      <button type="button" class="btn-mini-c" onclick="window.__clubAddRole()">＋ 新增角色</button>
+    </div>`;
+  }
   if (f.type === 'word') {
     return `<div class="modal-field">
       <label>${f.label}</label>
@@ -486,9 +497,9 @@ function buildFieldsHtml(fields) {
   }
   return html;
 }
-// A template's own fields plus the club-level Word template upload.
+// A template's own fields plus the club-level ones (own roles, Word template).
 function templateFields(tk) {
-  return [...((AGENDA_TEMPLATES[tk] || {}).settings || []), WORD_TEMPLATE_FIELD];
+  return [...((AGENDA_TEMPLATES[tk] || {}).settings || []), CUSTOM_ROLES_FIELD, WORD_TEMPLATE_FIELD];
 }
 function renderTemplateFields(tk) {
   const fields = templateFields(tk);
@@ -510,6 +521,9 @@ function populateTemplateFields(c, tk) {
       setPreview(`prev_${f.key}`, modalImgUrls[f.key] || dflt[f.key] || null);
     } else if (f.type === 'word') {
       modalImgUrls[f.key] = stored || null;
+    } else if (f.type === 'roles') {
+      modalCustomRoles = (Array.isArray(stored) ? stored : []).map((r) => ({ id: r.id, zh: r.zh || '', en: r.en || '' }));
+      renderCustomRoles();
     } else if (f.type === 'checkbox') {
       const el = document.getElementById(`f_${f.key}`);
       if (el) el.checked = stored == null ? !!f.default : !!stored;
@@ -531,6 +545,56 @@ function onTemplateChange() {
   const c = editingId ? clubs.find((x) => x.id === editingId) : null;
   renderTemplateFields(tk);
   populateTemplateFields(c, tk);
+}
+
+// ---- Club's own roles (club-level, shown for every agenda template) ----
+function renderCustomRoles() {
+  const box = document.getElementById(`roles_${CUSTOM_ROLES_FIELD.key}`);
+  if (!box) return;
+  box.innerHTML = modalCustomRoles.length
+    ? modalCustomRoles.map((r, i) => `<div class="custom-role-row">
+        <input type="text" placeholder="中文名稱，例如 笑話大師" value="${escAttr(r.zh)}"
+               oninput="window.__clubEditRole(${i}, 'zh', this.value)">
+        <input type="text" placeholder="English (optional)" value="${escAttr(r.en)}"
+               oninput="window.__clubEditRole(${i}, 'en', this.value)">
+        <button type="button" class="btn-mini-c" onclick="window.__clubRemoveRole(${i})" title="刪除">✕</button>
+      </div>`).join('')
+    : '<div class="custom-roles-empty">尚未新增</div>';
+}
+
+function addCustomRole() {
+  modalCustomRoles.push({ id: newCustomRoleId(modalCustomRoles), zh: '', en: '' });
+  renderCustomRoles();
+  const inputs = document.querySelectorAll('.custom-role-row input');
+  if (inputs.length) inputs[inputs.length - 2].focus();
+}
+
+function editCustomRole(i, field, value) {
+  if (modalCustomRoles[i]) modalCustomRoles[i][field] = value;
+}
+
+function removeCustomRole(i) {
+  const r = modalCustomRoles[i];
+  if (r && r.zh.trim() && !confirm(`刪除「${r.zh.trim()}」？已排在這個角色的人不會再顯示。`)) return;
+  modalCustomRoles.splice(i, 1);
+  renderCustomRoles();
+}
+
+// A role's name is also its Word mark, so it must not repeat another role's
+// name or an existing mark.
+function customRolesProblem() {
+  const builtinNames = new Set(MEETING_ROLES.map((r) => r.zh));
+  const marks = wordKnownTags(null);
+  const seen = new Set();
+  for (const r of modalCustomRoles) {
+    const name = r.zh.trim();
+    if (!name) continue;
+    if (/[{}]/.test(name)) return `角色名稱不能包含大括號：「${name}」`;
+    if (builtinNames.has(name) || marks.has(name)) return `「${name}」和系統內建的角色或 Word 標記同名，請換個名稱`;
+    if (seen.has(name)) return `自訂角色「${name}」重複了`;
+    seen.add(name);
+  }
+  return '';
 }
 
 // ---- Word template (club-level, shown for every agenda template) ----
@@ -563,7 +627,8 @@ function setWordStatus(key, note) {
 async function uploadClubWord(input, key) {
   const file = input.files[0];
   if (!file) return;
-  const { errors, unknown } = await checkWordTemplate(await file.arrayBuffer());
+  const club = { settings: { custom_roles: modalCustomRoles } };
+  const { errors, unknown } = await checkWordTemplate(await file.arrayBuffer(), club);
   if (errors.length) {
     input.value = '';
     setWordStatus(key, `<span class="word-err">範本有錯，請修正後再上傳：<br>${errors.map(escAttr).join('<br>')}</span>`);
@@ -646,6 +711,10 @@ function buildClubPayload() {
     let val;
     if (f.type === 'image' || f.type === 'word') {
       val = modalImgUrls[f.key] ?? null;
+    } else if (f.type === 'roles') {
+      val = modalCustomRoles
+        .map((r) => ({ id: r.id, zh: r.zh.trim(), en: r.en.trim() }))
+        .filter((r) => r.zh);
     } else if (f.type === 'checkbox') {
       const el = document.getElementById(`f_${f.key}`);
       val = el ? el.checked : !!f.default;
@@ -666,6 +735,8 @@ async function apiSaveClub(method, id, payload) {
 
 async function saveClub() {
   if (!document.getElementById('fName').value.trim()) { alert('請填入分會名稱'); return; }
+  const roleProblem = customRolesProblem();
+  if (roleProblem) { alert(roleProblem); return; }
   const saveBtn = document.querySelector('.btn-modal-save');
   saveBtn.disabled = true;
   try {
@@ -710,6 +781,9 @@ export default function ClubPage() {
     window.__clubUploadImage = uploadClubImage;
     window.__clubUploadWord = uploadClubWord;
     window.__clubClearWord = clearClubWord;
+    window.__clubAddRole = addCustomRole;
+    window.__clubEditRole = editCustomRole;
+    window.__clubRemoveRole = removeCustomRole;
     window.__clubConnectMeta = connectMeta;
     window.__clubDisconnect = disconnectSocial;
     window.__clubPickPage = pickPage;
@@ -734,6 +808,9 @@ export default function ClubPage() {
       delete window.__clubOpenModal;
       delete window.__clubUploadWord;
       delete window.__clubClearWord;
+      delete window.__clubAddRole;
+      delete window.__clubEditRole;
+      delete window.__clubRemoveRole;
       delete window.__clubDelete;
       delete window.__clubUploadImage;
       delete window.__clubConnectMeta;

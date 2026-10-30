@@ -5096,31 +5096,29 @@ def _tool_publish_post(caller, args):
 # is given and leaves the rest of `data` alone, so whatever else the editor
 # stores — signals, time overrides, theme image — survives an MCP edit.
 
+# The role catalog shared with the frontend (lib/meetingRoles.json; bundled
+# with this function via vercel.json `includeFiles`): every meeting role and
+# per-meeting text field, and which agenda templates print each.
+with open(os.path.join(os.path.dirname(__file__), "..", "lib", "meetingRoles.json"), encoding="utf-8") as _f:
+    _ROLE_CATALOG = json.load(_f)
+_TEMPLATE_NAMES = {"standard": "標準版", "entrepreneur": "企業家", "chillhihigh": "Chill Hi High", "china": "CHINA"}
+
+
+def _catalog_desc(entry: dict) -> str:
+    tmpls = entry.get("templates")
+    if not tmpls:
+        return entry["zh"]
+    return f"{entry['zh']}（{'、'.join(_TEMPLATE_NAMES.get(t, t) for t in tmpls)} 版型的議程會印出）"
+
+
+# Free-text agenda fields update_agenda accepts: date / time / venue plus
+# every catalog role and meta field. (The variety host lives in varietySession.)
 _AGENDA_TEXT_FIELDS = {
-    "meetingDate":         "例會日期，YYYY-MM-DD",
-    "meetingNo":           "場次編號",
-    "meetingTheme":        "例會主題",
-    "themeQuestion":       "主題題目（Chill Hi High 版型）",
-    "timeRange":           "例會時間，例如 19:10 ~ 21:00",
-    "venueInfo":           "地點，可多行",
-    "receptionHost":       "報到接待",
-    "callingToOrder":      "宣布例會開始",
-    "welcomeTME":          "會長致歡迎詞",
-    "tme":                 "總主持人",
-    "timer":               "計時員",
-    "timerAssistant":      "計時員幫手（Chill Hi High 版型）",
-    "ahCounter":           "贅語記錄員",
-    "boardWriter":         "板書（Chill Hi High 版型）",
-    "photographer":        "攝影（Chill Hi High 版型）",
-    "voteCounter":         "計票員（China 版型）",
-    "tableTopicsMaster":   "即席問答主持人",
-    "tableTopicsQuestion": "即席問答題目",
-    "wordOfTheDay":        "每日一字（China 版型）",
-    "quizHost":            "問答遊戲主持（China 版型）",
-    "generalEvaluator":    "總講評",
-    "langEvaluator":       "語言講評",
-    "awardsPresenter":     "贈感謝狀",
-    "sharingFeedback":     "會後分享 & 來賓回饋",
+    "meetingDate": "例會日期，YYYY-MM-DD",
+    "timeRange":   "例會時間，例如 19:10 ~ 21:00",
+    "venueInfo":   "地點，可多行",
+    **{m["key"]: _catalog_desc(m) for m in _ROLE_CATALOG["meta"]},
+    **{r["key"]: _catalog_desc(r) for r in _ROLE_CATALOG["roles"] if r.get("kind") != "variety"},
 }
 _SPEECH_KEYS = ("speaker", "title", "duration", "speechLang",
                 "pathwayCode", "pathwayLevel", "pathwayProject")
@@ -5238,15 +5236,14 @@ _SHEET_INDEXED_ROWS = [
     (re.compile(r"^單元\s*(\d+)$"),       "speech{}_project",  False),
 ]
 _SHEET_BLANKS = {"na", "n/a", "-", "—", "–", "tbd", "待定", "未定", "?", "？"}
-# Roles only some templates have (ROLE_GROUPS / META_FIELDS `templates`). On
-# any other template the 角色 page locks the row, and the import skips it.
-_ROLE_TEMPLATES = {
-    "callingToOrder": {"standard", "entrepreneur", "china"},
-    "timerAssistant": {"chillhihigh"}, "boardWriter": {"chillhihigh"},
-    "photographer": {"chillhihigh"}, "voteCounter": {"china"},
-    "varietyHost": {"standard", "entrepreneur", "chillhihigh"},
-    "wordOfTheDay": {"china"}, "quizHost": {"china"},
-}
+# Roles only some agenda templates print (the catalog's `templates`). They're
+# still saved on any club — Word templates and other outputs may use them —
+# but import reports note that this club's agenda won't print them.
+_ROLE_TEMPLATES = {e["key"]: set(e["templates"])
+                   for e in _ROLE_CATALOG["roles"] + _ROLE_CATALOG["meta"] if e.get("templates")}
+# A club's own roles (clubs.settings.custom_roles) are `custom_<id>`, valued
+# at agendas.data.customRoles[id].
+_CUSTOM_RE = re.compile(r"^custom_([A-Za-z0-9]+)$")
 _SPEECH_SUBFIELDS = {"title": "title", "pwcode": "pathwayCode",
                      "pwlevel": "pathwayLevel", "project": "pathwayProject"}
 _SLOT_RE = re.compile(r"^(speech|evaluator|evalEvaluator)(\d+)(?:_(title|pwcode|pwlevel|project))?$")
@@ -5323,6 +5320,9 @@ def _role_get(data: dict, rid: str) -> str:
         return lst[idx] if idx < len(lst) else ""
     if rid == "varietyHost":
         return (data.get("varietySession") or {}).get("host", "")
+    c = _CUSTOM_RE.match(rid)
+    if c:
+        return (data.get("customRoles") or {}).get(c.group(1), "")
     return data.get(rid) or ""
 
 
@@ -5344,12 +5344,18 @@ def _role_set(data: dict, rid: str, value: str):
         if value:
             vs["enabled"] = True
         data["varietySession"] = vs
+    elif _CUSTOM_RE.match(rid):
+        data["customRoles"] = {**(data.get("customRoles") or {}), _CUSTOM_RE.match(rid).group(1): value}
     else:
         data[rid] = value
 
 
-def _role_label(rid: str) -> str:
-    """`tme` → 總主持人, `speech2_title` → 第 2 篇演講的講題 — for messages."""
+def _role_label(rid: str, customs: dict = None) -> str:
+    """`tme` → 總主持人, `speech2_title` → 第 2 篇演講的講題 — for messages.
+    `customs` ({id: name}) names the club's own roles."""
+    c = _CUSTOM_RE.match(rid)
+    if c:
+        return (customs or {}).get(c.group(1), "自訂角色")
     m = _SLOT_RE.match(rid)
     if m:
         noun = {"speech": "演講者", "evaluator": "個別講評員", "evalEvaluator": "講評員講評"}[m.group(1)]
@@ -5384,30 +5390,41 @@ def _club_role_context(club_id: int) -> dict:
         with conn.cursor() as cur:
             cur.execute("SELECT code FROM pathways")
             codes = {r[0].upper() for r in cur.fetchall()}
-            cur.execute("SELECT template_key FROM clubs WHERE id=%s", (club_id,))
-            tmpl = ((cur.fetchone() or [None])[0]) or "standard"
+            cur.execute("SELECT template_key, settings FROM clubs WHERE id=%s", (club_id,))
+            row = cur.fetchone() or (None, None)
+            tmpl = row[0] or "standard"
+            customs = _club_custom_roles(parse_jsonb(row[1]) if row[1] else {})
             cur.execute("SELECT u.name_en, u.name_zh, u.level FROM club_memberships m"
                         " JOIN users u ON u.username = m.username WHERE m.club_id=%s", (club_id,))
             roster = cur.fetchall()
-    return {"codes": codes, "template": tmpl, "roster": roster}
+    return {"codes": codes, "template": tmpl, "roster": roster, "customs": customs}
+
+
+def _club_custom_roles(settings: dict) -> dict:
+    """A club's own roles as {id: name}, in its order (blank names dropped)."""
+    out = {}
+    for r in (settings or {}).get("custom_roles") or []:
+        if isinstance(r, dict) and r.get("id") and str(r.get("zh") or "").strip():
+            out[str(r["id"])] = str(r["zh"]).strip()
+    return out
 
 
 def _apply_role_values(data: dict, values: dict, ctx: dict, overwrite: bool) -> dict:
     """
     Put {role id: value} onto one agenda's data, the way the 角色 page does:
-    roles the club's template lacks are skipped, person cells are resolved
-    against the roster, and — without `overwrite` — a cell already holding a
-    different value is left alone and reported. That last rule is the
+    person cells are resolved against the roster, and — without `overwrite` —
+    a cell already holding a different value is left alone and reported.
+    Roles the club's agenda template doesn't print are saved too (Word
+    templates may use them) and listed as such. That last rule is the
     distinction the page's import preview draws between filling a blank and
     undoing someone's edit.
     """
     lang = "zh" if data.get("lang") == "zh" else "en"
-    out = {"applied": 0, "kept": [], "unmatched": [], "locked": []}
+    out = {"applied": 0, "kept": [], "unmatched": [], "offTemplate": []}
     for rid, raw in values.items():
         allow = _ROLE_TEMPLATES.get(rid)
-        if allow and ctx["template"] not in allow:
-            out["locked"].append(_role_label(rid))
-            continue
+        if allow and ctx["template"] not in allow and raw:
+            out["offTemplate"].append(_role_label(rid))
         value = str(raw or "")
         if value and _sheet_is_person(rid):
             value, hit = _resolve_member(value, ctx["roster"], lang)
@@ -5417,7 +5434,7 @@ def _apply_role_values(data: dict, values: dict, ctx: dict, overwrite: bool) -> 
         if before == value:
             continue
         if before and not overwrite:
-            out["kept"].append(f"{_role_label(rid)}：保留「{before}」（新的是「{value}」）")
+            out["kept"].append(f"{_role_label(rid, ctx.get('customs'))}：保留「{before}」（新的是「{value}」）")
             continue
         _role_set(data, rid, value)
         out["applied"] += 1
@@ -5431,8 +5448,9 @@ def _role_report(r: dict, what: str, overwrite_hint: str) -> list:
                      + "\n  ".join(r["kept"]))
     if r["unmatched"]:
         lines.append("不在會員名單、照原文填入：" + "、".join(dict.fromkeys(r["unmatched"])))
-    if r["locked"]:
-        lines.append("這個分會的版型沒有、略過：" + "、".join(dict.fromkeys(r["locked"])))
+    if r["offTemplate"]:
+        lines.append("已存入，但這個分會的議程版型不會印出（Word 範本等仍可使用）："
+                     + "、".join(dict.fromkeys(r["offTemplate"])))
     return lines
 
 
@@ -5793,7 +5811,8 @@ def _tool_generate_post_image(caller, args):
 # ------------------------------------------------------------------ roles (角色安排)
 # The 角色安排 page is a view over agendas.data — there is no separate role
 # store — so these tools read and write the same fields, with the same role
-# ids (app/roles/page.js ROLE_GROUPS) and the same rules as the page.
+# ids (lib/meetingRoles.json, plus custom_<id> for a club's own roles) and the
+# same rules as the page.
 
 _ROLE_IDS_DOC = (
     "角色 id：receptionHost 報到接待、callingToOrder 宣布例會開始、welcomeTME 會長致歡迎詞、"
@@ -5803,22 +5822,17 @@ _ROLE_IDS_DOC = (
     "langEvaluator 語言講評、generalEvaluator 總講評、awardsPresenter 贈感謝狀、"
     "sharingFeedback 會後分享、meetingNo 場次、meetingTheme 主題、themeQuestion 主題題目；"
     "第 N 篇演講：speechN（演講者）、speechN_title、speechN_pwcode、speechN_pwlevel、"
-    "speechN_project；evaluatorN 第 N 位個別講評員；evalEvaluatorN 講評員講評")
+    "speechN_project；evaluatorN 第 N 位個別講評員；evalEvaluatorN 講評員講評；"
+    "分會自訂角色為 custom_<id>（get_roles 的 customRoles 列出該分會有哪些）")
 
-# Rows of the matrix, in the page's order, for get_roles' summary.
-_ROLE_ROWS = ("receptionHost", "callingToOrder", "welcomeTME", "tme", "timer",
-              "timerAssistant", "ahCounter", "boardWriter", "photographer", "voteCounter",
-              "varietyHost", "tableTopicsMaster", "wordOfTheDay", "quizHost",
-              "langEvaluator", "generalEvaluator", "awardsPresenter", "sharingFeedback")
+# Rows of the matrix, in the catalog's order, for get_roles' summary.
+_ROLE_ROWS = tuple(r["key"] for r in _ROLE_CATALOG["roles"])
 
 
-def _meeting_roles(data: dict, template: str) -> dict:
+def _meeting_roles(data: dict, customs: dict) -> dict:
     """Every filled role on one agenda as {role id: value}, slots expanded."""
     out = {}
-    for rid in _ROLE_ROWS:
-        allow = _ROLE_TEMPLATES.get(rid)
-        if allow and template not in allow:
-            continue
+    for rid in _ROLE_ROWS + tuple(f"custom_{i}" for i in customs):
         v = _role_get(data, rid)
         if v:
             out[rid] = v
@@ -5844,8 +5858,10 @@ def _tool_get_roles(caller, args):
     limit = min(int(args.get("limit") or 8), 30)
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT template_key FROM clubs WHERE id=%s", (cid,))
-            tmpl = ((cur.fetchone() or [None])[0]) or "standard"
+            cur.execute("SELECT template_key, settings FROM clubs WHERE id=%s", (cid,))
+            row = cur.fetchone() or (None, None)
+            tmpl = row[0] or "standard"
+            customs = _club_custom_roles(parse_jsonb(row[1]) if row[1] else {})
             cur.execute(
                 "SELECT id, meeting_date, data FROM agendas WHERE club_id=%s"
                 " AND meeting_date >= %s AND (%s::date IS NULL OR meeting_date <= %s)"
@@ -5856,13 +5872,14 @@ def _tool_get_roles(caller, args):
     lines = []
     for aid, date, raw in rows:
         data = parse_jsonb(raw)
-        roles = _meeting_roles(data, tmpl)
+        roles = _meeting_roles(data, customs)
         meetings.append({"agendaId": aid, "date": str(date), "meetingNo": data.get("meetingNo", ""),
                          "theme": data.get("meetingTheme", ""), "roles": roles})
-        filled = "、".join(f"{_role_label(k)}={v}" for k, v in roles.items()) or "（尚未安排）"
+        filled = "、".join(f"{_role_label(k, customs)}={v}" for k, v in roles.items()) or "（尚未安排）"
         lines.append(f"{date} 第{data.get('meetingNo', '')}次（agendaId={aid}）：{filled}")
     return _tool_text("\n".join(lines) or f"{date_from} 之後沒有議程",
-                      {"clubId": cid, "template": tmpl, "meetings": meetings})
+                      {"clubId": cid, "template": tmpl, "meetings": meetings,
+                       "customRoles": [{"id": f"custom_{i}", "name": n} for i, n in customs.items()]})
 
 
 def _tool_assign_roles(caller, args):
@@ -5873,15 +5890,17 @@ def _tool_assign_roles(caller, args):
         return _tool_text("roles 要是 {角色 id: 人名} 的物件", is_error=True)
     # Role cells and the matrix's column-header fields only — a date or venue
     # changed here would skip update_agenda's handling of them.
-    bad = [k for k in roles if not (k in _ROLE_ROWS or k in _SHEET_META_ROWS.values()
-                                    or _SLOT_RE.match(k))]
-    if bad:
-        return _tool_text("不認得的角色 id：" + "、".join(bad) + "。" + _ROLE_IDS_DOC, is_error=True)
     with get_db() as conn:
         with conn.cursor() as cur:
             data, cid = _agenda_for(cur, aid, caller)
+    ctx = _club_role_context(cid)
+    bad = [k for k in roles if not (k in _ROLE_ROWS or k in _SHEET_META_ROWS.values()
+                                    or _SLOT_RE.match(k)
+                                    or (_CUSTOM_RE.match(k) and _CUSTOM_RE.match(k).group(1) in ctx["customs"]))]
+    if bad:
+        return _tool_text("不認得的角色 id：" + "、".join(bad) + "。" + _ROLE_IDS_DOC, is_error=True)
     report = _apply_role_values(data, {k: ("" if v is None else str(v)) for k, v in roles.items()},
-                                _club_role_context(cid), overwrite=args.get("overwrite", True))
+                                ctx, overwrite=args.get("overwrite", True))
     if report["applied"]:
         with get_db() as conn:
             with conn.cursor() as cur:
@@ -5890,7 +5909,7 @@ def _tool_assign_roles(caller, args):
     return _tool_text("\n".join([_agenda_summary(aid, data)]
                                 + _role_report(report, "已安排", "overwrite")),
                       {"agendaId": aid, "applied": report["applied"],
-                       "unmatched": report["unmatched"], "skipped": report["locked"]})
+                       "unmatched": report["unmatched"], "offTemplate": report["offTemplate"]})
 
 
 def _tool_import_roles_sheet(caller, args):
