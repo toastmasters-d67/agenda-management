@@ -103,7 +103,26 @@ const EXAMPLES = [
   '幫下一場例會建一則宣傳貼文，用 AI 產生文案和圖片，我確認後再發到 Facebook',
 ];
 
-function Copyable({ text, toast }) {
+// A prompt to paste into any AI assistant so it connects itself (agents that
+// can run commands) or walks the user through their app's connector settings.
+// Commands match CLIENTS above; whoami is the MCP server's own tool.
+const setupPrompt = (endpoint) => `請幫我把「分會管理系統」的 MCP 伺服器接到你這裡。
+
+- 伺服器網址：${endpoint}
+- 類型：遠端 MCP 伺服器（Streamable HTTP）
+- 驗證：OAuth。連接時會開到該網站的授權頁面，由我登入並勾選權限；不需要 API 金鑰、Bearer token 或自訂 header。
+
+如果你可以在我的電腦上執行指令：
+- Claude Code：執行 claude mcp add --transport http --scope user club-mgmt ${endpoint}
+  然後請我輸入 /mcp，選 club-mgmt，再選 Authenticate 完成授權。
+- Codex CLI：執行 codex mcp add club-mgmt --url ${endpoint}
+  再執行 codex mcp login club-mgmt，瀏覽器會開到授權頁面。
+
+如果你不能執行指令（例如 claude.ai、Claude Desktop、ChatGPT），請依照我目前用的這個 App，一步一步告訴我要在設定的哪裡新增「自訂連接器」或「Custom MCP Server」、貼上上面的網址、驗證方式選 OAuth。不確定我用的是哪個 App 或方案時，先問我。
+
+接好並授權後，請呼叫 whoami 工具確認連線成功，告訴我我的帳號、角色，以及我可以請你做哪些事。`;
+
+function Copyable({ text, toast, block }) {
   async function copy() {
     try {
       await navigator.clipboard.writeText(text);
@@ -113,8 +132,8 @@ function Copyable({ text, toast }) {
     }
   }
   return (
-    <div className="mcp-copy">
-      <code>{text}</code>
+    <div className={`mcp-copy${block ? ' mcp-copy-block' : ''}`}>
+      {block ? <pre>{text}</pre> : <code>{text}</code>}
       <button className="btn-primary" onClick={copy}>複製</button>
     </div>
   );
@@ -126,7 +145,13 @@ function SetupSection({ endpoint, toast }) {
   return (
     <section className="mcp-card">
       <h3 className="mcp-title">串接步驟</h3>
-      <p className="mcp-hint">伺服器網址（每種 AI 助理都用這一個）：</p>
+      <p className="mcp-hint">
+        <strong>最快的方法</strong>：複製下面這段，貼給你的 AI 助理。Claude Code、Codex CLI 這類能執行指令的會自己接好；
+        claude.ai、ChatGPT 等 App 會一步步帶你設定。也可以參考下方各家的手動步驟。
+      </p>
+      <Copyable text={setupPrompt(endpoint)} toast={toast} block />
+
+      <p className="mcp-hint mcp-hint-gap">伺服器網址（每種 AI 助理都用這一個）：</p>
       <Copyable text={endpoint} toast={toast} />
 
       <div className="mcp-tabs" role="tablist">

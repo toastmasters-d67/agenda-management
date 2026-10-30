@@ -32,6 +32,14 @@ body {
   background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px 8px 8px 12px;
 }
 .mcp-copy code { flex: 1; min-width: 0; font-size: 13px; color: #0f172a; word-break: break-all; }
+/* The setup prompt: several lines, so it wraps and keeps its line breaks */
+.mcp-copy-block { align-items: flex-start; }
+.mcp-copy-block pre {
+  flex: 1; min-width: 0; margin: 0; max-height: 220px; overflow: auto;
+  font-family: inherit; font-size: 12.5px; line-height: 1.7; color: #0f172a;
+  white-space: pre-wrap; word-break: break-word;
+}
+.mcp-hint-gap { margin-top: 16px; }
 
 /* ---------------------------------------------------------------- tabs + steps */
 .mcp-tabs { display: flex; gap: 6px; margin: 18px 0 4px; border-bottom: 1px solid #e2e8f0; }
