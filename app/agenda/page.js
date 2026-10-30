@@ -27,6 +27,7 @@ import {
 } from '@/lib/pathways';
 import './agenda.css';
 import { withBase } from '@/lib/basePath';
+import { WORD_DEFAULT_TEMPLATE, buildWordData, fillWordTemplate, wordTemplateErrors } from '@/lib/wordExport';
 import SearchableSelect from '@/components/SearchableSelect';
 
 // ================================================================
@@ -822,13 +823,19 @@ function esc(str) {
     .replace(/>/g, '&gt;');
 }
 
-function buildSpeechAgendaLine(sp) {
-  let line = esc(sp.title) || 'TBD';
+// "PM - L2 - Project name" for a speech's Pathways fields ('' when unset).
+function speechPathwayLabel(sp) {
   const parts = [];
   if (sp.pathwayCode) parts.push(sp.pathwayCode);
   if (sp.pathwayLevel) parts.push(sp.pathwayLevel);
   if (sp.pathwayProject) parts.push(projectName(sp.pathwayProject, lang));
-  if (parts.length) line += `\n [${parts.join(' - ')}]`;
+  return parts.join(' - ');
+}
+
+function buildSpeechAgendaLine(sp) {
+  let line = esc(sp.title) || 'TBD';
+  const pw = speechPathwayLabel(sp);
+  if (pw) line += `\n [${pw}]`;
   return line;
 }
 
@@ -1637,6 +1644,34 @@ async function downloadPDF() {
   const element = document.getElementById('agendaPages');
   const restore = await prepareCapture(element, { forPdf: true });
   window.html2pdf().set(pdfOptions()).from(element).save().then(restore);
+}
+
+// Editable Word copy: the club's uploaded template, or the bundled default,
+// filled with this meeting (lib/wordExport.js).
+async function downloadWord() {
+  showLoading();
+  try {
+    const club = getActiveClub();
+    const tplUrl = club && club.settings && club.settings.word_template_url;
+    const res = tplUrl
+      ? await apiFetch(`/image-proxy?url=${encodeURIComponent(tplUrl)}`)
+      : await fetch(WORD_DEFAULT_TEMPLATE);
+    if (!res.ok) throw new Error('Word 範本下載失敗');
+    const data = collectData();
+    const values = buildWordData(data, club, {
+      times: calcTimes(data.speeches), displayMember, formatDate, varietySession, pathwayLabel: speechPathwayLabel,
+    });
+    const blob = await fillWordTemplate(await res.arrayBuffer(), values);
+    const link = document.createElement('a');
+    link.download = `${exportBaseName()}.docx`;
+    link.href = URL.createObjectURL(blob);
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 10000);
+  } catch (e) {
+    alert(`Word 匯出失敗：${wordTemplateErrors(e).join('；')}`);
+  } finally {
+    hideLoading();
+  }
 }
 
 async function downloadJPG() {
@@ -2780,6 +2815,7 @@ export default function AgendaIndexPage() {
                   </button>
                   <button className="settings-menu-item" onClick={downloadPDF}>下載 PDF</button>
                   <button className="settings-menu-item" onClick={downloadJPG}>下載 JPG</button>
+                  <button className="settings-menu-item" onClick={downloadWord}>下載 Word（可編輯）</button>
                 </div>
               </div>
               <div className="toolbar-sep"></div>

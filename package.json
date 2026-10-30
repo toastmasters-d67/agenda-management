@@ -10,8 +10,10 @@
   },
   "dependencies": {
     "@sparticuz/chromium": "^153.0.0",
+    "docxtemplater": "^3.71.1",
     "jose": "^5.9.6",
     "next": "^15.5.24",
+    "pizzip": "^3.3.0",
     "puppeteer-core": "^25.12.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0"
@@ -19,5 +21,8 @@
   "overrides": {
     "postcss": "^8.5.28",
     "nanoid": "^3.3.19"
+  },
+  "devDependencies": {
+    "docx": "^9.15.0"
   }
 }
