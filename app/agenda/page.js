@@ -953,6 +953,8 @@ function updatePreview() {
   // Page 1 stays in #agendaPreview; reset class each render so nothing stacks.
   preview.innerHTML = pages[0];
   preview.className = `agenda-page tmpl-${tmpl.key} ${langCls}`;
+  // Templates that size their content to the sheet do it now that it's laid out.
+  if (tmpl.fit) tmpl.fit(preview);
 
   // Rebuild any extra pages as siblings inside #agendaPages.
   pagesWrap.querySelectorAll('.extra-page').forEach((el) => el.remove());

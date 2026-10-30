@@ -1092,16 +1092,22 @@ details[open] summary::before { content: "▼ "; }
 .tmpl-standard .s-link { color: #1a4fa0; text-decoration: underline; overflow-wrap: anywhere; }
 .tmpl-standard .s-mission .s-label { color: #000; }
 
-.tmpl-standard .s-agenda { flex: 1; min-width: 0; padding-left: 5mm; display: flex; flex-direction: column; }
-.tmpl-standard .s-group { margin-bottom: 3.2mm; }
-.tmpl-standard .s-row { display: flex; align-items: baseline; gap: 2mm; line-height: 1.32; }
-.tmpl-standard .s-time { width: 11mm; flex-shrink: 0; font-weight: 700; }
+.tmpl-standard .s-agenda {
+  flex: 1; min-width: 0; padding-left: 5mm; display: flex; flex-direction: column;
+  /* --s-fit (type) and --s-gap (spacing) are set by the template's fit()
+     so the agenda fills the sheet */
+  font-size: calc(8.5pt * var(--s-fit, 1));
+}
+.tmpl-standard .s-group { margin-bottom: calc(1.1em * var(--s-gap, 1)); }
+.tmpl-standard .s-row { display: flex; align-items: baseline; gap: 0.7em; line-height: calc(1.32 + 0.14 * (var(--s-gap, 1) - 1)); }
+.tmpl-standard .s-time { width: 3.8em; flex-shrink: 0; font-weight: 700; }
 .tmpl-standard .s-item { flex: 1; min-width: 0; }
 .tmpl-standard .s-head .s-item { font-weight: 700; }
-.tmpl-standard .s-sub { padding-left: 2.5mm; }
+.tmpl-standard .s-wide { white-space: nowrap; } /* e.g. the intermission line: no taker, use the full row */
+.tmpl-standard .s-sub { padding-left: 0.9em; }
 .tmpl-standard .s-dur { color: #444; }
-.tmpl-standard .s-who { width: 34mm; flex-shrink: 0; text-align: left; }
-.tmpl-standard .s-footer { margin-top: auto; padding-top: 3mm; text-align: center; font-weight: 700; color: #772432; }
+.tmpl-standard .s-who { width: 11.5em; flex-shrink: 0; text-align: left; }
+.tmpl-standard .s-footer { margin-top: auto; padding-top: 1em; text-align: center; font-weight: 700; color: #772432; }
 
 /* ============================================================
    TEMPLATE: CHILL HI HIGH  (.tmpl-chillhihigh)
