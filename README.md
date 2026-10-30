@@ -193,14 +193,14 @@ EntrepreneurAgenda/
 > 「版型設定」modal 欄位、預設值/預設圖、分會版型下拉（`TEMPLATE_OPTIONS`）皆會**自動跟上**——欄位只需在 manifest 宣告一次。
 
 > 內建版型：
-> - `standard`（標準版：中性單欄，新分會預設）
+> - `standard`（標準版：仿 TI 官方酒紅色議程，新分會預設；幹部名單在「版型」設定填，每年 7/1 交接後更新）
 > - `entrepreneur`（企業家）
 > - `chillhihigh`（雙語幽默版／Chill Hi High：中英混用、內嵌綠/黃/紅時間牌欄、個別講評員依演講語言標示、底部 Meeting Roles 說明；**兩頁**：議程頁 + 宣傳後頁）
 > - `china`（CHINA Toastmasters／CHANGE IN ACTION：固定流程表 `CHINA_SCHEDULE`、全英文、附「下一場」角色欄；**兩頁**）
 
 #### 版型命名
 
-- `standard`（標準版）是中性的單欄版型，新分會的預設值；未設定或不認得的 `template_key` 一律退回它，所以不會帶到任何分會的真實資訊。它原本叫 `compact`，migration `0022` 改名。
+- `standard`（標準版）仿國際演講會官方酒紅色 A4 議程範本：上方酒紅橫幅（Logo、分會名稱與編號、主題），左欄列日期、幹部名單、例會資訊與分會使命，右欄是議程。它是新分會的預設值；未設定或不認得的 `template_key` 一律退回它，所以不會帶到任何分會的真實資訊。它原本叫 `compact`，migration `0022` 改名。
 - 原本另有一個凍結的舊 `standard`（企業家版的副本），最後一個使用它的分會（Entrepreneur Toastmasters）改用 `entrepreneur` 後，連同它的 CSS 一起移除。
 - `entrepreneur` 是企業家分會自己的版型，版面要改就改這裡，樣式在 `.tmpl-entrepreneur`。
 
