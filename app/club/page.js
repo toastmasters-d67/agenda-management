@@ -4,6 +4,7 @@ import { useEffect } from 'react';
 import { apiJson } from '@/lib/api';
 import { setAuth, clearAuth, applyRoleUI } from '@/lib/auth';
 import { AGENDA_TEMPLATES, TEMPLATE_OPTIONS, templateAssetDefaults } from '@/lib/agendaTemplates';
+import { WORD_TEMPLATE_FIELD, WORD_FIELDS, WORD_LOOPS, WORD_DEFAULT_TEMPLATE, checkWordTemplate } from '@/lib/wordExport';
 import Sidebar from '@/components/Sidebar';
 import './club.css';
 import { withBase } from '@/lib/basePath';
@@ -442,6 +443,19 @@ function fieldHtml(f) {
   if (f.type === 'textarea') {
     return `<div class="modal-field"><label>${f.label}</label><textarea rows="3" id="f_${f.key}"${ph}></textarea></div>`;
   }
+  if (f.type === 'word') {
+    return `<div class="modal-field">
+      <label>${f.label}</label>
+      <div class="word-tpl-status" id="stat_${f.key}"></div>
+      <div class="word-tpl-actions">
+        <input type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onchange="window.__clubUploadWord(this, '${f.key}')">
+        <button type="button" class="btn-mini-c" onclick="window.__clubClearWord('${f.key}')">改回預設範本</button>
+        <a class="btn-mini-c" href="${WORD_DEFAULT_TEMPLATE}" download="議程預設範本.docx">下載預設範本</a>
+      </div>
+      <div class="word-tpl-msg" id="msg_${f.key}"></div>
+      ${wordHelpHtml()}
+    </div>`;
+  }
   if (f.type === 'color') {
     return `<div class="modal-field"><label>${f.label}</label><input type="color" id="f_${f.key}" class="color-input"></div>`;
   }
@@ -472,8 +486,12 @@ function buildFieldsHtml(fields) {
   }
   return html;
 }
+// A template's own fields plus the club-level Word template upload.
+function templateFields(tk) {
+  return [...((AGENDA_TEMPLATES[tk] || {}).settings || []), WORD_TEMPLATE_FIELD];
+}
 function renderTemplateFields(tk) {
-  const fields = (AGENDA_TEMPLATES[tk] || {}).settings || [];
+  const fields = templateFields(tk);
   document.getElementById('tmplFieldsBasic').innerHTML =
     buildFieldsHtml(fields.filter((f) => f.group === 'basic'));
   document.getElementById('tmplFieldsTemplate').innerHTML =
@@ -482,7 +500,7 @@ function renderTemplateFields(tk) {
 // Fill generated inputs/previews from the club record (blank for a new club).
 function populateTemplateFields(c, tk) {
   const set = (c && c.settings) || {};
-  const fields = (AGENDA_TEMPLATES[tk] || {}).settings || [];
+  const fields = templateFields(tk);
   const dflt = templateAssetDefaults(tk);
   modalImgUrls = {};
   fields.forEach((f) => {
@@ -490,6 +508,8 @@ function populateTemplateFields(c, tk) {
     if (f.type === 'image') {
       modalImgUrls[f.key] = stored || null;
       setPreview(`prev_${f.key}`, modalImgUrls[f.key] || dflt[f.key] || null);
+    } else if (f.type === 'word') {
+      modalImgUrls[f.key] = stored || null;
     } else if (f.type === 'checkbox') {
       const el = document.getElementById(`f_${f.key}`);
       if (el) el.checked = stored == null ? !!f.default : !!stored;
@@ -503,6 +523,7 @@ function populateTemplateFields(c, tk) {
   });
   document.querySelectorAll('#modal input[type=file]').forEach((el) => { el.value = ''; });
   pendingFiles = {};
+  fields.filter((f) => f.type === 'word').forEach((f) => setWordStatus(f.key));
 }
 // Re-render fields when the template select changes (keeps saved values).
 function onTemplateChange() {
@@ -510,6 +531,55 @@ function onTemplateChange() {
   const c = editingId ? clubs.find((x) => x.id === editingId) : null;
   renderTemplateFields(tk);
   populateTemplateFields(c, tk);
+}
+
+// ---- Word template (club-level, shown for every agenda template) ----
+// Reference of the marks a template may use, from lib/wordExport.js.
+function wordHelpHtml() {
+  const rows = (list) => list.map(([k, d]) => `<li><code>{{${k}}}</code>${d ? ` ${d}` : ''}</li>`).join('');
+  const groups = Object.entries(WORD_FIELDS)
+    .map(([g, list]) => `<div class="word-help-group"><strong>${g}</strong><ul>${rows(list)}</ul></div>`).join('');
+  const loops = Object.entries(WORD_LOOPS).map(([name, { desc, fields }]) => `<div class="word-help-group">
+      <strong>{{#${name}}} … {{/${name}}}</strong>：${desc}<ul>${rows(fields)}</ul></div>`).join('');
+  return `<details class="word-help">
+    <summary>可用的標記（點開查看）</summary>
+    <p>在 Word 裡輸入 <code>{{標記}}</code>，下載時會換成當次例會的資料。重複的項目（演講、講評員…）把開頭
+      <code>{{#演講}}</code> 與結尾 <code>{{/演講}}</code> 放在表格的同一列，該列會依人數重複。建議從「下載預設範本」開始改。</p>
+    ${groups}${loops}
+  </details>`;
+}
+
+function setWordStatus(key, note) {
+  const st = document.getElementById(`stat_${key}`);
+  if (!st) return;
+  if (pendingFiles[key]) st.textContent = `已選擇「${pendingFiles[key].name}」，儲存時上傳`;
+  else st.textContent = modalImgUrls[key] ? '使用分會自訂範本' : '使用系統預設範本';
+  const msg = document.getElementById(`msg_${key}`);
+  if (msg) msg.innerHTML = note || '';
+}
+
+// Check a chosen .docx before staging it: a broken template is refused,
+// unknown marks only warn (they'd print blank).
+async function uploadClubWord(input, key) {
+  const file = input.files[0];
+  if (!file) return;
+  const { errors, unknown } = await checkWordTemplate(await file.arrayBuffer());
+  if (errors.length) {
+    input.value = '';
+    setWordStatus(key, `<span class="word-err">範本有錯，請修正後再上傳：<br>${errors.map(escAttr).join('<br>')}</span>`);
+    return;
+  }
+  pendingFiles[key] = file;
+  setWordStatus(key, unknown.length
+    ? `<span class="word-warn">這些標記系統不認得，下載時會是空白：${unknown.map((u) => `{{${escAttr(u)}}}`).join('、')}</span>`
+    : '<span class="word-ok">範本檢查通過</span>');
+}
+
+function clearClubWord(key) {
+  delete pendingFiles[key];
+  modalImgUrls[key] = null;
+  document.querySelectorAll(`#modal input[type=file][onchange*="${key}"]`).forEach((el) => { el.value = ''; });
+  setWordStatus(key, '儲存後改用系統預設範本');
 }
 
 // Stage a chosen image locally (preview only). Actual R2 upload happens in
@@ -523,14 +593,23 @@ function uploadClubImage(input, field) {
   if (st) st.textContent = '已選擇，儲存時上傳';
 }
 
+// Some systems hand over a .docx with an empty MIME type; R2 should still
+// serve it as Word.
+function fileType(file) {
+  if (file.type) return file.type;
+  return /\.docx$/i.test(file.name)
+    ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    : 'application/octet-stream';
+}
+
 // Upload one staged file to R2 under the given club, return its public URL.
 async function uploadStagedImage(file, clubId) {
   const { uploadUrl, publicUrl } = await apiJson('/upload/presign', {
     method: 'POST',
-    body: { filename: file.name, content_type: file.type, club_id: clubId },
+    body: { filename: file.name, content_type: fileType(file), club_id: clubId },
   });
   const uploadRes = await fetch(uploadUrl, {
-    method: 'PUT', headers: { 'Content-Type': file.type }, body: file,
+    method: 'PUT', headers: { 'Content-Type': fileType(file) }, body: file,
   });
   if (!uploadRes.ok) throw new Error('上傳至雲端失敗');
   return publicUrl;
@@ -549,7 +628,7 @@ function buildClubPayload() {
   const nn = (id) => { const el = document.getElementById(id); const v = el ? el.value.trim() : ''; return v || null; };
   const c = editingId ? clubs.find((x) => x.id === editingId) : null;
   const tk = document.getElementById('fTemplate').value || 'standard';
-  const fields = (AGENDA_TEMPLATES[tk] || {}).settings || [];
+  const fields = templateFields(tk);
   const payload = {
     name: document.getElementById('fName').value.trim(),
     name_zh: nn('fNameZh'),
@@ -565,7 +644,7 @@ function buildClubPayload() {
   };
   fields.forEach((f) => {
     let val;
-    if (f.type === 'image') {
+    if (f.type === 'image' || f.type === 'word') {
       val = modalImgUrls[f.key] ?? null;
     } else if (f.type === 'checkbox') {
       const el = document.getElementById(`f_${f.key}`);
@@ -629,6 +708,8 @@ export default function ClubPage() {
     window.__clubOpenModal = openModal;
     window.__clubDelete = deleteClub;
     window.__clubUploadImage = uploadClubImage;
+    window.__clubUploadWord = uploadClubWord;
+    window.__clubClearWord = clearClubWord;
     window.__clubConnectMeta = connectMeta;
     window.__clubDisconnect = disconnectSocial;
     window.__clubPickPage = pickPage;
@@ -651,6 +732,8 @@ export default function ClubPage() {
 
     return () => {
       delete window.__clubOpenModal;
+      delete window.__clubUploadWord;
+      delete window.__clubClearWord;
       delete window.__clubDelete;
       delete window.__clubUploadImage;
       delete window.__clubConnectMeta;
