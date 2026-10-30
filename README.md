@@ -870,7 +870,7 @@ https://<你的網域>/api/mcp
 | `create_agenda` | `agendas:write` | 建立議程。時間地點沿用該分會上一份議程（再退到分會設定）；同一天已有議程時拒絕並回傳既有 id。`import_roles: true` 從角色試算表帶入 |
 | `update_agenda` | `agendas:write` | 只改有給的欄位；`speeches`／`evaluators` 依位置合併（`null` 表示該位置不變），刪減篇數用 `speech_count`／`evaluator_count`。`import_roles` 只補空白的角色，`overwrite_roles` 才覆蓋 |
 | `delete_agenda` | `agendas:write` | 刪除議程，與 `DELETE /api/agendas/{id}` 同規則（分會管理員以上、只能刪自己分會）。綁定這場的貼文保留、改為未綁定（FK `ON DELETE SET NULL`），回覆會列出是哪幾則 |
-| `export_agenda` | `posts:read` | 議程輸出 PDF／JPG（每頁一張），回傳 R2 公開連結。見下方「議程輸出」 |
+| `export_agenda` | `posts:read` | 議程輸出 PDF／JPG（每頁一張）／可編輯的 Word（docx），回傳 R2 公開連結。見下方「議程輸出」 |
 | `set_agenda_theme_image` | `agendas:write` | 設定（或 `clear` 移除）議程的主題圖 `themeImgUrl`，圖片來源同 `add_post_image`。只有 `standard`、`entrepreneur` 版型會顯示主題圖，其他版型直接拒絕 |
 | `generate_agenda_theme_image` | `ai:generate` | 用平台 OpenAI 生成主題圖並套用；沒給 prompt 時依例會主題產生。版型不顯示主題圖時**先拒絕、不花錢** |
 | `get_roles` | `posts:read` | 角色安排表：分會接下來（或指定範圍）每場已安排的角色 |
@@ -922,8 +922,8 @@ https://<你的網域>/api/mcp
 
 議程表是在瀏覽器裡畫的（各分會版型、列高平均、html2canvas），網頁的「下載 JPG／PDF」是截那個畫面。伺服器端不另寫一套 renderer，而是**用無頭 Chromium 開同一個 `/agenda` 頁面，請頁面做與按鈕完全相同的截圖**：
 
-1. MCP 工具（Python）檢查權限，產生 R2 的 presigned PUT 網址（PDF 一個、JPG 最多 4 頁），再簽一把**5 分鐘的登入 token**（呼叫者本人）。
-2. 呼叫 Next 的 `POST /svc/agenda-export`（`app/svc/agenda-export/route.js`，Node runtime）。它驗 token（`JWT_SECRET`）、用 `@sparticuz/chromium` + `puppeteer-core` 以這個身分開 `/agenda?id=…`，等 `window.__agendaExport.ready`，呼叫頁面上的 `jpg()`／`pdf()`（與下載按鈕共用 `captureJPGs`／`capturePDF`）。
+1. MCP 工具（Python）檢查權限，產生 R2 的 presigned PUT 網址（PDF 一個、Word 一個、JPG 最多 4 頁），再簽一把**5 分鐘的登入 token**（呼叫者本人）。
+2. 呼叫 Next 的 `POST /svc/agenda-export`（`app/svc/agenda-export/route.js`，Node runtime）。它驗 token（`JWT_SECRET`）、用 `@sparticuz/chromium` + `puppeteer-core` 以這個身分開 `/agenda?id=…`，等 `window.__agendaExport.ready`，呼叫頁面上的 `jpg()`／`pdf()`／`docx()`（與下載按鈕共用 `captureJPGs`／`capturePDF`／`buildWordBlob`；Word 一樣先用分會上傳的 Word 範本，沒有才用預設範本）。
 3. 檔案直接 PUT 到 R2，不經過兩邊 function 的回應大小上限；工具回傳公開連結（路徑含亂數，拿到連結的人都能開）。
 
 注意：

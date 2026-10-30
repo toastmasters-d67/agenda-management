@@ -100,6 +100,7 @@ const EXAMPLES = [
   '幫 10/20 那場建議程，主題「我的英雄」，從角色試算表帶入角色',
   '把 10/20 的總主持人改成高莉雅，第 2 篇演講者改成 Bob Lin',
   '給我 10/20 議程的 PDF',
+  '給我 10/20 議程的 Word 檔，我要自己改版面',
   '幫下一場例會建一則宣傳貼文，用 AI 產生文案和圖片，我確認後再發到 Facebook',
 ];
 
@@ -311,7 +312,7 @@ export default function McpPage() {
         <div className="content mcp-content">
           <section className="mcp-card mcp-intro">
             <p>
-              把 Claude 或 ChatGPT 連到這個系統後，就能直接用對話查例會、建議程、安排角色、下載議程 PDF、寫社群貼文。
+              把 Claude 或 ChatGPT 連到這個系統後，就能直接用對話查例會、建議程、安排角色、下載議程 PDF 或 Word、寫社群貼文。
               它們透過 <strong>MCP</strong>（Model Context Protocol）操作系統，用的是你的帳號與權限，
               你可以控制給它哪些權限，也能隨時撤銷。
             </p>

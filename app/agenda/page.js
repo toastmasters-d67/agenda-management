@@ -1658,21 +1658,44 @@ async function downloadPDF() {
 
 // Editable Word copy: the club's uploaded template, or the bundled default,
 // filled with this meeting (lib/wordExport.js).
+// Shared by the 下載 Word button and the server-side export (MCP).
+async function buildWordBlob() {
+  const club = getActiveClub();
+  const tplUrl = club && club.settings && club.settings.word_template_url;
+  const res = tplUrl
+    ? await apiFetch(`/image-proxy?url=${encodeURIComponent(tplUrl)}`)
+    : await fetch(WORD_DEFAULT_TEMPLATE);
+  if (!res.ok) throw new Error('Word 範本下載失敗');
+  // Full data: also the roles this template doesn't show, for their marks.
+  const data = collectSaveData();
+  const values = buildWordData(data, club, {
+    times: calcTimes(data.speeches), displayMember, formatDate, varietySession, pathwayLabel: speechPathwayLabel,
+  });
+  return fillWordTemplate(await res.arrayBuffer(), values);
+}
+
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
+/** The .docx as a data URL, for app/svc/agenda-export (like jpg / pdf). */
+async function captureWord() {
+  try {
+    return await blobToDataUrl(await buildWordBlob());
+  } catch (e) {
+    throw new Error(`Word 匯出失敗：${wordTemplateErrors(e).join('；')}`);
+  }
+}
+
 async function downloadWord() {
   showLoading();
   try {
-    const club = getActiveClub();
-    const tplUrl = club && club.settings && club.settings.word_template_url;
-    const res = tplUrl
-      ? await apiFetch(`/image-proxy?url=${encodeURIComponent(tplUrl)}`)
-      : await fetch(WORD_DEFAULT_TEMPLATE);
-    if (!res.ok) throw new Error('Word 範本下載失敗');
-    // Full data: also the roles this template doesn't show, for their marks.
-    const data = collectSaveData();
-    const values = buildWordData(data, club, {
-      times: calcTimes(data.speeches), displayMember, formatDate, varietySession, pathwayLabel: speechPathwayLabel,
-    });
-    const blob = await fillWordTemplate(await res.arrayBuffer(), values);
+    const blob = await buildWordBlob();
     const link = document.createElement('a');
     link.download = `${exportBaseName()}.docx`;
     link.href = URL.createObjectURL(blob);
@@ -2182,6 +2205,7 @@ export default function AgendaIndexPage() {
           }).then(() => waitForImages(document.getElementById('agendaPages'))),
           jpg: captureJPGs,
           pdf: capturePDF,
+          docx: captureWord,
         };
       } finally {
         hideLoading();

@@ -5596,9 +5596,9 @@ def _tool_export_agenda(caller, args):
     import urllib.error
     import urllib.request
     aid = int(args["agenda_id"])
-    formats = [f for f in (args.get("formats") or ["pdf", "jpg"]) if f in ("pdf", "jpg")]
+    formats = [f for f in (args.get("formats") or ["pdf", "jpg"]) if f in ("pdf", "jpg", "docx")]
     if not formats:
-        return _tool_text("formats 要包含 pdf 或 jpg", is_error=True)
+        return _tool_text("formats 要包含 pdf、jpg 或 docx", is_error=True)
     with get_db() as conn:
         with conn.cursor() as cur:
             data, cid = _agenda_for(cur, aid, caller)
@@ -5614,11 +5614,13 @@ def _tool_export_agenda(caller, args):
             "put_object", Params={"Bucket": R2_BUCKET_NAME, "Key": key, "ContentType": ctype},
             ExpiresIn=300)
 
-    keys = {"pdf": f"{base}.pdf",
+    keys = {"pdf": f"{base}.pdf", "docx": f"{base}.docx",
             "jpg": [f"{base}_p{i + 1}.jpg" for i in range(_EXPORT_MAX_PAGES)]}
     uploads = {}
     if "pdf" in formats:
         uploads["pdf"] = presign(keys["pdf"], "application/pdf")
+    if "docx" in formats:
+        uploads["docx"] = presign(keys["docx"], "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
     if "jpg" in formats:
         uploads["jpg"] = [presign(k, "image/jpeg") for k in keys["jpg"]]
 
@@ -5652,7 +5654,10 @@ def _tool_export_agenda(caller, args):
     for i in range(int(out.get("jpgPages") or 0)):
         files.append({"format": "jpg", "page": i + 1,
                       "url": f"{R2_PUBLIC_URL}/{keys['jpg'][i]}"})
-    lines = [f"{f['format'].upper()}{'（第 %d 頁）' % f['page'] if 'page' in f else ''}：{f['url']}"
+    if out.get("docx"):
+        files.append({"format": "docx", "url": f"{R2_PUBLIC_URL}/{keys['docx']}"})
+    names = {"pdf": "PDF", "jpg": "JPG", "docx": "Word（可編輯）"}
+    lines = [f"{names[f['format']]}{'（第 %d 頁）' % f['page'] if 'page' in f else ''}：{f['url']}"
              for f in files]
     return _tool_text("議程檔案（任何拿到連結的人都能開啟）：\n" + "\n".join(lines),
                       {"agendaId": aid, "files": files})
@@ -6577,13 +6582,14 @@ MCP_TOOLS = [
         "handler": _tool_delete_agenda,
     },
     {
-        "name": "export_agenda", "scope": "posts:read", "title": "下載議程 PDF／JPG",
-        "description": "把議程輸出成 PDF 和／或 JPG（與網頁「下載」按鈕相同的檔案），回傳下載連結。"
-                       "多頁版型的 JPG 每頁一張。約需 10～30 秒。連結是公開的，拿到的人都能開。",
+        "name": "export_agenda", "scope": "posts:read", "title": "下載議程 PDF／JPG／Word",
+        "description": "把議程輸出成 PDF、JPG 和／或可編輯的 Word（docx），與網頁「下載」按鈕相同的檔案，"
+                       "回傳下載連結。多頁版型的 JPG 每頁一張。Word 用分會上傳的 Word 範本（沒有就用系統預設範本），"
+                       "適合要下載後自己再改版面的人。約需 10～30 秒。連結是公開的，拿到的人都能開。",
         "inputSchema": {"type": "object", "properties": {
             "agenda_id": {"type": "integer"},
-            "formats": {"type": "array", "items": {"type": "string", "enum": ["pdf", "jpg"]},
-                        "description": "預設兩種都要"},
+            "formats": {"type": "array", "items": {"type": "string", "enum": ["pdf", "jpg", "docx"]},
+                        "description": "預設 pdf 與 jpg；要可編輯的 Word 檔請加 docx"},
         }, "required": ["agenda_id"], "additionalProperties": False},
         "annotations": {"readOnlyHint": True, "openWorldHint": False},
         "handler": _tool_export_agenda,
