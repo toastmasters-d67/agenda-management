@@ -6021,11 +6021,18 @@ _CLUB_SETTINGS = {
     "officerTeam": "幹部名單（每行：職稱|Lead|Deputy）",
     "upcomingEvents": "近期活動（每行：日期|活動）",
     "roles_sheet_url": "角色表 Google Sheet 網址（需含 #gid=）",
+    # standard template (lib/agendaTemplates.js `standard.settings`)
+    "website": "分會網站（標準版）", "theme_color": "主色，例如 #772432（標準版）",
+    "officer_president": "會長（標準版左欄）", "officer_vpe": "教育副會長（標準版左欄）",
+    "officer_vpm": "會員副會長（標準版左欄）", "officer_vppr": "公關副會長（標準版左欄）",
+    "officer_secretary": "秘書（標準版左欄）", "officer_treasurer": "財務長（標準版左欄）",
+    "officer_saa": "事務長（標準版左欄）",
 }
 _CLUB_IMAGE_SETTINGS = {
     "ig_qr_url": "Instagram QR", "threads_qr_url": "Threads QR",
     "evoting_qr_url": "E-Voting QR", "membership_qr_url": "入會登記 QR",
     "page2_hero_url": "第二頁 圖1（我們是誰）", "page2_img2_url": "第二頁 圖2（招生／入會流程）",
+    "banner_url": "橫幅背景圖（標準版）",
 }
 _TEMPLATE_KEYS = ("standard", "entrepreneur", "chillhihigh", "china")
 
@@ -6687,7 +6694,7 @@ MCP_TOOLS = [
         "name": "assign_roles", "scope": "agendas:write", "title": "安排角色",
         "description": "為一場例會安排角色，例如 {\"tme\": \"高莉雅\", \"speech1\": \"Bob Lin\"}。"
                        "人名會比對會員名單，自動改成名單上的寫法；給空字串表示清空。"
-                       "版型沒有的角色會略過。" + _ROLE_IDS_DOC,
+                       "分會議程版型不會印出的角色一樣會存（Word 範本等可用），回覆會註明。" + _ROLE_IDS_DOC,
         "inputSchema": {"type": "object", "properties": {
             "agenda_id": {"type": "integer"},
             "roles": {"type": "object", "additionalProperties": {"type": ["string", "null"]},
