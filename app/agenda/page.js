@@ -317,9 +317,9 @@ function updateSignal(cat, key, value) {
 }
 
 // Bundled fallbacks used when a club has no custom logo/QR uploaded. Sourced
-// from the standard template's assetDefaults (lib/agendaTemplates.js) so the
-// default image paths live in one place.
-const _stdAssets = templateAssetDefaults('standard');
+// from the entrepreneur template's assetDefaults (lib/agendaTemplates.js) so
+// the default image paths live in one place.
+const _stdAssets = templateAssetDefaults('entrepreneur');
 const DEFAULT_IMAGES = {
   logo: _stdAssets.logo_url,
   fbQr: _stdAssets.fb_qr_url,
@@ -928,7 +928,7 @@ function updatePreview() {
   if (!preview || !pagesWrap) return;
   const club = getActiveClub();
   applyClubImages(club);
-  const tmpl = AGENDA_TEMPLATES[club && club.template_key] || AGENDA_TEMPLATES.compact;
+  const tmpl = AGENDA_TEMPLATES[club && club.template_key] || AGENDA_TEMPLATES.standard;
   applyTemplateFields(tmpl.key);
   ensureNextMeetingRoles(tmpl.key === 'china' ? club : null, data.meetingDate);
 
@@ -1652,13 +1652,13 @@ async function downloadJPG() {
 // RESET & INIT
 // ================================================================
 // Time/venue defaults: club's own setting → its template's fieldDefaults →
-// the compact template's fieldDefaults (last-resort, neutral — never another
+// the standard template's fieldDefaults (last-resort, neutral — never another
 // club's real info). All defaults live in lib/agendaTemplates.js, so nothing
 // is hard-coded here.
 function clubFieldDefaults(club) {
   const set = (club && club.settings) || {};
-  const fd = templateFieldDefaults(club ? club.template_key : 'compact');
-  const std = templateFieldDefaults('compact');
+  const fd = templateFieldDefaults(club ? club.template_key : 'standard');
+  const std = templateFieldDefaults('standard');
   return {
     timeRange: set.timeRange || fd.timeRange || std.timeRange || '',
     venue: set.venue || fd.venue || std.venue || '',
@@ -1935,13 +1935,13 @@ function onAgendaClubChange(v) {
   const newClubId = v ? parseInt(v) : null;
   const oldClub = getActiveClub();
   const newClub = newClubId ? (allClubs || []).find((c) => c.id === newClubId) : null;
-  const oldKey = oldClub ? (oldClub.template_key || 'compact') : null;
-  const newKey = newClub ? (newClub.template_key || 'compact') : null;
+  const oldKey = oldClub ? (oldClub.template_key || 'standard') : null;
+  const newKey = newClub ? (newClub.template_key || 'standard') : null;
 
   if (oldKey && newKey && oldKey !== newKey) {
     pendingClubSwitch = { newClubId };
-    const oldLabel = (AGENDA_TEMPLATES[oldKey] || AGENDA_TEMPLATES.compact).label;
-    const newLabel = (AGENDA_TEMPLATES[newKey] || AGENDA_TEMPLATES.compact).label;
+    const oldLabel = (AGENDA_TEMPLATES[oldKey] || AGENDA_TEMPLATES.standard).label;
+    const newLabel = (AGENDA_TEMPLATES[newKey] || AGENDA_TEMPLATES.standard).label;
     const body = document.getElementById('clubTemplateSwitchBody');
     if (body) {
       body.innerHTML = `
@@ -2213,7 +2213,7 @@ export default function AgendaIndexPage() {
                   <label>會議日期</label>
                   <input type="date" id="meetingDate" />
                 </div>
-                <div className="form-row" data-tmpl="standard compact entrepreneur china" style={{ display: 'none' }}>
+                <div className="form-row" data-tmpl="standard entrepreneur china" style={{ display: 'none' }}>
                   <label>會議編號 Meeting No.</label>
                   <input type="number" id="meetingNo" defaultValue={258} />
                 </div>
@@ -2221,7 +2221,7 @@ export default function AgendaIndexPage() {
                   <label>會議主題 Meeting Theme</label>
                   <input type="text" id="meetingTheme" placeholder="-Urban Legend-" />
                 </div>
-                <div className="form-row" data-tmpl="standard compact entrepreneur chillhihigh" style={{ display: 'none' }}>
+                <div className="form-row" data-tmpl="standard entrepreneur chillhihigh" style={{ display: 'none' }}>
                   <label>時間段 Time Range</label>
                   <input type="text" id="timeRange" placeholder="19:10 ~ 21:00" />
                 </div>
@@ -2232,7 +2232,7 @@ export default function AgendaIndexPage() {
               </div>
             </details>
 
-            <details data-tmpl="standard compact entrepreneur chillhihigh" style={{ display: 'none' }}>
+            <details data-tmpl="standard entrepreneur chillhihigh" style={{ display: 'none' }}>
               <summary>⏱ 時間設定 Time Settings</summary>
               <div className="form-section">
                 <div className="time-override-row">
@@ -2428,7 +2428,7 @@ export default function AgendaIndexPage() {
                   <button className="btn-time-reset" onClick={() => resetDurationOverride('sharingMins')} title="還原自動">⟳</button>
                 </div>
 
-                <div data-tmpl="standard compact entrepreneur" style={{ display: 'none' }}>
+                <div data-tmpl="standard entrepreneur" style={{ display: 'none' }}>
                   <hr style={{ margin: '6px 0', borderColor: '#ddd' }} />
                   <p className="time-override-hint">
                     <strong>講評區各列時長</strong>（議程表上直接顯示的字樣，可填區間）
@@ -2467,14 +2467,14 @@ export default function AgendaIndexPage() {
               </div>
             </details>
 
-            <details open data-tmpl="standard compact entrepreneur chillhihigh china" style={{ display: 'none' }}>
+            <details open data-tmpl="standard entrepreneur chillhihigh china" style={{ display: 'none' }}>
               <summary>角色分配</summary>
               <div className="form-section">
                 <div className="form-row">
                   <label>Reception Host <span className="time-hint">18:50</span></label>
                   <input type="text" id="receptionHost" placeholder="Name, Title" className="member-ac" />
                 </div>
-                <div className="form-row" data-tmpl="standard compact entrepreneur china" style={{ display: 'none' }}>
+                <div className="form-row" data-tmpl="standard entrepreneur china" style={{ display: 'none' }}>
                   <label>Calling Meeting to Order <span className="time-hint">1'</span></label>
                   <input type="text" id="callingToOrder" placeholder="Name, Title" className="member-ac" />
                 </div>
@@ -2497,7 +2497,7 @@ export default function AgendaIndexPage() {
               </div>
             </details>
 
-            <details data-tmpl="standard compact entrepreneur chillhihigh" style={{ display: 'none' }}>
+            <details data-tmpl="standard entrepreneur chillhihigh" style={{ display: 'none' }}>
               <summary>多元單元 Variety Session</summary>
               <div className="form-section">
                 <div className="form-row toggle-row">
@@ -2522,7 +2522,7 @@ export default function AgendaIndexPage() {
               </div>
             </details>
 
-            <details open data-tmpl="standard compact entrepreneur chillhihigh china" style={{ display: 'none' }}>
+            <details open data-tmpl="standard entrepreneur chillhihigh china" style={{ display: 'none' }}>
               <summary>指定演講 Prepared Speeches</summary>
               <div className="form-section">
                 <div id="speechesList"></div>
@@ -2530,7 +2530,7 @@ export default function AgendaIndexPage() {
               </div>
             </details>
 
-            <details open data-tmpl="standard compact entrepreneur chillhihigh china" style={{ display: 'none' }}>
+            <details open data-tmpl="standard entrepreneur chillhihigh china" style={{ display: 'none' }}>
               <summary>即席問答 Table Topics</summary>
               <div className="form-section">
                 <div className="form-row">
@@ -2540,7 +2540,7 @@ export default function AgendaIndexPage() {
               </div>
             </details>
 
-            <details open data-tmpl="standard compact entrepreneur chillhihigh china" style={{ display: 'none' }}>
+            <details open data-tmpl="standard entrepreneur chillhihigh china" style={{ display: 'none' }}>
               <summary>講評環節 Evaluation</summary>
               <div className="form-section">
                 <div className="form-row">
@@ -2560,7 +2560,7 @@ export default function AgendaIndexPage() {
               </div>
             </details>
 
-            <details open data-tmpl="standard compact entrepreneur chillhihigh china" style={{ display: 'none' }}>
+            <details open data-tmpl="standard entrepreneur chillhihigh china" style={{ display: 'none' }}>
               <summary>結束環節 Closing</summary>
               <div className="form-section">
                 <div className="form-row">

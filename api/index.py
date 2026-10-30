@@ -1023,7 +1023,7 @@ def _club_row_to_dict(r):
         "logo_url": r[7],
         "fb_qr_url": r[8],
         "line_qr_url": r[9],
-        "template_key": r[10] or "compact",
+        "template_key": r[10] or "standard",
         "settings": r[11] or {},
     }
 
@@ -1058,7 +1058,7 @@ def create_club(req: ClubRequest, user: dict = Depends(require_system_admin)):
                         req.name.strip(), req.name_zh, req.name_en, req.charter_no,
                         req.founded_date, req.fee,
                         req.logo_url, req.fb_qr_url, req.line_qr_url,
-                        req.template_key or "compact", settings_json,
+                        req.template_key or "standard", settings_json,
                     ),
                 )
                 new_id = cur.fetchone()[0]
@@ -5241,10 +5241,10 @@ _SHEET_BLANKS = {"na", "n/a", "-", "—", "–", "tbd", "待定", "未定", "?",
 # Roles only some templates have (ROLE_GROUPS / META_FIELDS `templates`). On
 # any other template the 角色 page locks the row, and the import skips it.
 _ROLE_TEMPLATES = {
-    "callingToOrder": {"standard", "compact", "entrepreneur", "china"},
+    "callingToOrder": {"standard", "entrepreneur", "china"},
     "timerAssistant": {"chillhihigh"}, "boardWriter": {"chillhihigh"},
     "photographer": {"chillhihigh"}, "voteCounter": {"china"},
-    "varietyHost": {"standard", "compact", "entrepreneur", "chillhihigh"},
+    "varietyHost": {"standard", "entrepreneur", "chillhihigh"},
     "wordOfTheDay": {"china"}, "quizHost": {"china"},
 }
 _SPEECH_SUBFIELDS = {"title": "title", "pwcode": "pathwayCode",
@@ -5385,7 +5385,7 @@ def _club_role_context(club_id: int) -> dict:
             cur.execute("SELECT code FROM pathways")
             codes = {r[0].upper() for r in cur.fetchall()}
             cur.execute("SELECT template_key FROM clubs WHERE id=%s", (club_id,))
-            tmpl = ((cur.fetchone() or [None])[0]) or "compact"
+            tmpl = ((cur.fetchone() or [None])[0]) or "standard"
             cur.execute("SELECT u.name_en, u.name_zh, u.level FROM club_memberships m"
                         " JOIN users u ON u.username = m.username WHERE m.club_id=%s", (club_id,))
             roster = cur.fetchall()
@@ -5845,7 +5845,7 @@ def _tool_get_roles(caller, args):
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT template_key FROM clubs WHERE id=%s", (cid,))
-            tmpl = ((cur.fetchone() or [None])[0]) or "compact"
+            tmpl = ((cur.fetchone() or [None])[0]) or "standard"
             cur.execute(
                 "SELECT id, meeting_date, data FROM agendas WHERE club_id=%s"
                 " AND meeting_date >= %s AND (%s::date IS NULL OR meeting_date <= %s)"
@@ -5989,7 +5989,7 @@ def _tool_list_members(caller, args):
 _CLUB_COLUMNS = {
     "name": "分會名稱（必填、不可重複）", "name_zh": "中文名稱", "name_en": "英文名稱",
     "charter_no": "章程編號 / Club No.", "founded_date": "成立日", "fee": "入場費",
-    "template_key": "議程版型：standard、compact、chillhihigh、china、entrepreneur",
+    "template_key": "議程版型：standard、entrepreneur、chillhihigh、china",
 }
 _CLUB_IMAGE_COLUMNS = {"logo_url": "Logo", "fb_qr_url": "Facebook QR", "line_qr_url": "LINE QR"}
 _CLUB_SETTINGS = {
@@ -6008,7 +6008,7 @@ _CLUB_IMAGE_SETTINGS = {
     "evoting_qr_url": "E-Voting QR", "membership_qr_url": "入會登記 QR",
     "page2_hero_url": "第二頁 圖1（我們是誰）", "page2_img2_url": "第二頁 圖2（招生／入會流程）",
 }
-_TEMPLATE_KEYS = ("standard", "compact", "chillhihigh", "china", "entrepreneur")
+_TEMPLATE_KEYS = ("standard", "entrepreneur", "chillhihigh", "china")
 
 
 def _system_admin_only(caller: dict):
@@ -6096,7 +6096,7 @@ def _tool_create_club(caller, args):
             with conn.cursor() as cur:
                 cur.execute("INSERT INTO clubs (name, template_key, settings)"
                             " VALUES (%s, %s, '{}'::jsonb) RETURNING id",
-                            (cols.pop("name"), cols.pop("template_key", None) or "compact"))
+                            (cols.pop("name"), cols.pop("template_key", None) or "standard"))
                 cid = cur.fetchone()[0]
                 _club_write(cur, cid, cols, sets)
                 c = _club_view(cur, cid)
@@ -6161,7 +6161,7 @@ def _tool_set_club_image(caller, args):
 # The per-meeting picture beside the header — `themeImgUrl` in agendas.data,
 # set by the editor's 主題圖片 upload. Only these templates draw it; on any
 # other a picture would be stored and never seen (and, generated, paid for).
-_THEME_IMG_TEMPLATES = {"standard", "entrepreneur"}
+_THEME_IMG_TEMPLATES = {"entrepreneur"}
 
 
 def _theme_target(caller, agenda_id: int):
@@ -6171,7 +6171,7 @@ def _theme_target(caller, agenda_id: int):
         with conn.cursor() as cur:
             data, cid = _agenda_for(cur, agenda_id, caller)
             cur.execute("SELECT template_key FROM clubs WHERE id=%s", (cid,))
-            tmpl = ((cur.fetchone() or [None])[0]) or "compact"
+            tmpl = ((cur.fetchone() or [None])[0]) or "standard"
     if tmpl not in _THEME_IMG_TEMPLATES:
         raise HTTPException(status_code=400,
                             detail=f"這個分會的版型（{tmpl}）沒有每場的主題圖，只有 "

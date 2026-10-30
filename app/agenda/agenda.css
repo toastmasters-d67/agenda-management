@@ -584,8 +584,8 @@ details[open] summary::before { content: "▼ "; }
 /* ============================================================
    AGENDA DOCUMENT — 所有版型共用的紙張外框
    ------------------------------------------------------------
-   只有真正跨版型共用的東西留在這裡。標準版／企業家版的版面樣式
-   已經拆成下面兩個 .tmpl-* 命名空間，各自獨立。
+   只有真正跨版型共用的東西留在這裡，各版型的版面樣式都在自己的
+   .tmpl-* 命名空間。
    ============================================================ */
 .agenda-page {
   background: white;
@@ -601,260 +601,16 @@ details[open] summary::before { content: "▼ "; }
   flex-direction: column;
 }
 
-/* 時間規則的紅黃綠色塊 — 標準版／企業家版的右側面板與 CHINA 第二頁
+/* 時間規則的紅黃綠色塊 — 企業家版的右側面板與 CHINA 第二頁
    的 Time Control 表格共用，所以保持全域，不收進命名空間。 */
 .tc-g { background: #5cb85c; color: white; font-weight: bold; }
 .tc-y { background: #f0ad4e; color: white; font-weight: bold; }
 .tc-r { background: #d9534f; color: white; font-weight: bold; }
 
 /* ============================================================
-   TEMPLATE: STANDARD  (.tmpl-standard)
-   ------------------------------------------------------------
-   凍結版：只服務 template_key='standard' 的舊分會記錄，讓它們維持
-   原樣。要改企業家分會的版面請改下面的 .tmpl-entrepreneur，不要動
-   這一段——兩段是刻意分開的完整副本，改這裡不會影響企業家版。
-   ============================================================ */
-/* ---- HEADER (3-column grid) ---- */
-.tmpl-standard .doc-header {
-  display: grid;
-  grid-template-columns: 26mm 1fr 38mm;
-  grid-template-rows: auto auto;
-  column-gap: 2mm;
-  row-gap: 0.5mm;
-  padding-bottom: 2mm;
-  border-bottom: 1.5pt solid #000;
-  margin-bottom: 1.5mm;
-}
-
-.tmpl-standard .hg-logo {
-  grid-column: 1; grid-row: 1;
-  display: flex; align-items: center; justify-content: center;
-}
-.tmpl-standard .hg-names {
-  grid-column: 2; grid-row: 1;
-  text-align: center;
-  display: flex; flex-direction: column; justify-content: center;
-}
-.tmpl-standard .hg-img {
-  grid-column: 3; grid-row: 1 / span 2;
-  overflow: hidden;
-}
-.tmpl-standard .hg-meta-left {
-  grid-column: 1; grid-row: 2;
-  font-size: 7pt; line-height: 1.5;
-}
-.tmpl-standard .hg-meta-right {
-  grid-column: 2; grid-row: 2;
-  font-size: 7pt; line-height: 1.6;
-  display: grid;
-  grid-template-columns: 1.6em 1fr;
-  column-gap: 2px;
-  align-items: start;
-}
-.tmpl-standard .hmr-icon { text-align: center; }
-.tmpl-standard .hmr-text { }
-
-/* Logo */
-.tmpl-standard .hg-logo-img { width: 100%; max-width: 22mm; height: auto; display: block; }
-.tmpl-standard .hg-logo-ph {
-  width: 22mm; height: 22mm;
-  display: flex; align-items: center; justify-content: center;
-}
-.tmpl-standard .logo-ring {
-  width: 20mm; height: 20mm; border-radius: 50%;
-  border: 2.5pt solid #00458b;
-  background: #00458b;
-  display: flex; align-items: center; justify-content: center;
-}
-.tmpl-standard .logo-ring span {
-  color: white; font-size: 7pt; font-weight: bold;
-  text-align: center; letter-spacing: 0.5px;
-}
-
-/* Club names */
-.tmpl-standard .club-name-zh {
-  font-size: 17pt; font-weight: bold; letter-spacing: 1px;
-  line-height: 1.2; margin-bottom: 0.5mm;
-}
-.tmpl-standard .club-name-en {
-  font-size: 12pt; font-weight: bold;
-  line-height: 1.2;
-}
-
-/* Theme image */
-.tmpl-standard .hg-theme-img { width: 100%; height: 100%; object-fit: cover; display: block; }
-.tmpl-standard .hg-theme-ph {
-  width: 100%; height: 100%; min-height: 28mm;
-  background: #888; display: flex; align-items: center; justify-content: center;
-}
-.tmpl-standard .hg-theme-ph span { color: #ddd; font-size: 6.5pt; text-align: center; line-height: 1.5; }
-
-/* ---- THEME ROW ---- */
-.tmpl-standard .theme-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin: 1.5mm 0 1mm;
-}
-.tmpl-standard .theme-label { font-size: 7.5pt; font-style: italic; white-space: nowrap; }
-.tmpl-standard .theme-value { font-size: 17pt; flex: 1; text-align: center; line-height: 1; }
-.tmpl-standard .meeting-no-label { font-size: 7pt; white-space: nowrap; }
-
-/* ---- MISSION ---- */
-.tmpl-standard .mission-section {
-  background: #c2d8ec;
-  padding: 1.5mm 2mm;
-  margin-bottom: 1.5mm;
-  font-size: 7pt;
-  line-height: 1.45;
-}
-.tmpl-standard .mission-title {
-  font-weight: bold; text-align: center;
-  margin-bottom: 0.5mm; font-size: 7.5pt;
-}
-.tmpl-standard .mission-text { text-align: center; }
-
-/* ---- AGENDA TABLE ---- */
-.tmpl-standard .agenda-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 7pt;
-  table-layout: fixed;
-  flex: 1;
-  height: 0;
-}
-
-/* Column widths — must sum to 178mm (194 - 8*2 padding) */
-.tmpl-standard .agenda-table col.col-time { width: 10mm; }
-.tmpl-standard .agenda-table col.col-secdur { width: 7mm; }
-.tmpl-standard .agenda-table col.col-dur { width: 8mm; }
-.tmpl-standard .agenda-table col.col-agenda { width: 61mm; }
-.tmpl-standard .agenda-table col.col-taker { width: 44mm; }
-.tmpl-standard .agenda-table col.col-rp { width: 48mm; }
-
-.tmpl-standard .agenda-table th, .tmpl-standard .agenda-table td {
-  border: 0.4pt solid #777;
-  padding: 0.8mm 1.2mm;
-  vertical-align: middle;
-  font-size: 8pt;
-}
-
-/* Table header — salmon/orange */
-.tmpl-standard .agenda-table thead tr {
-  background: #bdd5a0;
-  color: #000;
-}
-.tmpl-standard .agenda-table thead th {
-  font-size: 7.5pt; font-weight: bold; text-align: center;
-  border-color: #9cba7a;
-}
-
-/* Section rows — sage green */
-.tmpl-standard .row-section td { background: #bdd5a0; }
-.tmpl-standard .row-section .agenda-cell { text-align: center; }
-
-/* Regular cells */
-.tmpl-standard .agenda-table td.time-cell {
-  text-align: center; font-weight: bold;
-  font-size: 9pt; vertical-align: middle;
-}
-.tmpl-standard .agenda-table td.dur-cell {
-  text-align: center; font-size: 8pt; vertical-align: middle;
-}
-/* Section total duration — spans all rows of a multi-row section */
-.tmpl-standard .agenda-table td.secdur-cell {
-  text-align: center; font-size: 8pt; font-weight: bold; vertical-align: middle;
-}
-.tmpl-standard .agenda-table td.agenda-cell {
-  white-space: pre-wrap; line-height: 1.4; font-size: 8pt;
-}
-.tmpl-standard .agenda-table td.taker-cell {
-  font-size: 8pt; line-height: 1.3;
-}
-
-/* Intermission */
-.tmpl-standard .row-intermission td {
-  text-align: center; font-style: italic; font-weight: bold;
-  font-size: 7pt; padding: 0.7mm;
-  border-left: none; border-right: none;
-  background: #f5f5f5;
-}
-
-/* Spacer */
-.tmpl-standard .row-spacer td { border: none; background: transparent; }
-
-/* ---- RIGHT PANEL CELL ---- */
-.tmpl-standard .rp-cell {
-  vertical-align: top;
-  padding: 1.5mm 1mm !important;
-  border-left: 0.8pt solid #777 !important;
-}
-
-.tmpl-standard .rp-wrap {
-  display: flex; flex-direction: column;
-  height: 100%;
-}
-.tmpl-standard .rp-wrap .rp-tr { margin-top: auto; margin-bottom: 2mm; }
-
-/* Pathways list */
-.tmpl-standard .rp-pw-list {
-  display: grid;
-  grid-template-columns: 3em 1fr;
-  column-gap: 2px;
-  font-size: 9pt;
-  line-height: 1.7;
-  color: #444;
-}
-.tmpl-standard .rp-pw { display: contents; }
-.tmpl-standard .rp-pwc { font-weight: bold; white-space: nowrap; text-align: right; }
-.tmpl-standard .rp-pwn { font-size: 8.5pt; }
-
-/* Time Rules */
-.tmpl-standard .rp-tr { margin-top: 2mm; }
-.tmpl-standard .rp-tr-title {
-  font-weight: bold; font-size: 10pt;
-  text-align: center; margin-bottom: 1.5mm;
-}
-.tmpl-standard .rp-tr-table {
-  width: 100%; border-collapse: collapse; font-size: 9pt;
-}
-.tmpl-standard .rp-tr-table td, .tmpl-standard .rp-tr-table th {
-  border: 0.3pt solid #aaa; padding: 1mm 1.2mm;
-  text-align: center; vertical-align: middle;
-}
-.tmpl-standard .tr-lbl { text-align: left !important; font-size: 9pt; }
-
-/* QR codes */
-.tmpl-standard .rp-qr-items {
-  display: flex; flex-direction: column; gap: 2mm;
-  align-items: center; margin-top: 1.5mm;
-}
-.tmpl-standard .rp-qr-item { text-align: center; }
-.tmpl-standard .qr-img { width: 24mm; height: 24mm; display: block; margin: 0 auto; }
-.tmpl-standard .qr-ph {
-  width: 24mm; height: 24mm;
-  border: 0.5pt solid #999;
-  background: #f8f8f8;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 6pt; color: #bbb; margin: 0 auto;
-}
-.tmpl-standard .rp-qr-lbl { font-size: 7pt; font-weight: bold; margin-top: 1mm; }
-
-/* ---- FOOTER ---- */
-.tmpl-standard .agenda-footer {
-  background: #c2d8ec;
-  text-align: center; font-weight: bold;
-  font-size: 8.5pt;
-  padding: 1.5mm;
-  margin-top: 1.5mm;
-}
-
-/* ============================================================
    TEMPLATE: ENTREPRENEUR  (.tmpl-entrepreneur)
    ------------------------------------------------------------
-   活的那一份：企業家分會的版面樣式改這裡。拆分當下與 .tmpl-standard
-   完全相同（同一份樣式的兩個副本），對應 templates 端 `entrepreneur`
-   擁有自己的 render() 的作法，從此外觀也能各走各的。
+   企業家分會的版面樣式（含右側 Pathways／時間規則／QR 面板）。
    ============================================================ */
 /* ---- HEADER (3-column grid) ---- */
 .tmpl-entrepreneur .doc-header {
@@ -1296,43 +1052,43 @@ details[open] summary::before { content: "▼ "; }
 }
 
 /* ============================================================
-   TEMPLATE: COMPACT  (.tmpl-compact)
+   TEMPLATE: STANDARD  (.tmpl-standard)
    ============================================================ */
-.tmpl-compact { font-size: 9pt; }
-.tmpl-compact .c-header {
+.tmpl-standard { font-size: 9pt; }
+.tmpl-standard .c-header {
   border-bottom: 2px solid #772432;
   padding-bottom: 6px;
   margin-bottom: 10px;
 }
-.tmpl-compact .c-club {
+.tmpl-standard .c-club {
   font-size: 15pt; font-weight: 700; color: #772432;
 }
-.tmpl-compact .c-club-en {
+.tmpl-standard .c-club-en {
   font-size: 9pt; font-weight: 400; color: #64748b; margin-left: 6px;
 }
-.tmpl-compact .c-meta { margin-top: 4px; color: #334155; }
-.tmpl-compact .c-theme { margin-top: 2px; color: #0f172a; }
+.tmpl-standard .c-meta { margin-top: 4px; color: #334155; }
+.tmpl-standard .c-theme { margin-top: 2px; color: #0f172a; }
 
-.tmpl-compact .c-table {
+.tmpl-standard .c-table {
   width: 100%; border-collapse: collapse;
 }
-.tmpl-compact .c-table th {
+.tmpl-standard .c-table th {
   text-align: left; font-size: 8pt; color: #64748b;
   text-transform: uppercase; letter-spacing: 0.4px;
   border-bottom: 1px solid #cbd5e1; padding: 4px 6px;
 }
-.tmpl-compact .c-table td {
+.tmpl-standard .c-table td {
   padding: 4px 6px; border-bottom: 1px solid #eef2f7;
   vertical-align: top; white-space: pre-line;
 }
-.tmpl-compact .c-time { width: 14mm; color: #772432; font-weight: 600; }
-.tmpl-compact .c-dur  { width: 16mm; color: #64748b; }
-.tmpl-compact .c-taker { width: 45mm; }
-.tmpl-compact .c-row-section td {
+.tmpl-standard .c-time { width: 14mm; color: #772432; font-weight: 600; }
+.tmpl-standard .c-dur  { width: 16mm; color: #64748b; }
+.tmpl-standard .c-taker { width: 45mm; }
+.tmpl-standard .c-row-section td {
   background: #f6e9ec; color: #772432;
   border-bottom: 1px solid #e7c9d0;
 }
-.tmpl-compact .c-footer {
+.tmpl-standard .c-footer {
   margin-top: 10px; text-align: center;
   font-weight: 700; color: #772432;
 }

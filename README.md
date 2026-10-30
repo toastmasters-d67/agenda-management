@@ -102,11 +102,11 @@ EntrepreneurAgenda/
 - 品牌與版型為**即時解析**（不快照進 `agendas.data`）。
   - ✅ 編輯分會品牌後，該分會所有議程自動套用新資料。
   - ⚠️ 變更某分會的 `template_key` 會讓其**既有議程**也改用新版型呈現。
-- 未設定欄位的 fallback 鏈：分會設定 → 該版型 `fieldDefaults` / `assetDefaults` → 標準版預設。預設圖集中於 `media/Entrepreneur/`（標準版）與 `media/ChillHiHigh/`（Chill Hi High）。
+- 未設定欄位的 fallback 鏈：分會設定 → 該版型 `fieldDefaults` / `assetDefaults` → 標準版預設。預設圖集中於 `media/Entrepreneur/`（企業家）與 `media/ChillHiHigh/`（Chill Hi High）。
 
 ### 語言能力（依版型）
 
-- `standard` / `compact`：提供中/英切換（設定選單的「語言」）。
+- `standard` / `entrepreneur`：提供中/英切換（設定選單的「語言」）。
 - `chillhihigh`：中英混用，**隱藏「語言」切換**、固定渲染語言，且成員姓名顯示「English 中文」。
 - `app/agenda/page.js` 於 `updatePreview()` 依版型旗標顯示/隱藏「語言」選單並 pin 語言。
 
@@ -169,7 +169,7 @@ EntrepreneurAgenda/
 
 `個別講評 2'~3'`、`計時員報告 1'`、`贅語報告 1'`、`語言講評 3'~5'`、`總講評 3'~5'`、`講評員講評 2'~3'` 原本寫死在版型裡，現在改為每場可編輯的**顯示字串**（可填區間，不參與加總運算），與 `signals` 同一套模式：載入時 merge 到預設值上，舊議程自動沿用原本字樣。
 
-> 版型端從 `ctx.durationLabels` 取用，並以 `lib/agendaTemplates.js` 的 `DEFAULT_DURATION_LABELS` 作最後防線。`standard` 與 `compact` 已改為資料驅動；`chillhihigh` 的講評列本來就用 `signals` 的綠/黃/紅欄，不受影響。
+> 版型端從 `ctx.durationLabels` 取用，並以 `lib/agendaTemplates.js` 的 `DEFAULT_DURATION_LABELS` 作最後防線。`standard` 與 `entrepreneur` 已改為資料驅動；`chillhihigh` 的講評列本來就用 `signals` 的綠/黃/紅欄，不受影響。
 
 ### 每個欄位旁的「自動: X」與 ⟳
 
@@ -193,28 +193,25 @@ EntrepreneurAgenda/
 > 「版型設定」modal 欄位、預設值/預設圖、分會版型下拉（`TEMPLATE_OPTIONS`）皆會**自動跟上**——欄位只需在 manifest 宣告一次。
 
 > 內建版型：
-> - `standard`（標準版／企業家，**舊版**）
-> - `compact`（精簡單欄示範版）
+> - `standard`（標準版：中性單欄，新分會預設）
+> - `entrepreneur`（企業家）
 > - `chillhihigh`（雙語幽默版／Chill Hi High：中英混用、內嵌綠/黃/紅時間牌欄、個別講評員依演講語言標示、底部 Meeting Roles 說明；**兩頁**：議程頁 + 宣傳後頁）
 > - `china`（CHINA Toastmasters／CHANGE IN ACTION：固定流程表 `CHINA_SCHEDULE`、全英文、附「下一場」角色欄；**兩頁**）
-> - `entrepreneur`（企業家版）
 
-#### `standard` 與 `entrepreneur`：分家了，不再共用 render
+#### 版型命名
 
-`entrepreneur` 一開始是 `{ ...AGENDA_TEMPLATES.standard }` 的 spread clone，兩者共用**同一個** `render` 與同一份 `assetDefaults` / `fieldDefaults` / `placeholders` / `settings` 物件參照。現在 `entrepreneur` 是 `AGENDA_TEMPLATES` 裡一個完整獨立的 entry，**自己的 `render()`、自己的預設值常數（`ENTREPRENEUR_*`）、自己的 `settings` manifest**——改企業家版不會動到標準版，反之亦然。
+- `standard`（標準版）是中性的單欄版型，新分會的預設值；未設定或不認得的 `template_key` 一律退回它，所以不會帶到任何分會的真實資訊。它原本叫 `compact`，migration `0022` 改名。
+- 原本另有一個凍結的舊 `standard`（企業家版的副本），最後一個使用它的分會（Entrepreneur Toastmasters）改用 `entrepreneur` 後，連同它的 CSS 一起移除。
+- `entrepreneur` 是企業家分會自己的版型，版面要改就改這裡，樣式在 `.tmpl-entrepreneur`。
 
-- `entrepreneur` 是**活的**：企業家分會版面要改就改這裡。
-- `standard` 是**凍結的**：留著只為了讓 `template_key='standard'` 的舊分會記錄維持原樣，不要再改它。
-- 分家當下兩者輸出**完全一致**，所以既有議程不受影響。
-
-**CSS 也拆了。** `agenda.css` 原本這段版面樣式是全域選擇器（`.agenda-table`、`.doc-header`、`.rp-cell` …），兩個版型共用；現在拆成 `.tmpl-standard` 與 `.tmpl-entrepreneur` **兩份各自獨立的完整副本**（各 61 條規則，拆分當下內容相同），跟 `compact` / `chillhihigh` / `china` 一樣收進 `.tmpl-<key>` 命名空間。改其中一份不會影響另一份。
+每個版型的樣式都收在 `agenda.css` 的 `.tmpl-<key>` 命名空間裡。
 
 仍然保持全域的只有兩樣，都是刻意的：
 
 | 選擇器 | 為什麼不收進命名空間 |
 |--------|------------------|
 | `.agenda-page` | 所有版型共用的 A4 紙張外框（尺寸、邊距、字型、陰影），`page.js` 對每個版型都掛這個 class |
-| `.tc-g` / `.tc-y` / `.tc-r` | 時間規則的紅黃綠色塊，標準版／企業家版的右側面板與 **CHINA 第二頁**的 Time Control 表格共用 |
+| `.tc-g` / `.tc-y` / `.tc-r` | 時間規則的紅黃綠色塊，企業家版的右側面板與 **CHINA 第二頁**的 Time Control 表格共用 |
 
 ---
 
@@ -246,11 +243,11 @@ EntrepreneurAgenda/
 
 | 角色 | 適用版型 | 為什麼 |
 |------|------|------|
-| `callingToOrder` | standard／compact／entrepreneur／china | Chill Hi High 的「致歡迎詞 Opening Remarks」那列讀的是 `welcomeTME`，不再需要這格 |
+| `callingToOrder` | standard／entrepreneur／china | Chill Hi High 的「致歡迎詞 Opening Remarks」那列讀的是 `welcomeTME`，不再需要這格 |
 | `boardWriter`／`photographer` | chillhihigh | 只有 Chill Hi High 議程把板書、攝影列成獨立角色 |
 | `timerAssistant` | chillhihigh | Chill Hi High 的例會角色表另外排一位計時員幫手 |
 | `voteCounter` | china | CHINA 專屬的計票員（歸在「計時 / 記錄」組） |
-| `varietyHost` | standard／compact／entrepreneur／chillhihigh | CHINA 沒有多元單元 |
+| `varietyHost` | standard／entrepreneur／chillhihigh | CHINA 沒有多元單元 |
 | `wordOfTheDay`／`quizHost` | china | CHINA 專屬的每日一字、問答遊戲主持（歸在「單元主持」組） |
 
 其餘角色（`receptionHost`、`welcomeTME`、`tme`、`timer`、`ahCounter`、`tableTopicsMaster`、`speeches[i].speaker`、`evaluators[i]`、`langEvaluator`、`generalEvaluator`、`evalEvaluators[i]`、`awardsPresenter`、`sharingFeedback`）沒有 `templates` 限制，5 個版型都共用。
@@ -272,7 +269,7 @@ EntrepreneurAgenda/
 
 ### CHINA 版型：跟其他版型一樣的固定欄位
 
-CHINA 議程曾經是一份自由格式的逐列清單（`agendaRows`），已經改成跟其他版型相同的固定角色欄位——`lib/agendaTemplates.js` 的 `china` 版型內部有一張不對外匯出的 `CHINA_SCHEDULE`（該分會目前的週會流程表），每一列綁定要讀的欄位（例如 `Timer` 這一列讀 `data.timer`），純粹是 render() 排版用，角色安排矩陣完全不需要知道它的存在，就跟 standard/compact 一樣。
+CHINA 議程曾經是一份自由格式的逐列清單（`agendaRows`），已經改成跟其他版型相同的固定角色欄位——`lib/agendaTemplates.js` 的 `china` 版型內部有一張不對外匯出的 `CHINA_SCHEDULE`（該分會目前的週會流程表），每一列綁定要讀的欄位（例如 `Timer` 這一列讀 `data.timer`），純粹是 render() 排版用，角色安排矩陣完全不需要知道它的存在，就跟 standard/entrepreneur 一樣。
 
 CHINA 議程表右側原本每列都有一欄「下一場負責人」（`assigneeNext`），現在**不再存進資料庫**，改成**列印/預覽議程時即時查詢**：`app/agenda/page.js` 的 `ensureNextMeetingRoles()` 依「分會 + 這場日期」查詢同分會日期最近的下一場例會（`GET /api/agendas?order=date_asc&date_from=<+1天>&limit=1`），把該場的角色欄位整包當作 `ctx.nextMeetingRoles` 傳給 `render()`；查不到（還沒建立下一場）就顯示空白。查詢結果有 cache（只在分會/日期真的改變時才重查），不會每次打字都打 API。議程編輯頁因此不再有「下次 Next Meeting Assignee」的手動輸入欄。
 
@@ -1202,6 +1199,8 @@ alembic upgrade head
 18. `0018` — `oauth_refresh_tokens` 加 `grant_id`（授權的固定識別碼，回填為原 `token_hash`，已發出的 access token 不受影響）與 `prev_token_hash`（refresh token 輪換與重複使用偵測）
 19. `0019` — 建立 `club_memberships`（多分會會籍，每列一個人 × 分會與在該分會的角色），以現有的 `users.club_id`／`users.role` 回填；`oauth_refresh_tokens` 加 `active_club_id`（MCP `switch_club`）
 20. `0020` — 建立 `machines`、`machine_pairings`、`machine_tokens`（電子名牌，見「機台管理」）
+21. `0021` — `clubs.template_key` 預設值改為 `compact`
+22. `0022` — 版型 `compact` 改名為 `standard`（既有分會一併更新），預設值改為 `standard`
 
 ### 常用指令
 

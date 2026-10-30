@@ -3,7 +3,7 @@
 import { useEffect } from 'react';
 import { apiJson } from '@/lib/api';
 import { setAuth, clearAuth, applyRoleUI } from '@/lib/auth';
-import { AGENDA_TEMPLATES, TEMPLATE_OPTIONS, LEGACY_TEMPLATE_KEYS, templateAssetDefaults } from '@/lib/agendaTemplates';
+import { AGENDA_TEMPLATES, TEMPLATE_OPTIONS, templateAssetDefaults } from '@/lib/agendaTemplates';
 import Sidebar from '@/components/Sidebar';
 import './club.css';
 import { withBase } from '@/lib/basePath';
@@ -27,12 +27,10 @@ let editingGroup = 'basic';
 // Pages returned by the OAuth round trip, waiting for the user to pick one.
 let metaPages = [];
 
-// Populate the template <select> from lib/agendaTemplates. Legacy templates
-// are listed only when `currentKey` (the club being edited) still uses one.
-function populateTemplateOptions(currentKey) {
+// Populate the template <select> from lib/agendaTemplates once on load.
+function populateTemplateOptions() {
   const sel = document.getElementById('fTemplate');
   sel.innerHTML = TEMPLATE_OPTIONS
-    .filter((o) => !LEGACY_TEMPLATE_KEYS.includes(o.key) || o.key === currentKey)
     .map((o) => `<option value="${o.key}">${o.label}</option>`)
     .join('');
 }
@@ -183,13 +181,12 @@ function openModal(id = null, group = 'basic') {
     return;
   }
 
-  const tk = (c && c.template_key) || 'compact';
+  const tk = (c && c.template_key) || 'standard';
   // Universal fields (shared by every template).
   document.getElementById('fName').value = c ? (c.name || '') : '';
   document.getElementById('fNameZh').value = c ? (c.name_zh || '') : '';
   document.getElementById('fNameEn').value = c ? (c.name_en || '') : '';
   document.getElementById('fFee').value = c ? (c.fee || '') : '';
-  populateTemplateOptions(tk);
   document.getElementById('fTemplate').value = tk;
   // Template-specific fields: generate from the manifest, then fill values.
   renderTemplateFields(tk);
@@ -497,7 +494,7 @@ function populateTemplateFields(c, tk) {
 }
 // Re-render fields when the template select changes (keeps saved values).
 function onTemplateChange() {
-  const tk = document.getElementById('fTemplate').value || 'compact';
+  const tk = document.getElementById('fTemplate').value || 'standard';
   const c = editingId ? clubs.find((x) => x.id === editingId) : null;
   renderTemplateFields(tk);
   populateTemplateFields(c, tk);
@@ -539,7 +536,7 @@ function closeModal() {
 function buildClubPayload() {
   const nn = (id) => { const el = document.getElementById(id); const v = el ? el.value.trim() : ''; return v || null; };
   const c = editingId ? clubs.find((x) => x.id === editingId) : null;
-  const tk = document.getElementById('fTemplate').value || 'compact';
+  const tk = document.getElementById('fTemplate').value || 'standard';
   const fields = (AGENDA_TEMPLATES[tk] || {}).settings || [];
   const payload = {
     name: document.getElementById('fName').value.trim(),

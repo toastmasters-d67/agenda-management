@@ -46,7 +46,7 @@ const ROLE_GROUPS = [
       { key: 'receptionHost',  label: '報到接待',     en: 'Reception Host' },
       // Chill Hi High has no separate "calling to order" row — its opening
       // remarks row reads `welcomeTME` instead (see lib/agendaTemplates.js).
-      { key: 'callingToOrder', label: '宣布例會開始', en: 'Calling to Order', templates: ['standard', 'compact', 'entrepreneur', 'china'] },
+      { key: 'callingToOrder', label: '宣布例會開始', en: 'Calling to Order', templates: ['standard', 'entrepreneur', 'china'] },
       { key: 'welcomeTME',     label: '會長致歡迎詞', en: 'Welcome Guests & TME' },
       { key: 'tme',            label: '總主持人',     en: 'Toastmaster of the Evening' },
     ],
@@ -67,7 +67,7 @@ const ROLE_GROUPS = [
   {
     label: '單元主持',
     roles: [
-      { key: 'varietyHost',       label: '多元單元主持人', en: 'Variety Session Host', kind: 'variety', templates: ['standard', 'compact', 'entrepreneur', 'chillhihigh'] },
+      { key: 'varietyHost',       label: '多元單元主持人', en: 'Variety Session Host', kind: 'variety', templates: ['standard', 'entrepreneur', 'chillhihigh'] },
       { key: 'tableTopicsMaster', label: '即席問答主持人', en: 'Table Topics Master' },
       { key: 'wordOfTheDay',      label: '每日一字',       en: 'Word of the Day', templates: ['china'] },
       { key: 'quizHost',          label: '問答遊戲主持',   en: 'Quiz Session', templates: ['china'] },
@@ -172,7 +172,7 @@ function activeClubId() {
 /** Drives which roles show up in the matrix — each template renders a different role set. */
 function activeTemplateKey() {
   const club = allClubs.find((c) => c.id === activeClubId());
-  return (club && club.template_key) || 'compact';
+  return (club && club.template_key) || 'standard';
 }
 
 /** The active club, or null before one is picked. */
@@ -393,7 +393,7 @@ function updateRangeLabel(total) {
     : `顯示 ${meetings.length} 場`;
 }
 
-const TEMPLATE_LABELS = { standard: '舊版（企業家）', compact: '標準版', entrepreneur: '企業家', chillhihigh: 'Chill Hi High', china: 'CHINA' };
+const TEMPLATE_LABELS = { standard: '標準版', entrepreneur: '企業家', chillhihigh: 'Chill Hi High', china: 'CHINA' };
 
 /** Display name for the active club's template — used in the toolbar label and locked-row tooltips. */
 function activeTemplateLabel() {
