@@ -1,0 +1,44 @@
+{
+  "_comment": "What differs between Facebook, Instagram and Threads — one list read by the composer (lib/socialPlatforms.js: counters, warnings, previews) and by the backend (api/_postgen/renderers/social.py: the IG / Threads variants it renders, api/index.py: which platforms exist). Bundled with the Python function via vercel.json includeFiles and copied into the API image by Dockerfile.api.",
+  "platforms": [
+    {
+      "key": "facebook",
+      "label": "Facebook",
+      "short": "FB",
+      "max": 63206,
+      "soft": 1500,
+      "needsMedia": false,
+      "maxMedia": null,
+      "maxVideos": 1,
+      "allowsMixedMedia": false,
+      "linksClickable": true,
+      "hint": "連結可點。字數寬鬆，但超過 3 行就會被折疊成「查看更多」。影片一則只能放一支，且不能和圖片混放。"
+    },
+    {
+      "key": "instagram",
+      "label": "Instagram",
+      "short": "IG",
+      "max": 2200,
+      "soft": 1200,
+      "needsMedia": true,
+      "maxMedia": 10,
+      "maxVideos": 10,
+      "allowsMixedMedia": true,
+      "linksClickable": false,
+      "hint": "一定要有圖片或影片。單支影片會發成 Reels。內文連結不可點，請改寫成「報名連結在個人簡介」。"
+    },
+    {
+      "key": "threads",
+      "label": "Threads",
+      "short": "TH",
+      "max": 500,
+      "soft": 450,
+      "needsMedia": false,
+      "maxMedia": 20,
+      "maxVideos": 20,
+      "allowsMixedMedia": true,
+      "linksClickable": true,
+      "hint": "上限 500 字，口語為主，hashtag 越少越好。多個項目會發成輪播。"
+    }
+  ]
+}

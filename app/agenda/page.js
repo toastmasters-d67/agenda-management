@@ -27,6 +27,7 @@ import {
 } from '@/lib/pathways';
 import './agenda.css';
 import { withBase } from '@/lib/basePath';
+import { WORD_DEFAULT_TEMPLATE, buildWordData, fillWordTemplate, wordTemplateErrors } from '@/lib/wordExport';
 import SearchableSelect from '@/components/SearchableSelect';
 
 // ================================================================
@@ -317,9 +318,9 @@ function updateSignal(cat, key, value) {
 }
 
 // Bundled fallbacks used when a club has no custom logo/QR uploaded. Sourced
-// from the standard template's assetDefaults (lib/agendaTemplates.js) so the
-// default image paths live in one place.
-const _stdAssets = templateAssetDefaults('standard');
+// from the entrepreneur template's assetDefaults (lib/agendaTemplates.js) so
+// the default image paths live in one place.
+const _stdAssets = templateAssetDefaults('entrepreneur');
 const DEFAULT_IMAGES = {
   logo: _stdAssets.logo_url,
   fbQr: _stdAssets.fb_qr_url,
@@ -822,13 +823,19 @@ function esc(str) {
     .replace(/>/g, '&gt;');
 }
 
-function buildSpeechAgendaLine(sp) {
-  let line = esc(sp.title) || 'TBD';
+// "PM - L2 - Project name" for a speech's Pathways fields ('' when unset).
+function speechPathwayLabel(sp) {
   const parts = [];
   if (sp.pathwayCode) parts.push(sp.pathwayCode);
   if (sp.pathwayLevel) parts.push(sp.pathwayLevel);
   if (sp.pathwayProject) parts.push(projectName(sp.pathwayProject, lang));
-  if (parts.length) line += `\n [${parts.join(' - ')}]`;
+  return parts.join(' - ');
+}
+
+function buildSpeechAgendaLine(sp) {
+  let line = esc(sp.title) || 'TBD';
+  const pw = speechPathwayLabel(sp);
+  if (pw) line += `\n [${pw}]`;
   return line;
 }
 
@@ -928,7 +935,7 @@ function updatePreview() {
   if (!preview || !pagesWrap) return;
   const club = getActiveClub();
   applyClubImages(club);
-  const tmpl = AGENDA_TEMPLATES[club && club.template_key] || AGENDA_TEMPLATES.compact;
+  const tmpl = AGENDA_TEMPLATES[club && club.template_key] || AGENDA_TEMPLATES.standard;
   applyTemplateFields(tmpl.key);
   ensureNextMeetingRoles(tmpl.key === 'china' ? club : null, data.meetingDate);
 
@@ -953,6 +960,8 @@ function updatePreview() {
   // Page 1 stays in #agendaPreview; reset class each render so nothing stacks.
   preview.innerHTML = pages[0];
   preview.className = `agenda-page tmpl-${tmpl.key} ${langCls}`;
+  // Templates that size their content to the sheet do it now that it's laid out.
+  if (tmpl.fit) tmpl.fit(preview);
 
   // Rebuild any extra pages as siblings inside #agendaPages.
   pagesWrap.querySelectorAll('.extra-page').forEach((el) => el.remove());
@@ -1061,8 +1070,17 @@ let selectedClubId = null; // system_admin: which club this agenda belongs to
 let allClubs = [];
 let pendingClubSwitch = null; // { newClubId } awaiting confirmation in clubTemplateSwitchModal
 
+// The agenda's saved data as last loaded. A PUT replaces `data` wholesale, so
+// saving starts from it: fields this editor doesn't show — roles planned on
+// the 角色 page that the club's template doesn't print, the club's own roles
+// (customRoles) — survive an edit here instead of being wiped.
+let savedData = {};
+
 function collectSaveData() {
+  // `_`-prefixed keys are response metadata (e.g. _clubId), not agenda data.
+  const kept = Object.fromEntries(Object.entries(savedData).filter(([k]) => !k.startsWith('_')));
   return {
+    ...kept,
     ...collectData(),
     timeOverrides: { ...timeOverrides },
     durationOverrides: { ...durationOverrides },
@@ -1378,6 +1396,7 @@ async function loadAgenda(id, { ownLoading = true } = {}) {
     }
 
     applyAgendaData(data);
+    savedData = data;
     currentAgendaId = id;
     setSaveStatus('saved');
     closeLoadModal();
@@ -1637,6 +1656,65 @@ async function downloadPDF() {
   window.html2pdf().set(pdfOptions()).from(element).save().then(restore);
 }
 
+// Editable Word copy: the club's uploaded template, or the bundled default,
+// filled with this meeting (lib/wordExport.js).
+// Shared by the 下載 Word button and the server-side export (MCP).
+async function buildWordBlob() {
+  const club = getActiveClub();
+  const tplUrl = club && club.settings && club.settings.word_template_url;
+  const res = tplUrl
+    ? await apiFetch(`/image-proxy?url=${encodeURIComponent(tplUrl)}`)
+    : await fetch(WORD_DEFAULT_TEMPLATE);
+  if (!res.ok) throw new Error('Word 範本下載失敗');
+  // Full data: also the roles this template doesn't show, for their marks.
+  const data = collectSaveData();
+  const values = buildWordData(data, club, {
+    times: calcTimes(data.speeches), displayMember, formatDate, varietySession, pathwayLabel: speechPathwayLabel,
+    durationLabels, signals,
+  });
+  let themeImg = null;
+  try {
+    themeImg = await getThemeImgBase64();
+  } catch (e) {
+    console.warn('主題圖片讀取失敗，Word 保留佔位圖:', e);
+  }
+  return fillWordTemplate(await res.arrayBuffer(), values, { 主題圖片: themeImg });
+}
+
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
+/** The .docx as a data URL, for app/svc/agenda-export (like jpg / pdf). */
+async function captureWord() {
+  try {
+    return await blobToDataUrl(await buildWordBlob());
+  } catch (e) {
+    throw new Error(`Word 匯出失敗：${wordTemplateErrors(e).join('；')}`);
+  }
+}
+
+async function downloadWord() {
+  showLoading();
+  try {
+    const blob = await buildWordBlob();
+    const link = document.createElement('a');
+    link.download = `${exportBaseName()}.docx`;
+    link.href = URL.createObjectURL(blob);
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 10000);
+  } catch (e) {
+    alert(`Word 匯出失敗：${wordTemplateErrors(e).join('；')}`);
+  } finally {
+    hideLoading();
+  }
+}
+
 async function downloadJPG() {
   const name = exportBaseName();
   const pages = await captureJPGs();
@@ -1651,7 +1729,22 @@ async function downloadJPG() {
 // ================================================================
 // RESET & INIT
 // ================================================================
+// Time/venue defaults: club's own setting → its template's fieldDefaults →
+// the standard template's fieldDefaults (last-resort, neutral — never another
+// club's real info). All defaults live in lib/agendaTemplates.js, so nothing
+// is hard-coded here.
+function clubFieldDefaults(club) {
+  const set = (club && club.settings) || {};
+  const fd = templateFieldDefaults(club ? club.template_key : 'standard');
+  const std = templateFieldDefaults('standard');
+  return {
+    timeRange: set.timeRange || fd.timeRange || std.timeRange || '',
+    venue: set.venue || fd.venue || std.venue || '',
+  };
+}
+
 function applyDefaultState() {
+  savedData = {}; // a new agenda carries nothing over
   const today = new Date();
   const pad = (n) => String(n).padStart(2, '0');
   const fields = [
@@ -1668,16 +1761,9 @@ function applyDefaultState() {
   durationLabels = defaultDurationLabels();
   syncDurationLabelInputs();
   document.getElementById('meetingDate').value = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`;
-  // Time/venue defaults: club's own setting → its template's fieldDefaults →
-  // the compact template's fieldDefaults (last-resort, neutral — never another
-  // club's real info). All defaults live in lib/agendaTemplates.js, so nothing
-  // is hard-coded here.
-  const _club = getActiveClub();
-  const _set = (_club && _club.settings) || {};
-  const _fd = templateFieldDefaults(_club ? _club.template_key : 'compact');
-  const _std = templateFieldDefaults('compact');
-  document.getElementById('timeRange').value = _set.timeRange || _fd.timeRange || _std.timeRange || '';
-  document.getElementById('venueInfo').value = _set.venue || _fd.venue || _std.venue || '';
+  const _def = clubFieldDefaults(getActiveClub());
+  document.getElementById('timeRange').value = _def.timeRange;
+  document.getElementById('venueInfo').value = _def.venue;
   speeches = [
     { title: 'TBD', speaker: '', duration: "5'-7'", speechLang: 'en', pathwayCode: '', pathwayLevel: '', pathwayProject: '' },
     { title: '', speaker: '', duration: "5'-7'", speechLang: 'en', pathwayCode: '', pathwayLevel: '', pathwayProject: '' },
@@ -1928,13 +2014,13 @@ function onAgendaClubChange(v) {
   const newClubId = v ? parseInt(v) : null;
   const oldClub = getActiveClub();
   const newClub = newClubId ? (allClubs || []).find((c) => c.id === newClubId) : null;
-  const oldKey = oldClub ? (oldClub.template_key || 'compact') : null;
-  const newKey = newClub ? (newClub.template_key || 'compact') : null;
+  const oldKey = oldClub ? (oldClub.template_key || 'standard') : null;
+  const newKey = newClub ? (newClub.template_key || 'standard') : null;
 
   if (oldKey && newKey && oldKey !== newKey) {
     pendingClubSwitch = { newClubId };
-    const oldLabel = (AGENDA_TEMPLATES[oldKey] || AGENDA_TEMPLATES.compact).label;
-    const newLabel = (AGENDA_TEMPLATES[newKey] || AGENDA_TEMPLATES.compact).label;
+    const oldLabel = (AGENDA_TEMPLATES[oldKey] || AGENDA_TEMPLATES.standard).label;
+    const newLabel = (AGENDA_TEMPLATES[newKey] || AGENDA_TEMPLATES.standard).label;
     const body = document.getElementById('clubTemplateSwitchBody');
     if (body) {
       body.innerHTML = `
@@ -1969,7 +2055,16 @@ function confirmClubTemplateSwitch() {
 }
 
 function commitClubSwitch(newClubId) {
+  // Carry the new club's time/venue defaults over, but only into fields that
+  // are blank or still hold the previous club's default — never clobber what
+  // the user typed.
+  const oldDef = clubFieldDefaults(getActiveClub());
   selectedClubId = newClubId;
+  const newDef = clubFieldDefaults(getActiveClub());
+  [['timeRange', 'timeRange'], ['venueInfo', 'venue']].forEach(([id, k]) => {
+    const el = document.getElementById(id);
+    if (el && (!el.value.trim() || el.value === oldDef[k])) el.value = newDef[k];
+  });
   _updateClubPickerHint();
   setSaveStatus('unsaved');
   memberRoster = [];
@@ -2117,6 +2212,7 @@ export default function AgendaIndexPage() {
           }).then(() => waitForImages(document.getElementById('agendaPages'))),
           jpg: captureJPGs,
           pdf: capturePDF,
+          docx: captureWord,
         };
       } finally {
         hideLoading();
@@ -2197,7 +2293,7 @@ export default function AgendaIndexPage() {
                   <label>會議日期</label>
                   <input type="date" id="meetingDate" />
                 </div>
-                <div className="form-row" data-tmpl="standard compact entrepreneur china" style={{ display: 'none' }}>
+                <div className="form-row" data-tmpl="standard entrepreneur china" style={{ display: 'none' }}>
                   <label>會議編號 Meeting No.</label>
                   <input type="number" id="meetingNo" defaultValue={258} />
                 </div>
@@ -2205,7 +2301,7 @@ export default function AgendaIndexPage() {
                   <label>會議主題 Meeting Theme</label>
                   <input type="text" id="meetingTheme" placeholder="-Urban Legend-" />
                 </div>
-                <div className="form-row" data-tmpl="standard compact entrepreneur chillhihigh" style={{ display: 'none' }}>
+                <div className="form-row" data-tmpl="standard entrepreneur chillhihigh" style={{ display: 'none' }}>
                   <label>時間段 Time Range</label>
                   <input type="text" id="timeRange" placeholder="19:10 ~ 21:00" />
                 </div>
@@ -2216,7 +2312,7 @@ export default function AgendaIndexPage() {
               </div>
             </details>
 
-            <details data-tmpl="standard compact entrepreneur chillhihigh" style={{ display: 'none' }}>
+            <details data-tmpl="standard entrepreneur chillhihigh" style={{ display: 'none' }}>
               <summary>⏱ 時間設定 Time Settings</summary>
               <div className="form-section">
                 <div className="time-override-row">
@@ -2412,7 +2508,7 @@ export default function AgendaIndexPage() {
                   <button className="btn-time-reset" onClick={() => resetDurationOverride('sharingMins')} title="還原自動">⟳</button>
                 </div>
 
-                <div data-tmpl="standard compact entrepreneur" style={{ display: 'none' }}>
+                <div data-tmpl="standard entrepreneur" style={{ display: 'none' }}>
                   <hr style={{ margin: '6px 0', borderColor: '#ddd' }} />
                   <p className="time-override-hint">
                     <strong>講評區各列時長</strong>（議程表上直接顯示的字樣，可填區間）
@@ -2451,14 +2547,14 @@ export default function AgendaIndexPage() {
               </div>
             </details>
 
-            <details open data-tmpl="standard compact entrepreneur chillhihigh china" style={{ display: 'none' }}>
+            <details open data-tmpl="standard entrepreneur chillhihigh china" style={{ display: 'none' }}>
               <summary>角色分配</summary>
               <div className="form-section">
                 <div className="form-row">
                   <label>Reception Host <span className="time-hint">18:50</span></label>
                   <input type="text" id="receptionHost" placeholder="Name, Title" className="member-ac" />
                 </div>
-                <div className="form-row" data-tmpl="standard compact entrepreneur china" style={{ display: 'none' }}>
+                <div className="form-row" data-tmpl="standard entrepreneur china" style={{ display: 'none' }}>
                   <label>Calling Meeting to Order <span className="time-hint">1'</span></label>
                   <input type="text" id="callingToOrder" placeholder="Name, Title" className="member-ac" />
                 </div>
@@ -2481,7 +2577,7 @@ export default function AgendaIndexPage() {
               </div>
             </details>
 
-            <details data-tmpl="standard compact entrepreneur chillhihigh" style={{ display: 'none' }}>
+            <details data-tmpl="standard entrepreneur chillhihigh" style={{ display: 'none' }}>
               <summary>多元單元 Variety Session</summary>
               <div className="form-section">
                 <div className="form-row toggle-row">
@@ -2506,7 +2602,7 @@ export default function AgendaIndexPage() {
               </div>
             </details>
 
-            <details open data-tmpl="standard compact entrepreneur chillhihigh china" style={{ display: 'none' }}>
+            <details open data-tmpl="standard entrepreneur chillhihigh china" style={{ display: 'none' }}>
               <summary>指定演講 Prepared Speeches</summary>
               <div className="form-section">
                 <div id="speechesList"></div>
@@ -2514,7 +2610,7 @@ export default function AgendaIndexPage() {
               </div>
             </details>
 
-            <details open data-tmpl="standard compact entrepreneur chillhihigh china" style={{ display: 'none' }}>
+            <details open data-tmpl="standard entrepreneur chillhihigh china" style={{ display: 'none' }}>
               <summary>即席問答 Table Topics</summary>
               <div className="form-section">
                 <div className="form-row">
@@ -2524,7 +2620,7 @@ export default function AgendaIndexPage() {
               </div>
             </details>
 
-            <details open data-tmpl="standard compact entrepreneur chillhihigh china" style={{ display: 'none' }}>
+            <details open data-tmpl="standard entrepreneur chillhihigh china" style={{ display: 'none' }}>
               <summary>講評環節 Evaluation</summary>
               <div className="form-section">
                 <div className="form-row">
@@ -2544,7 +2640,7 @@ export default function AgendaIndexPage() {
               </div>
             </details>
 
-            <details open data-tmpl="standard compact entrepreneur chillhihigh china" style={{ display: 'none' }}>
+            <details open data-tmpl="standard entrepreneur chillhihigh china" style={{ display: 'none' }}>
               <summary>結束環節 Closing</summary>
               <div className="form-section">
                 <div className="form-row">
@@ -2762,6 +2858,7 @@ export default function AgendaIndexPage() {
                   </button>
                   <button className="settings-menu-item" onClick={downloadPDF}>下載 PDF</button>
                   <button className="settings-menu-item" onClick={downloadJPG}>下載 JPG</button>
+                  <button className="settings-menu-item" onClick={downloadWord}>下載 Word</button>
                 </div>
               </div>
               <div className="toolbar-sep"></div>

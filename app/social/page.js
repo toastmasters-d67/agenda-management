@@ -41,6 +41,9 @@ let creds          = [];      // [{ provider, hint, updatedAt }] — never the k
 let pendingImages  = [];      // in-flight generate jobs, see runGenerateImage()
 let elapsedTimer   = null;    // ticks the "已等 Ns" label on those tiles
 let socialAccounts = [];      // which platforms this club has authorised
+let postFacts      = null;    // the bound meeting's theme / host / roles, for the governed options
+let posterTemplates = [];     // PPTX poster templates this club can use (built-in + uploaded)
+let postPrefs      = null;    // GET /clubs/{id}/post-prefs, while the settings dialog is open
 
 let setSaveDisabled = null;   // React bridges (see the note in app/roles/page.js)
 let setSaveLabel    = null;
@@ -56,7 +59,7 @@ const blankPost = () => ({
   id: null, clubId: activeClubId(), agendaId: null, kind: 'promo',
   title: '', status: 'draft', body: '',
   variants: Object.fromEntries(PLATFORM_KEYS.map((k) => [k, { text: '', enabled: true }])),
-  images: [],
+  images: [], reviewState: 'none', governance: {},
 });
 
 /** Variants can arrive missing a platform (older row, or a partial generate). */
@@ -69,7 +72,9 @@ function normalisePost(p) {
   return { ...p, variants,
            kind: KIND_KEYS.includes(p.kind) ? p.kind : 'other',
            images: Array.isArray(p.images) ? p.images : [],
-           published: p.published || {} };
+           published: p.published || {},
+           reviewState: p.reviewState || 'none',
+           governance: p.governance || {} };
 }
 
 const isDirty = () => !!current && JSON.stringify(current) !== baseline;
@@ -173,6 +178,7 @@ async function onClubChange() {
   const v = document.getElementById('clubPickerSelect').value;
   selectedClubId = v ? parseInt(v, 10) : null;
   current = null;
+  posterTemplates = [];       // another club's templates
   await Promise.all([loadPosts(), loadAgendas(), loadSocialAccounts()]);
   renderEditor();
 }
@@ -236,6 +242,7 @@ async function openPost(id) {
   if (isDirty() && !confirm('有未儲存的變更，切換貼文將會捨棄。要繼續嗎？')) return;
   try {
     current = normalisePost(await apiJson(`/social-posts/${id}`));
+    if (current.reviewState !== 'none' && !posterTemplates.length) await loadPosterTemplates();
     snapshot();
     activeTab = PLATFORM_KEYS[0];
     renderList();
@@ -317,8 +324,13 @@ function renderEditor() {
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.8L20 10l-5.1 2.4L13 19l-2.1-6.6L6 10l6-1.2z"/></svg>
         AI 產生文案
       </button>
-      <span class="ai-bar-hint">會讀取上面綁定的例會資料，用你自己的 Anthropic 帳號產生。</span>
+      <span class="ai-bar-hint">${isGovernedKind() && current.agendaId
+        ? '受控生成：日期、地點、人名由系統從議程帶入，產出後要經幹部核可才能發布。'
+        : '會讀取上面綁定的例會資料，用你自己的 AI 帳號產生。'}</span>
+      <button class="btn-mini" onclick="window.__socialOpenPrefs()">貼文品牌設定・海報模板</button>
     </div>` : ''}
+
+    ${renderGovernance()}
 
     <div class="ed-block">
       <label class="ed-label">主文案（各平台共用的底稿）</label>
@@ -353,9 +365,11 @@ function renderEditor() {
 
     ${canWrite() ? `
     <div class="ed-publish">
-      <button class="btn-publish" onclick="window.__socialOpenPublish()">發布到社群平台</button>
+      <button class="btn-publish" onclick="window.__socialOpenPublish()"
+              ${needsReview() ? 'disabled title="尚未通過核可"' : ''}>發布到社群平台</button>
       <span class="ai-bar-hint">${
-        socialAccounts.length
+        needsReview() ? '這則是受控生成的貼文，核可之後才能發布。'
+        : socialAccounts.length
           ? `已連接：${socialAccounts.map((a) => esc(a.accountName)).join('、')}`
           : '這個分會還沒有連接任何平台，請到「分會管理 → 社群」完成授權。'}</span>
     </div>
@@ -653,7 +667,14 @@ async function savePost() {
   };
   try {
     if (current.id) {
-      await apiJson(`/social-posts/${current.id}`, { method: 'PUT', body });
+      const out = await apiJson(`/social-posts/${current.id}`, { method: 'PUT', body });
+      // Changing approved text sends the post back to review; the server
+      // decides, the page just shows it.
+      if (out?.reviewState && out.reviewState !== current.reviewState) {
+        current.reviewState = out.reviewState;
+        if (out.reviewState === 'pending') toast('文字改過了，這則貼文需要重新核可');
+        renderEditor();
+      }
     } else {
       const { id } = await apiJson('/social-posts', { method: 'POST', body });
       current.id = id;
@@ -688,6 +709,534 @@ async function deletePost() {
 // ================================================================
 // AI: COPY
 // ================================================================
+// ================================================================
+// GOVERNED POSTS (PostGenerator engine)
+// ================================================================
+// Promo and recap posts about a meeting are written by the governed engine:
+// facts come from the agenda and club settings, the Quality Checker can block
+// a draft, and an officer approves it before it can be published or its
+// poster downloaded. The server owns the verdict — this only displays it and
+// asks for it.
+
+const GOVERNED_KINDS = ['promo', 'recap'];
+const isGovernedKind = () => !!current && GOVERNED_KINDS.includes(current.kind);
+const needsReview = () => !!current && ['pending', 'rejected'].includes(current.reviewState);
+const REVIEW_LABELS = { pending: '待核可', approved: '已核可', rejected: '已退回' };
+const NOTE_ORDER = { crit: 0, warn: 1, info: 2 };
+const LENGTH_LABELS = { short: '短（200–300 字）', medium: '中（350–500 字）', long: '長（600–800 字）' };
+const EMOJI_LABELS = { none: '不用', light: '少量', moderate: '適中', rich: '活潑' };
+
+function renderGovernance() {
+  if (!current || !current.reviewState || current.reviewState === 'none') return '';
+  const g = current.governance || {};
+  const state = current.reviewState;
+  const notes = [...(g.complianceNotes || [])]
+    .sort((a, b) => NOTE_ORDER[a.severity] - NOTE_ORDER[b.severity]);
+  const loud = notes.filter((n) => n.severity !== 'info');
+  const quiet = notes.filter((n) => n.severity === 'info');
+  const aiNames = g.aiWrittenHighlights || [];
+  const officer = canWrite();
+  const stamp = (iso) => (iso || '').slice(0, 16).replace('T', ' ');
+  const reviewed = current.reviewedBy
+    ? `${state === 'approved' ? '核可' : '處理'}：${esc(current.reviewedBy)} ${esc(stamp(current.reviewedAt))}`
+    : '';
+  const plan = g.posterPlan;
+  const tplOpts = plan
+    ? posterTemplates.filter((t) => t.use === plan.use && t.enabled !== false)
+      .map((t) => `<option value="${esc(t.id)}" ${t.id === plan.template_id ? 'selected' : ''}>${
+        esc(t.name)}${t.source === 'upload' ? '（分會上傳）' : ''}</option>`).join('')
+    : '';
+
+  return `<div class="gov-panel gov-${state}">
+    <div class="gov-head">
+      <span class="gov-badge">受控生成 · ${esc(REVIEW_LABELS[state] || state)}</span>
+      <span class="gov-meta">${esc(g.usedModel || '')}${g.generatedAt ? ` · ${esc(stamp(g.generatedAt))}` : ''}${
+        reviewed ? ` · ${reviewed}` : ''}</span>
+    </div>
+    ${g.blocked ? `<div class="gov-blocked">品質檢查有紅線未過，這一版不能核可。
+      請依下方紅字補上資料（議程或貼文品牌設定）後重新產生。</div>` : ''}
+    <div class="gov-qc">${(g.qc || []).map((c) =>
+      `<span class="qc qc-${esc(c.state)}" title="${esc(c.detail)}">${
+        c.state === 'ok' ? '✓' : c.state === 'warn' ? '!' : '✕'} ${esc(c.title)}</span>`).join('')}</div>
+    ${loud.length ? `<ul class="gov-notes">${loud.map((n) =>
+      `<li class="note-${n.severity}">${esc(n.text)}</li>`).join('')}</ul>` : ''}
+    ${quiet.length ? `<details class="gov-info"><summary>系統帶入與補值紀錄（${quiet.length}）</summary>
+      <ul class="gov-notes">${quiet.map((n) => `<li class="note-info">${esc(n.text)}</li>`).join('')}</ul>
+    </details>` : ''}
+    ${aiNames.length && state !== 'approved' ? `<div class="gov-ai">
+      <div class="gov-ai-t">這些角色沒有亮點筆記，描述是 AI 依角色職責補寫的（不是本人實際表現）。請逐一看過，再勾選確認：</div>
+      ${aiNames.map((n) => `<label class="gov-ai-item"><input type="checkbox" class="gov-ai-cb" value="${esc(n)}"> ${esc(n)}</label>`).join('')}
+    </div>` : ''}
+    ${officer ? `<div class="gov-actions">
+      ${state !== 'approved' ? `<button class="btn-approve" onclick="window.__socialReview('approve')" ${g.blocked ? 'disabled' : ''}>核可</button>` : ''}
+      ${state === 'pending' ? `<button class="btn-mini" onclick="window.__socialReview('reject')">退回</button>` : ''}
+      ${state !== 'pending' ? `<button class="btn-mini" onclick="window.__socialReview('reopen')">改回待核可</button>` : ''}
+    </div>` : ''}
+    ${plan && officer ? `<div class="gov-poster">
+      <label class="ed-label">PPTX 海報</label>
+      <select id="posterTpl" class="ed-select">${tplOpts}</select>
+      <button class="btn-mini" onclick="window.__socialPoster()" ${state === 'approved' ? '' : 'disabled'}>產生並下載</button>
+      <span class="ai-bar-hint">${state === 'approved'
+        ? '可在 PowerPoint 裡再編輯；照片框會保留佔位。' : '核可後才能產生海報。'}</span>
+    </div>` : ''}
+  </div>`;
+}
+
+async function loadPosterTemplates() {
+  const cid = activeClubId();
+  if (cid == null) { posterTemplates = []; return; }
+  try {
+    posterTemplates = await apiJson(`/post-templates?club_id=${cid}`);
+  } catch {
+    posterTemplates = [];
+  }
+}
+
+async function reviewPost(action) {
+  if (!current?.id) return;
+  if (isDirty()) { toast('請先儲存——核可的是存好的那一版文字', true); return; }
+  const confirmed = [...document.querySelectorAll('.gov-ai-cb')]
+    .filter((el) => el.checked).map((el) => el.value);
+  try {
+    const post = await apiJson(`/social-posts/${current.id}/review`, {
+      method: 'POST', body: { action, confirmed },
+    });
+    current = normalisePost(post);
+    snapshot();
+    await loadPosts();
+    renderList();
+    renderEditor();
+    toast({ approve: '已核可，可以發布了', reject: '已退回', reopen: '已改回待核可' }[action]);
+  } catch (e) {
+    toast(e.message || '操作失敗', true);
+  }
+}
+
+async function makePoster() {
+  if (!current?.id) return;
+  const template_id = document.getElementById('posterTpl')?.value || '';
+  // Open the tab inside the click: one opened after the await is a popup to
+  // the browser and gets blocked.
+  const tab = window.open('', '_blank');
+  toast('正在產生海報…');
+  try {
+    const out = await apiJson(`/social-posts/${current.id}/poster`, {
+      method: 'POST', body: { template_id },
+    });
+    if (tab) tab.location.href = out.url;
+    else window.location.href = out.url;
+    toast(`已產生「${out.templateName}」海報`);
+  } catch (e) {
+    tab?.close();
+    toast(e.message || '產生海報失敗', true);
+  }
+}
+
+// ---- 貼文品牌設定 + PPTX poster templates ----
+// Three tabs over one draft. Text and list settings are saved together with
+// 儲存; template uploads, switches and deletes take effect at once (they are
+// files, not form fields), which the templates tab says.
+
+const PP_TABS = [
+  { key: 'basic',     label: '基本資料' },
+  { key: 'tone',      label: '語氣與規則' },
+  { key: 'templates', label: '海報模板' },
+];
+const PP_TEXT_KEYS = ['register_url', 'brand_signature', 'post_persona', 'post_notes_pre',
+  'post_notes_review', 'post_default_emotion', 'post_default_length', 'post_default_emoji'];
+const PP_LIST_KEYS = ['fixed_hashtags', 'banned_words'];
+const PP_KNOBS = [
+  { key: 'post_default_emotion', knob: 'emotion', label: '情緒方向', labels: {} },
+  { key: 'post_default_length', knob: 'length', label: '貼文長度', labels: { short: '短', medium: '中', long: '長' } },
+  { key: 'post_default_emoji', knob: 'use_emoji', label: 'emoji 用量', labels: EMOJI_LABELS },
+];
+const USE_LABELS = { PRE_EVENT: '宣傳', POST_REVIEW: '回顧' };
+
+let prefsDraft = null;      // the form's working copy; a list of null = "use the default"
+let prefsInitial = '';      // JSON of the draft as loaded, for the unsaved-changes check
+let prefsTab = 'basic';
+let tplUpload = null;       // { file, use, name, style, error, busy }
+
+const ppEditable = () => canWrite();
+const ppDirty = () => !!prefsDraft && JSON.stringify(prefsDraft) !== prefsInitial;
+
+async function openPrefsModal() {
+  const cid = activeClubId();
+  if (cid == null) { toast('請先選擇分會', true); return; }
+  try {
+    [postPrefs] = await Promise.all([apiJson(`/clubs/${cid}/post-prefs`), loadPosterTemplates()]);
+  } catch (e) {
+    toast(e.message || '讀取設定失敗', true);
+    return;
+  }
+  const p = postPrefs.prefs || {};
+  prefsDraft = Object.fromEntries(PP_TEXT_KEYS.map((k) => [k, p[k] || '']));
+  PP_LIST_KEYS.forEach((k) => { prefsDraft[k] = Array.isArray(p[k]) ? [...p[k]] : null; });
+  prefsInitial = JSON.stringify(prefsDraft);
+  prefsTab = 'basic';
+  tplUpload = { file: null, use: 'PRE_EVENT', name: '', style: [], error: '', busy: false };
+  renderPrefs();
+  document.getElementById('prefsModal').style.display = 'flex';
+}
+
+function closePrefsModal() {
+  if (ppDirty() && !confirm('有未儲存的設定變更，關閉後會捨棄。要繼續嗎？')) return;
+  document.getElementById('prefsModal').style.display = 'none';
+  postPrefs = null;
+  prefsDraft = null;
+}
+
+function renderPrefs() {
+  document.getElementById('prefsTabs').innerHTML = PP_TABS.map((t) =>
+    `<button type="button" role="tab" class="pp-tab${t.key === prefsTab ? ' active' : ''}"
+       aria-selected="${t.key === prefsTab}" onclick="window.__pp.tab('${t.key}')">${esc(t.label)}${
+       t.key === 'templates' ? `<span class="pp-tab-n">${posterTemplates.length}</span>` : ''}</button>`).join('');
+  const body = document.getElementById('prefsBody');
+  body.innerHTML = `
+    ${ppEditable() ? '' : '<div class="pp-readonly">只有分會幹部可以修改這些設定，你可以看但不能改。</div>'}
+    <section class="pp-panel" ${prefsTab === 'basic' ? '' : 'hidden'}>${ppBasicPanel()}</section>
+    <section class="pp-panel" ${prefsTab === 'tone' ? '' : 'hidden'}>${ppTonePanel()}</section>
+    <section class="pp-panel" ${prefsTab === 'templates' ? '' : 'hidden'}>${ppTemplatesPanel()}</section>`;
+  ppSignaturePreview();
+  ppSyncFooter();
+}
+
+function ppSyncFooter() {
+  const onTemplates = prefsTab === 'templates';
+  const state = document.getElementById('prefsState');
+  if (state) {
+    state.textContent = onTemplates ? '模板的上傳、啟用與刪除會立即生效'
+      : ppDirty() ? '有未儲存的變更' : '';
+    state.className = 'pp-state' + (ppDirty() && !onTemplates ? ' unsaved' : '');
+  }
+  const save = document.getElementById('prefsSaveBtn');
+  if (save) save.disabled = !ppEditable() || !ppDirty();
+}
+
+// ---- tab: 基本資料 ----
+
+function ppField({ label, badge, hint, control, extra = '' }) {
+  return `<div class="pp-field">
+    <div class="pp-label">${esc(label)}${badge ? `<span class="pp-badge">${esc(badge)}</span>` : ''}</div>
+    ${control}
+    ${hint ? `<div class="pp-hint">${hint}</div>` : ''}
+    ${extra}
+  </div>`;
+}
+
+function ppBasicPanel() {
+  const d = postPrefs.defaults || {};
+  const ro = ppEditable() ? '' : 'disabled';
+  return `
+    ${ppField({
+      label: '報名連結', badge: '選填',
+      control: `<input type="url" class="pp-input" ${ro} value="${esc(prefsDraft.register_url)}"
+        placeholder="https://…" oninput="window.__pp.text('register_url', this.value)">`,
+      hint: '有填才會出現在貼文最後的資訊欄與海報上；歡迎直接來的分會可以留空。',
+      extra: '<div class="pp-warn" id="ppUrlWarn" hidden>看起來不是網址，請以 https:// 開頭。</div>',
+    })}
+    ${ppField({
+      label: '品牌定位句',
+      control: `<input type="text" class="pp-input" ${ro} maxlength="200" value="${esc(prefsDraft.brand_signature)}"
+        placeholder="${esc(d.brand_signature || '')}" oninput="window.__pp.text('brand_signature', this.value)">`,
+      hint: '回顧貼文結尾會逐字印出這一句，AI 不會改寫。',
+      extra: '<div class="pp-preview" id="ppSigPreview"></div>',
+    })}
+    ${ppField({ label: '固定 hashtag', hint: '每一篇都會帶上；AI 另外依主題補的 hashtag 會接在後面。',
+      control: `<div id="ppList_fixed_hashtags">${ppListEditor('fixed_hashtags')}</div>` })}
+    ${ppField({ label: '禁用詞', hint: '出現在文案裡就會被品質檢查擋下、不能核可。',
+      control: `<div id="ppList_banned_words">${ppListEditor('banned_words')}</div>` })}`;
+}
+
+function ppSignaturePreview() {
+  const el = document.getElementById('ppSigPreview');
+  if (!el) return;
+  const own = prefsDraft.brand_signature.trim();
+  const text = own || postPrefs.defaults.brand_signature || '';
+  el.innerHTML = `<span class="pp-chip-src ${own ? 'own' : ''}">${own ? '已自訂' : '系統預設'}</span>
+    貼文結尾會印：「${esc(text)}」`;
+  const warn = document.getElementById('ppUrlWarn');
+  if (warn) {
+    const url = prefsDraft.register_url.trim();
+    warn.hidden = !url || /^https?:\/\//i.test(url);
+  }
+}
+
+function ppListEditor(key) {
+  const list = prefsDraft[key];
+  const defaults = postPrefs.defaults[key] || [];
+  const ro = !ppEditable();
+  if (list === null) {
+    return `<div class="pp-chips muted">
+        ${defaults.length ? defaults.map((v) => `<span class="pp-chip">${esc(v)}</span>`).join('')
+          : '<span class="pp-empty">預設是沒有</span>'}
+      </div>
+      <div class="pp-list-foot"><span class="pp-chip-src">使用系統預設</span>
+        ${ro ? '' : `<button type="button" class="pp-link" onclick="window.__pp.custom('${key}')">改成自訂</button>`}</div>`;
+  }
+  return `<div class="pp-chips${ro ? '' : ' editable'}" onclick="this.querySelector('input')?.focus()">
+      ${list.map((v, i) => `<span class="pp-chip">${esc(v)}${ro ? '' :
+        `<button type="button" aria-label="移除 ${esc(v)}" onclick="window.__pp.removeChip('${key}', ${i})">×</button>`}</span>`).join('')}
+      ${ro ? '' : `<input class="pp-chip-input" placeholder="${list.length ? '' : '輸入後按 Enter'}"
+        onkeydown="window.__pp.chipKey(event, '${key}')" onblur="window.__pp.chipCommit(this, '${key}')"
+        onpaste="setTimeout(() => window.__pp.chipCommit(this, '${key}'))">`}
+    </div>
+    <div class="pp-list-foot"><span class="pp-chip-src own">自訂</span>
+      ${ro ? '' : `<button type="button" class="pp-link" onclick="window.__pp.useDefault('${key}')">改回系統預設</button>`}</div>`;
+}
+
+function ppAddChips(key, raw) {
+  const items = String(raw || '').split(/[,，\n]+/).map((x) => x.trim()).filter(Boolean)
+    .map((x) => (key === 'fixed_hashtags' && !x.startsWith('#') ? `#${x}` : x));
+  const list = prefsDraft[key];
+  items.forEach((x) => { if (!list.includes(x)) list.push(x); });
+  return items.length;
+}
+
+function ppRerenderList(key, focus) {
+  document.getElementById(`ppList_${key}`).innerHTML = ppListEditor(key);
+  if (focus) document.querySelector(`#ppList_${key} .pp-chip-input`)?.focus();
+  ppSyncFooter();
+}
+
+// ---- tab: 語氣與規則 ----
+
+function ppTextarea(key, label, rows, placeholder, hint) {
+  const ro = ppEditable() ? '' : 'disabled';
+  const max = postPrefs.maxLength || 1000;
+  return ppField({
+    label,
+    control: `<textarea class="pp-textarea" rows="${rows}" ${ro} maxlength="${max}"
+      placeholder="${esc(placeholder)}" oninput="window.__pp.text('${key}', this.value)">${esc(prefsDraft[key])}</textarea>`,
+    extra: `<div class="pp-count" id="ppCount_${key}">${prefsDraft[key].length} / ${max}</div>`,
+    hint,
+  });
+}
+
+function ppTonePanel() {
+  const d = postPrefs.defaults || {};
+  return `
+    ${ppTextarea('post_persona', '品牌語氣', 4, d.post_persona || '',
+      '留空就用上面灰字的預設語氣。這一段只調語氣，不能推翻「事實不經 AI」等紅線。')}
+    <div class="pp-two">
+      ${ppTextarea('post_notes_pre', '宣傳貼文的補充規則', 3, '例如：這一季想強調新人友善', '')}
+      ${ppTextarea('post_notes_review', '回顧貼文的補充規則', 3, '例如：每位角色都要提到一個具體細節', '')}
+    </div>
+    <div class="pp-label pp-section-label">預設語氣旋鈕
+      <span class="pp-hint-inline">產生文案時沒特別指定，就用這裡選的</span></div>
+    ${PP_KNOBS.map((k) => ppKnob(k)).join('')}`;
+}
+
+function ppKnob({ key, knob, label, labels }) {
+  const opts = postPrefs.tuningChoices[knob] || [];
+  const chosen = prefsDraft[key];
+  const hint = (opts.find((o) => o.value === chosen) || {}).hint;
+  const ro = ppEditable() ? '' : 'disabled';
+  const btn = (value, text) => `<button type="button" class="pp-seg${chosen === value ? ' on' : ''}" ${ro}
+    aria-pressed="${chosen === value}" onclick="window.__pp.knob('${key}', '${esc(value)}')">${esc(text)}</button>`;
+  return `<div class="pp-knob">
+    <div class="pp-knob-label">${esc(label)}</div>
+    <div class="pp-segs" role="group" aria-label="${esc(label)}">
+      ${btn('', '不指定')}${opts.map((o) => btn(o.value, labels[o.value] || o.value)).join('')}
+    </div>
+    <div class="pp-knob-hint">${hint ? esc(hint.replace(/\*\*/g, '')) : '不特別要求，交給 AI 依主題判斷。'}</div>
+  </div>`;
+}
+
+// ---- tab: 海報模板 ----
+
+function ppTemplatesPanel() {
+  const group = (use, title, note) => {
+    const list = posterTemplates.filter((t) => t.use === use);
+    return `<div class="pp-tpl-group">
+      <div class="pp-label pp-section-label">${esc(title)}<span class="pp-hint-inline">${esc(note)}</span></div>
+      <div class="pp-tpl-grid">${list.length ? list.map(ppTemplateCard).join('')
+        : '<div class="pp-empty">還沒有這一類的模板。</div>'}</div>
+    </div>`;
+  };
+  return `
+    ${ppEditable() ? ppUploadCard() : ''}
+    ${group('PRE_EVENT', '宣傳海報', '單頁')}
+    ${group('POST_REVIEW', '回顧海報', '封面＋角色頁＋封底')}`;
+}
+
+function ppTemplateCard(t) {
+  const officer = ppEditable() && t.source === 'upload';
+  const pages = t.use === 'POST_REVIEW' && t.rolePages
+    ? `<div class="pp-tpl-meta">角色頁 ${t.rolePages} 頁 × 每頁 ${t.roleSlotsPerPage || 4} 位</div>` : '';
+  return `<div class="pp-tpl-card${t.enabled === false ? ' off' : ''}">
+    <div class="pp-tpl-top">
+      <span class="pp-tpl-title">${esc(t.name)}</span>
+      <span class="pp-tag ${t.source === 'builtin' ? '' : 'own'}">${t.source === 'builtin' ? '內建' : '分會上傳'}</span>
+    </div>
+    ${(t.style || []).length ? `<div class="pp-tpl-styles">${t.style.map((s) => `<span>${esc(s)}</span>`).join('')}</div>` : ''}
+    ${pages}
+    <div class="pp-tpl-actions">
+      <button type="button" class="pp-link" onclick="window.__pp.download('${esc(t.id)}', '${esc(t.name)}')">下載 .pptx</button>
+      ${officer ? `
+        <label class="pp-switch"><input type="checkbox" ${t.enabled ? 'checked' : ''}
+          onchange="window.__pp.toggleTpl('${esc(t.id)}', this.checked)"><span></span>${t.enabled ? '啟用中' : '已停用'}</label>
+        <button type="button" class="pp-link danger" onclick="window.__pp.deleteTpl('${esc(t.id)}', '${esc(t.name)}')">刪除</button>` : ''}
+    </div>
+  </div>`;
+}
+
+function ppUploadCard() {
+  const u = tplUpload;
+  const tokens = (postPrefs.templateTokens || {})[u.use] || { required: [], optional: [], photos: [] };
+  const marks = (list) => list.map((k) => `<code>{{${esc(k)}}}</code>`).join(' ');
+  return `<div class="pp-upload-card">
+    <label class="pp-drop${u.file ? ' has-file' : ''}" ondragover="event.preventDefault(); this.classList.add('over')"
+           ondragleave="this.classList.remove('over')" ondrop="window.__pp.drop(event)">
+      <input type="file" accept=".pptx" onchange="window.__pp.pick(this.files[0])">
+      <span class="pp-drop-t">${u.file ? esc(u.file.name) : '拖曳 .pptx 到這裡，或點一下選擇檔案'}</span>
+      <span class="pp-drop-s">${u.file ? '換一個檔案' : '設計好的 PowerPoint 模板，文字用 {{標記}} 標出要填入的地方'}</span>
+    </label>
+    <div class="pp-upload-row">
+      <div class="pp-segs" role="group" aria-label="用途">
+        ${Object.entries(USE_LABELS).map(([k, v]) => `<button type="button" class="pp-seg${u.use === k ? ' on' : ''}"
+          aria-pressed="${u.use === k}" onclick="window.__pp.uploadUse('${k}')">${v}</button>`).join('')}
+      </div>
+      <input class="pp-input" placeholder="模板名稱" value="${esc(u.name)}" oninput="window.__pp.uploadName(this.value)">
+      <input class="pp-input" placeholder="風格（逗號分隔，例如：溫暖, 熱鬧）" value="${esc(u.style.join(', '))}"
+             oninput="window.__pp.uploadStyle(this.value)">
+      <button type="button" class="pp-primary" ${u.file && !u.busy ? '' : 'disabled'}
+              onclick="window.__pp.upload()">${u.busy ? '檢查並上傳中…' : '上傳模板'}</button>
+    </div>
+    ${u.error ? `<div class="pp-error">${esc(u.error)}</div>` : ''}
+    <details class="pp-marks">
+      <summary>${USE_LABELS[u.use]}模板可以用的標記</summary>
+      <div><b>必要</b>（少了會被拒收）：${marks(tokens.required)}</div>
+      <div><b>選填</b>：${marks(tokens.optional)}</div>
+      <div><b>照片框</b>（圖形名稱設成這些，會放入照片）：${marks(tokens.photos)}</div>
+      <div class="pp-hint">最快的做法：先下載一個內建模板，改版面與配色，標記保留原樣。</div>
+    </details>
+  </div>`;
+}
+
+async function savePrefs() {
+  if (!ppEditable() || !ppDirty()) return;
+  const body = { ...prefsDraft };          // a list of null resets that list to the default
+  const btn = document.getElementById('prefsSaveBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '儲存中…'; }
+  try {
+    await apiJson(`/clubs/${activeClubId()}/post-prefs`, { method: 'PUT', body });
+    prefsInitial = JSON.stringify(prefsDraft);
+    closePrefsModal();
+    toast('已儲存貼文品牌設定，下次產生時生效');
+  } catch (e) {
+    toast(e.message || '儲存失敗', true);
+  } finally {
+    if (btn) btn.textContent = '儲存設定';
+    ppSyncFooter();
+  }
+}
+
+async function ppUpload() {
+  const u = tplUpload;
+  if (!u.file) return;
+  if (!/\.pptx$/i.test(u.file.name)) { u.error = '只能上傳 .pptx 檔'; renderPrefs(); return; }
+  const cid = activeClubId();
+  const type = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+  u.busy = true; u.error = ''; renderPrefs();
+  try {
+    const { uploadUrl, publicUrl } = await apiJson('/upload/presign', {
+      method: 'POST', body: { filename: u.file.name, content_type: type, club_id: cid },
+    });
+    const put = await fetch(uploadUrl, { method: 'PUT', headers: { 'Content-Type': type }, body: u.file });
+    if (!put.ok) throw new Error('上傳至雲端失敗，請再試一次');
+    const out = await apiJson('/post-templates', {
+      method: 'POST',
+      body: { club_id: cid, use: u.use, name: u.name.trim() || u.file.name.replace(/\.pptx$/i, ''),
+              style: u.style, file_url: publicUrl },
+    });
+    await loadPosterTemplates();
+    tplUpload = { file: null, use: u.use, name: '', style: [], error: '', busy: false };
+    renderPrefs();
+    toast(out.warnings?.length ? `已加入「${out.name}」，但：${out.warnings.join('；')}` : `已加入「${out.name}」`);
+  } catch (e) {
+    u.busy = false;
+    u.error = e.message || '上傳模板失敗';
+    renderPrefs();
+  }
+}
+
+async function ppDownload(id, name) {
+  try {
+    const res = await apiFetch(`/post-templates/${encodeURIComponent(id)}/file`);
+    if (!res.ok) throw new Error('下載失敗');
+    const url = URL.createObjectURL(await res.blob());
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${name || id}.pptx`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  } catch (e) {
+    toast(e.message || '下載失敗', true);
+  }
+}
+
+const ppHandlers = {
+  tab(key) { prefsTab = key; renderPrefs(); },
+  text(key, value) {
+    prefsDraft[key] = value;
+    const count = document.getElementById(`ppCount_${key}`);
+    if (count) {
+      const max = postPrefs.maxLength || 1000;
+      count.textContent = `${value.length} / ${max}`;
+      count.classList.toggle('near', value.length > max * 0.9);
+    }
+    ppSignaturePreview();
+    ppSyncFooter();
+  },
+  knob(key, value) { prefsDraft[key] = value; renderPrefs(); },
+  custom(key) { prefsDraft[key] = [...(postPrefs.defaults[key] || [])]; ppRerenderList(key, true); },
+  useDefault(key) { prefsDraft[key] = null; ppRerenderList(key); },
+  removeChip(key, i) { prefsDraft[key].splice(i, 1); ppRerenderList(key, true); },
+  chipKey(e, key) {
+    const input = e.target;
+    if (e.key === 'Enter' || e.key === ',' || e.key === '，') {
+      e.preventDefault();
+      if (ppAddChips(key, input.value)) ppRerenderList(key, true);
+    } else if (e.key === 'Backspace' && !input.value && prefsDraft[key].length) {
+      prefsDraft[key].pop();
+      ppRerenderList(key, true);
+    }
+  },
+  chipCommit(input, key) { if (input.value.trim() && ppAddChips(key, input.value)) ppRerenderList(key); },
+  pick(file) { if (file) { tplUpload.file = file; tplUpload.error = ''; renderPrefs(); } },
+  drop(e) {
+    e.preventDefault();
+    const file = e.dataTransfer?.files?.[0];
+    if (file) ppHandlers.pick(file);
+  },
+  uploadUse(use) { tplUpload.use = use; renderPrefs(); },
+  uploadName(v) { tplUpload.name = v; },
+  uploadStyle(v) { tplUpload.style = v.split(/[,，]/).map((x) => x.trim()).filter(Boolean); },
+  upload: ppUpload,
+  download: ppDownload,
+  async toggleTpl(id, enabled) {
+    try {
+      await apiJson(`/post-templates/${encodeURIComponent(id)}`, { method: 'PUT', body: { enabled } });
+      await loadPosterTemplates();
+      renderPrefs();
+    } catch (e) {
+      toast(e.message || '更新失敗', true);
+    }
+  },
+  async deleteTpl(id, name) {
+    if (!confirm(`確定要刪除模板「${name}」嗎？已經產生的海報不受影響。`)) return;
+    try {
+      await apiJson(`/post-templates/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      await loadPosterTemplates();
+      renderPrefs();
+      toast(`已刪除「${name}」`);
+    } catch (e) {
+      toast(e.message || '刪除失敗', true);
+    }
+  },
+};
+
 const COPY_PROVIDERS = [
   { key: 'anthropic', label: 'Claude (Anthropic)' },
   { key: 'openai',    label: 'ChatGPT (OpenAI)' },
@@ -729,10 +1278,48 @@ function openGenModal() {
   });
   const note = document.getElementById('genAgendaNote');
   const a = agendas.find((x) => x.id === current.agendaId);
-  note.textContent = a
-    ? `會參考：${a.meetingDate || ''}${a.meetingTheme ? ` · ${a.meetingTheme}` : ''}`
-    : '尚未綁定例會 — 只會依你寫的補充指示產生。';
+  const governed = isGovernedKind() && !!current.agendaId;
+  note.textContent = !a
+    ? '尚未綁定例會 — 只會依你寫的補充指示產生。'
+    : governed
+      ? `受控生成：${a.meetingDate || ''}${a.meetingTheme ? ` · ${a.meetingTheme}` : ''}。日期、地點、人名由系統帶入，AI 只寫文案；產出會直接存成待核可的貼文。`
+      : `會參考：${a.meetingDate || ''}${a.meetingTheme ? ` · ${a.meetingTheme}` : ''}`;
+  const box = document.getElementById('genGoverned');
+  box.style.display = governed ? '' : 'none';
+  box.innerHTML = governed ? '<div class="loading-spinner"><div class="spinner"></div></div>' : '';
   modal.style.display = 'flex';
+  if (governed) renderGovernedOptions(current.agendaId);
+}
+
+async function renderGovernedOptions(agendaId) {
+  const box = document.getElementById('genGoverned');
+  try {
+    postFacts = await apiJson(`/post-facts?agenda_id=${agendaId}`);
+  } catch (e) {
+    box.innerHTML = `<div class="modal-field-hint">讀取例會資料失敗：${esc(e.message || '')}</div>`;
+    return;
+  }
+  const sel = (id, opts) => `<select id="${id}" class="ed-select"><option value="">分會預設</option>${
+    Object.entries(opts).map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join('')}</select>`;
+  const emotions = Object.fromEntries(['共鳴', '懸念', '溫暖', '幽默', '激勵'].map((x) => [x, x]));
+  const roles = postFacts.roles || [];
+  box.innerHTML = `
+    <div class="pp-row">
+      <div><label class="modal-field-label">情緒方向</label>${sel('genEmotion', emotions)}</div>
+      <div><label class="modal-field-label">長度</label>${sel('genLength', LENGTH_LABELS)}</div>
+      <div><label class="modal-field-label">emoji</label>${sel('genEmoji', EMOJI_LABELS)}</div>
+    </div>
+    ${current.kind === 'promo' ? `
+      <label class="modal-field-label">總主持人 ${esc(postFacts.host || '（議程未填）')} 的特色（選填，有填才會寫）</label>
+      <input id="genHostHi" class="modal-input" placeholder="例如：擅長自嘲式開場">` : `
+      <label class="modal-field-label">角色亮點筆記（選填）</label>
+      <div class="modal-field-hint">沒填的角色，AI 只會寫中性的職責描述，核可前要逐一確認。</div>
+      <div class="gen-roles">${roles.length ? roles.map((r) => `
+        <div class="gen-role"><span>${esc(r.emoji || '')} ${esc(r.roleType)} · ${esc(r.name)}</span>
+          <input class="modal-input gen-role-note" data-name="${esc(r.name)}" placeholder="這次的表現"></div>`).join('')
+        : '<div class="modal-field-hint">這場議程還沒有排角色。</div>'}</div>`}
+    <label class="modal-check" style="margin-top:10px">
+      <input type="checkbox" id="genPoster" checked> 一併準備 PPTX 海報（核可後可下載）</label>`;
 }
 
 /** The model list follows the provider — they are different catalogues. */
@@ -784,6 +1371,21 @@ async function runGenerate() {
 
   // This one call can run for the better part of a minute, so the modal turns
   // into a progress panel rather than leaving a dead form on screen.
+  const governed = isGovernedKind() && !!current.agendaId;
+  if (governed && isDirty() && current.id &&
+      !confirm('受控生成會把結果直接存進這則貼文，未儲存的文字修改會被取代。要繼續嗎？')) return;
+  const options = governed ? {
+    tuning: {
+      emotion: document.getElementById('genEmotion')?.value || '',
+      length: document.getElementById('genLength')?.value || '',
+      use_emoji: document.getElementById('genEmoji')?.value || '',
+    },
+    host_highlight: document.getElementById('genHostHi')?.value || '',
+    role_notes: Object.fromEntries([...document.querySelectorAll('.gen-role-note')]
+      .filter((el) => el.value.trim()).map((el) => [el.dataset.name, el.value.trim()])),
+    poster: !!document.getElementById('genPoster')?.checked,
+  } : null;
+
   const restoreBtn  = busyButton(document.getElementById('genConfirmBtn'), '產生中…');
   const restoreForm = showGenProgress(provider);
   try {
@@ -797,8 +1399,30 @@ async function runGenerate() {
         platforms,
         provider,
         model,
+        post_id: current.id,
+        options,
       },
     });
+    if (out.post) {
+      // Governed: the server already saved it, pending review. Attachments
+      // uploaded this session but not saved yet are not part of what the
+      // server has — keep them, left unsaved, so they are not lost.
+      const unsavedImages = current.images;
+      current = normalisePost(out.post);
+      snapshot();
+      if (JSON.stringify(unsavedImages) !== JSON.stringify(current.images) && unsavedImages.length) {
+        current.images = unsavedImages;
+      }
+      await Promise.all([loadPosts(), loadPosterTemplates()]);
+      restoreForm();
+      closeGenModal();
+      renderList();
+      renderEditor();
+      toast(current.governance?.blocked
+        ? '已產生，但品質檢查有紅線未過，請看治理面板'
+        : '已產生並存成待核可的貼文，請檢查後核可');
+      return;
+    }
     if (!current.title && out.title) current.title = out.title;
     current.body = out.body || current.body;
     Object.entries(out.variants || {}).forEach(([k, v]) => {
@@ -1504,6 +2128,10 @@ export default function SocialPage() {
     window.__socialSaveClubCred = saveClubCred;
     window.__socialDropClubCred = dropClubCred;
     window.__socialDropCred    = dropCred;
+    window.__socialReview      = reviewPost;
+    window.__socialPoster      = makePoster;
+    window.__socialOpenPrefs   = openPrefsModal;
+    window.__pp                = ppHandlers;   // 貼文品牌設定 dialog
     setSaveDisabled = setSaveDisabledState;
     setSaveLabel    = setSaveLabelState;
 
@@ -1531,7 +2159,8 @@ export default function SocialPage() {
       ['__socialOpen', '__socialNew', '__socialField', '__socialVariant', '__socialTab',
        '__socialFillAll', '__socialCopy', '__socialUpload', '__socialRemoveImage',
        '__socialDelete', '__socialOpenGen', '__socialOpenImg', '__socialOpenPublish',
-       '__socialSaveCred', '__socialDropCred'].forEach((k) => { delete window[k]; });
+       '__socialSaveCred', '__socialDropCred', '__socialReview', '__socialPoster',
+       '__socialOpenPrefs', '__pp'].forEach((k) => { delete window[k]; });
       setSaveDisabled = null;
       setSaveLabel = null;
       if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
@@ -1553,6 +2182,9 @@ export default function SocialPage() {
           <div className="topbar-actions">
             <span className="save-state" id="saveState"></span>
             <button className="btn-ghost" onClick={openCredModal}>AI 帳號</button>
+            {/* Also reachable without a post open: it holds the club's PPTX
+                templates, which people look for before writing anything. */}
+            <button className="btn-ghost write-action" onClick={openPrefsModal}>貼文品牌設定・海報模板</button>
             <button className="btn-add write-action" onClick={savePost} disabled={saveDisabled}>{saveLabel}</button>
           </div>
         </header>
@@ -1622,6 +2254,7 @@ export default function SocialPage() {
             <label className="modal-field-label">補充指示（選填）</label>
             <textarea id="genBrief" className="modal-textarea" rows="4"
                       placeholder="例如：這次想強調歡迎新朋友來參觀，語氣輕鬆一點"></textarea>
+            <div id="genGoverned" style={{ display: 'none' }}></div>
             <label className="modal-field-label">要產生哪些平台</label>
             <div className="modal-checks">
               {SOCIAL_PLATFORMS.map((p) => (
@@ -1637,6 +2270,27 @@ export default function SocialPage() {
           <div className="modal-actions">
             <button className="modal-btn modal-btn-cancel" onClick={closeGenModal}>取消</button>
             <button className="modal-btn modal-btn-confirm" id="genConfirmBtn" onClick={runGenerate}>產生</button>
+          </div>
+        </div>
+      </div>
+
+      {/* 貼文品牌設定 + PPTX poster templates */}
+      <div id="prefsModal" className="modal-overlay" style={{ display: 'none' }}
+           onClick={(e) => { if (e.target === e.currentTarget) closePrefsModal(); }}>
+        <div className="modal-box pp-box" role="dialog" aria-labelledby="prefsTitle">
+          <div className="modal-header pp-header">
+            <div>
+              <h3 id="prefsTitle">貼文品牌設定</h3>
+              <div className="pp-subtitle">例會宣傳與回顧的受控生成會用到這些設定，整個分會共用。</div>
+            </div>
+            <button className="modal-close" onClick={closePrefsModal} aria-label="關閉">✕</button>
+          </div>
+          <div className="pp-tabs" id="prefsTabs" role="tablist"></div>
+          <div className="modal-body pp-body" id="prefsBody"></div>
+          <div className="modal-actions pp-actions">
+            <span className="pp-state" id="prefsState"></span>
+            <button className="modal-btn modal-btn-cancel" onClick={closePrefsModal}>關閉</button>
+            <button className="modal-btn modal-btn-confirm write-action" id="prefsSaveBtn" onClick={savePrefs}>儲存設定</button>
           </div>
         </div>
       </div>

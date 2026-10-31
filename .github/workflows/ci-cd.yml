@@ -12,6 +12,19 @@ permissions:
 jobs:
   ci:
     runs-on: ubuntu-latest
+    # A throwaway database for the API tests (tests/test_governed_posts.py):
+    # the full Alembic history runs against it first, so a migration that
+    # cannot apply to an empty database fails here, not on the VM.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: agenda_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s
+          --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@v4
 
@@ -31,6 +44,15 @@ jobs:
         run: |
           python -m compileall -q api migrations
           python -c "import api.index"
+      - name: Migrations and tests
+        env:
+          DATABASE_URL: postgresql://postgres:test@localhost:5432/agenda_test
+          TEST_DATABASE_URL: postgresql://postgres:test@localhost:5432/agenda_test
+          PYTHONUTF8: "1"
+        run: |
+          pip install pytest
+          alembic upgrade head
+          pytest -q tests
 
   deploy:
     needs: ci

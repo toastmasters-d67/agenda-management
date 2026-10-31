@@ -5,6 +5,7 @@ import { apiJson } from '@/lib/api';
 import { setAuth, clearAuth, applyRoleUI, isSystemAdmin, canWrite, getClubId } from '@/lib/auth';
 import { MemberAC } from '@/lib/memberAutocomplete';
 import { MAX_EVAL_EVALUATORS } from '@/lib/agendaTemplates';
+import { ROLE_GROUP_DEFS, MEETING_ROLES, MEETING_META, clubCustomRoles } from '@/lib/meetingRoles';
 import { parseRolesSheet, resolveMemberName, isPersonField, META_IDS } from '@/lib/rolesSheet';
 import { loadPathways, CUSTOM_VALUE, pathwaySelect, levelSelect, projectSelect } from '@/lib/pathways';
 import Sidebar from '@/components/Sidebar';
@@ -31,69 +32,32 @@ import SearchableSelect from '@/components/SearchableSelect';
 // ================================================================
 
 // ================================================================
-// ROLE DEFINITIONS  (mirrors the agenda fields in app/agenda/page.js)
+// ROLE DEFINITIONS  (the role catalog, lib/meetingRoles.json)
 // ================================================================
-// Every club sees the same full role list — a role whose `templates` allow-list
-// doesn't include the active club's template renders as a locked (disabled,
-// greyed) row instead of being removed, per the site-wide rule that
-// `agendas.data` is one shared schema across templates: a template that
-// doesn't use a field just leaves it null/unrendered, and the matrix reflects
-// that by locking rather than hiding. No `templates` key = every template uses it.
-const ROLE_GROUPS = [
-  {
-    label: '會議主持',
-    roles: [
-      { key: 'receptionHost',  label: '報到接待',     en: 'Reception Host' },
-      // Chill Hi High has no separate "calling to order" row — its opening
-      // remarks row reads `welcomeTME` instead (see lib/agendaTemplates.js).
-      { key: 'callingToOrder', label: '宣布例會開始', en: 'Calling to Order', templates: ['standard', 'compact', 'entrepreneur', 'china'] },
-      { key: 'welcomeTME',     label: '會長致歡迎詞', en: 'Welcome Guests & TME' },
-      { key: 'tme',            label: '總主持人',     en: 'Toastmaster of the Evening' },
-    ],
-  },
-  {
-    label: '計時 / 記錄',
-    roles: [
-      { key: 'timer',        label: '計時員',     en: 'Timer' },
-      // Chill Hi High's planning sheet staffs a second timer; no other template
-      // has the row, so it locks everywhere else (same rule as boardWriter).
-      { key: 'timerAssistant', label: '計時員幫手', en: 'Assistant Timer', templates: ['chillhihigh'] },
-      { key: 'ahCounter',    label: '贅語記錄員', en: 'Ah-Counter' },
-      { key: 'boardWriter',  label: '板書',       en: 'Board Writer', templates: ['chillhihigh'] },
-      { key: 'photographer', label: '攝影',       en: 'Photographer', templates: ['chillhihigh'] },
-      { key: 'voteCounter',  label: '計票員',     en: 'Vote Counter', templates: ['china'] },
-    ],
-  },
-  {
-    label: '單元主持',
-    roles: [
-      { key: 'varietyHost',       label: '多元單元主持人', en: 'Variety Session Host', kind: 'variety', templates: ['standard', 'compact', 'entrepreneur', 'chillhihigh'] },
-      { key: 'tableTopicsMaster', label: '即席問答主持人', en: 'Table Topics Master' },
-      { key: 'wordOfTheDay',      label: '每日一字',       en: 'Word of the Day', templates: ['china'] },
-      { key: 'quizHost',          label: '問答遊戲主持',   en: 'Quiz Session', templates: ['china'] },
-    ],
-  },
-  { label: '指定演講', dynamic: 'speech' },
-  {
-    label: '講評',
-    dynamic: 'evaluator',
-    // Rendered after the per-speaker evaluator rows.
-    tail: [
-      { key: 'langEvaluator',    label: '語言講評', en: 'Language Evaluator' },
-      { key: 'generalEvaluator', label: '總講評',   en: 'General Evaluator' },
-    ],
-    // …and these after `tail`, mirroring the agenda sheet, where 講評員講評
-    // closes out the evaluation block after 總講評.
-    tailDynamic: 'evalEvaluator',
-  },
-  {
-    label: '結尾',
-    roles: [
-      { key: 'awardsPresenter', label: '贈感謝狀',            en: 'Awards Presenter' },
-      { key: 'sharingFeedback', label: '會後分享 & 來賓回饋', en: 'Sharing & Feedback' },
-    ],
-  },
-];
+// The matrix offers every role any template uses, plus the club's own roles
+// (clubs.settings.custom_roles), so the plan made here can feed any agenda
+// template or Word template. A role the club's agenda template doesn't print
+// is hidden by default and shown with 「顯示其他角色」— or whenever a loaded
+// meeting already has someone in it, so planned data is never out of sight.
+// It stays editable either way: the value is kept in agendas.data for the
+// outputs that do use it.
+function roleGroups() {
+  return ROLE_GROUP_DEFS.map((g) => {
+    const roles = MEETING_ROLES.filter((r) => r.group === g.key)
+      .map((r) => ({ key: r.key, label: r.zh, en: r.en, kind: r.kind, templates: r.templates }));
+    if (g.key === 'speech') return { label: g.label, dynamic: 'speech' };
+    // Per-speaker evaluators, then 語言講評 / 總講評, then 講評員講評 — the
+    // order of the agenda sheet's evaluation block.
+    if (g.key === 'eval') return { label: g.label, dynamic: 'evaluator', tail: roles, tailDynamic: 'evalEvaluator' };
+    if (g.key === 'custom') {
+      return {
+        label: g.label,
+        roles: clubCustomRoles(activeClub()).map((r) => ({ key: `custom_${r.id}`, kind: 'custom', id: r.id, label: r.zh, en: r.en })),
+      };
+    }
+    return { label: g.label, roles };
+  });
+}
 
 /**
  * Per-meeting fields edited in the column header instead of as a matrix row.
@@ -102,11 +66,8 @@ const ROLE_GROUPS = [
  * never count toward the assignment tally or duplicate detection. They are also
  * not member fields, so they get no autocomplete.
  */
-const META_FIELDS = [
-  { key: 'meetingNo',     label: '場次編號', placeholder: '場次編號' },
-  { key: 'meetingTheme',  label: '例會主題', placeholder: '未設定主題' },
-  { key: 'themeQuestion', label: '主題題目', placeholder: '主題題目', templates: ['chillhihigh'] },
-];
+const META_FIELDS = MEETING_META.filter((m) => m.header)
+  .map((m) => ({ key: m.key, label: m.zh, placeholder: m.placeholder, templates: m.templates }));
 
 /** Same shape app/agenda/page.js uses, so a row added here stays valid in the editor. */
 function blankSpeech() {
@@ -122,6 +83,7 @@ function roleGet(data, role) {
   if (role.kind === 'evaluator')     return (data.evaluators    || [])[role.idx] || '';
   if (role.kind === 'evalEvaluator') return (data.evalEvaluators || [])[role.idx] || '';
   if (role.kind === 'variety')       return data.varietySession?.host || '';
+  if (role.kind === 'custom')        return data.customRoles?.[role.id] || '';
   return data[role.key] || '';
 }
 
@@ -148,6 +110,8 @@ function roleSet(data, role, value) {
     if (!data.varietySession) data.varietySession = { enabled: false, duration: 15, host: '' };
     data.varietySession.host = value;
     if (value) data.varietySession.enabled = true;
+  } else if (role.kind === 'custom') {
+    data.customRoles = { ...(data.customRoles || {}), [role.id]: value };
   } else {
     data[role.key] = value;
   }
@@ -163,6 +127,8 @@ let selectedClubId = null;
 let dateFrom       = '';     // inclusive meeting_date bounds; '' = unbounded
 let dateTo         = '';
 let allClubs       = [];     // full /clubs list (id, name, template_key, …) — resolves the active template
+let showOtherRoles = false;  // 「顯示其他角色」: roles the club's agenda template doesn't print
+let hiddenRoleCount = 0;     // how many such roles buildRows() left out
 
 /** The club whose roles are currently being planned (admin picks one; everyone else uses their own). */
 function activeClubId() {
@@ -181,8 +147,8 @@ function activeClub() {
 }
 
 /**
- * Header fields for the active template. Unlike role rows — which stay visible
- * but locked — a meta field the template does not use is dropped outright:
+ * Header fields for the active template. Unlike role rows — which 「顯示其他角色」
+ * can bring back — a meta field the template does not use is dropped outright:
  * the column header has no room for a row of greyed-out placeholders.
  */
 function activeMetaFields() {
@@ -393,9 +359,9 @@ function updateRangeLabel(total) {
     : `顯示 ${meetings.length} 場`;
 }
 
-const TEMPLATE_LABELS = { standard: '標準版', compact: '精簡版', entrepreneur: '企業家版', chillhihigh: 'Chill Hi High', china: 'CHINA' };
+const TEMPLATE_LABELS = { standard: '標準版', entrepreneur: '企業家', chillhihigh: 'Chill Hi High', china: 'CHINA' };
 
-/** Display name for the active club's template — used in the toolbar label and locked-row tooltips. */
+/** Display name for the active club's template — used in the toolbar label and off-template row tooltips. */
 function activeTemplateLabel() {
   return TEMPLATE_LABELS[activeTemplateKey()] || activeTemplateKey();
 }
@@ -406,6 +372,13 @@ function updateTemplateLabel() {
   if (!label) return;
   const club = allClubs.find((c) => c.id === activeClubId());
   label.textContent = club ? `目前版型：${activeTemplateLabel()}` : '';
+  const toggle = document.getElementById('otherRolesToggle');
+  if (toggle) {
+    toggle.style.display = club && (hiddenRoleCount || showOtherRoles) ? '' : 'none';
+    document.getElementById('otherRolesCheck').checked = showOtherRoles;
+    document.getElementById('otherRolesText').textContent =
+      showOtherRoles ? '顯示其他角色' : `顯示其他角色（${hiddenRoleCount}）`;
+  }
   updateImportButton();
 }
 
@@ -415,14 +388,21 @@ function updateTemplateLabel() {
 function buildRows() {
   rows     = [];
   roleById = {};
+  hiddenRoleCount = 0;
 
   const tmplKey = activeTemplateKey();
-  const locked = (role) => !!(role.templates && !role.templates.includes(tmplKey));
+  const offTemplate = (role) => !!(role.templates && !role.templates.includes(tmplKey));
 
+  // Every role is registered (save / import can always resolve it); a row is
+  // drawn unless it's off-template, not asked for, and empty everywhere.
   const pushRole = (role) => {
-    const withLock = { ...role, locked: locked(role) };
-    roleById[roleId(withLock)] = withLock;
-    rows.push({ type: 'role', role: withLock });
+    const r = { ...role, offTemplate: offTemplate(role) };
+    roleById[roleId(r)] = r;
+    if (r.offTemplate && !showOtherRoles && !meetings.some((m) => roleGet(m.data, r))) {
+      hiddenRoleCount++;
+      return;
+    }
+    rows.push({ type: 'role', role: r });
   };
 
   // Resolvable by the save path, but intentionally absent from `rows`.
@@ -439,7 +419,8 @@ function buildRows() {
     Math.max(0, ...meetings.map((m) => (m.data.evalEvaluators || []).length)) + 1,
   );
 
-  ROLE_GROUPS.forEach((group) => {
+  roleGroups().forEach((group) => {
+    const headerAt = rows.length;
     rows.push({ type: 'group', label: group.label });
     (group.roles || []).forEach(pushRole);
 
@@ -470,7 +451,21 @@ function buildRows() {
                    label: `講評員講評 #${i + 1}`, en: `Evaluator's Evaluator #${i + 1}` });
       }
     }
+    if (rows.length === headerAt + 1) rows.pop(); // nothing shown under it
   });
+}
+
+/** 「顯示其他角色」: redraw with off-template roles in or out, keeping edits. */
+function toggleOtherRoles(on) {
+  showOtherRoles = on;
+  buildRows();
+  // Rows that just appeared need a draft value; existing drafts (and their
+  // unsaved edits) are kept as they are.
+  meetings.forEach((m) => rows.forEach((r) => {
+    if (r.type === 'role' && !(roleId(r.role) in m.draft)) m.draft[roleId(r.role)] = roleGet(m.data, r.role);
+  }));
+  renderMatrix();
+  updateTemplateLabel();
 }
 
 /**
@@ -552,19 +547,6 @@ function renderMatrix() {
     }
     const rid = roleId(r.role);
 
-    if (r.role.locked) {
-      const lockTitle = `${activeTemplateLabel()} 不使用這個角色`;
-      const cells = meetings.map(() => `<td class="rm-cell rm-locked">
-        <input type="text" class="rm-input" value="" disabled placeholder="—" title="${esc(lockTitle)}">
-      </td>`).join('');
-      return `<tr class="rm-locked-row">
-        <th class="rm-role" title="${esc(lockTitle)}">
-          <span class="rm-role-zh">${esc(r.role.label)}</span>
-          <span class="rm-role-en">${esc(r.role.en || '')}</span>
-        </th>${cells}${addColCell}
-      </tr>`;
-    }
-
     if (r.role.kind === 'speechField') {
       const cells = meetings.map((m) => `<td class="rm-cell">
         <select class="rm-input rm-select" id="cell_${m.id}_${rid}" data-mid="${m.id}" data-rid="${rid}"
@@ -594,8 +576,11 @@ function renderMatrix() {
                oninput="window.__rolesOnCellInput(this)">
       </td>`;
     }).join('');
-    return `<tr>
-      <th class="rm-role" title="${esc(r.role.en || '')}">
+    const offTitle = r.role.offTemplate
+      ? `${activeTemplateLabel()} 的議程不會印出這個角色；Word 範本等其他輸出仍可使用`
+      : (r.role.en || '');
+    return `<tr class="${r.role.offTemplate ? 'rm-other-row' : ''}">
+      <th class="rm-role" title="${esc(offTitle)}">
         <span class="rm-role-zh">${esc(r.role.label)}</span>
         <span class="rm-role-en">${esc(r.role.en || '')}</span>
       </th>${cells}${addColCell}
@@ -609,7 +594,7 @@ function renderMatrix() {
     </table>`;
 
   meetings.forEach((m) => rows.forEach((r) => {
-    if (r.type === 'role' && r.role.kind === 'speechField' && !r.role.locked) fillPathwaySelect(m, r.role);
+    if (r.type === 'role' && r.role.kind === 'speechField') fillPathwaySelect(m, r.role);
   }));
   refreshDecorations();
   updateSaveBar();
@@ -862,7 +847,7 @@ function updateImportButton() {
  * evaluator slots beyond the rows currently drawn — are registered as hidden
  * descriptors so the save path can still write them; the preview reports how
  * many there are rather than dropping them silently.
- * Returns null for a role the active template locks.
+ * Returns null for an id the matrix doesn't know.
  */
 function importRole(id) {
   const sf = id.match(/^speech(\d+)_(title|pwcode|pwlevel|project)$/);
@@ -874,7 +859,7 @@ function importRole(id) {
       label: `#${sf[1]} ${spec.label}`, hidden: true,
     });
   }
-  if (roleById[id]) return roleById[id].locked ? null : roleById[id];
+  if (roleById[id]) return roleById[id];
 
   const slot = id.match(/^(evalEvaluator|speech|evaluator)(\d+)$/);
   if (slot) {
@@ -1375,6 +1360,11 @@ export default function RolesPage() {
 
             <span className="roster-count" id="rosterCount"></span>
             <span className="pager-label" id="templateLabel"></span>
+            <label className="other-roles-toggle" id="otherRolesToggle" style={{ display: 'none' }}
+                   title="目前版型的議程不會印出的角色。排了人仍會保存，Word 範本等其他輸出可以使用。">
+              <input type="checkbox" id="otherRolesCheck" onChange={(e) => toggleOtherRoles(e.target.checked)} />
+              <span id="otherRolesText">顯示其他角色</span>
+            </label>
             <span className="pager-label" id="pagerLabel"></span>
           </div>
 

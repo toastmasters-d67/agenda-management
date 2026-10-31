@@ -1,0 +1,5 @@
+# 新分會的固定 hashtag 預設值（每篇必含）。分會可在「貼文品牌設定」改成自己的。
+# 刻意只放與分會無關的標籤——PostGenerator 原本的這份是 Chill Hi High 的定位。
+hashtags:
+  - "#Toastmasters"
+  - "#國際演講會"

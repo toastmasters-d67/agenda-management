@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { jwtVerify } from 'jose';
 
 // ================================================================
-// AGENDA EXPORT  (server-side JPG / PDF)
+// AGENDA EXPORT  (server-side JPG / PDF / Word)
 // ================================================================
 // The agenda sheet is drawn in the browser — per-club templates, row-height
 // equalising, html2canvas — and the "下載 JPG / PDF" buttons capture that DOM.
@@ -10,7 +10,9 @@ import { jwtVerify } from 'jose';
 // drifts from the first. So this route opens the real /agenda page in a
 // headless Chromium, signed in as the requesting user, and asks the page for
 // the very same capture the buttons make (window.__agendaExport in
-// app/agenda/page.js). What comes out is byte-for-byte the web download.
+// app/agenda/page.js). What comes out is byte-for-byte the web download —
+// the editable Word file included, filled from the club's own Word template
+// or the default one exactly as 下載 Word does.
 //
 // Called by the MCP tool `export_agenda` (api/index.py), which:
 //   - mints a short-lived login token for the caller (the token *is* the
@@ -25,7 +27,8 @@ import { jwtVerify } from 'jose';
 export const runtime = 'nodejs';
 export const maxDuration = 60;
 
-const FORMATS = ['jpg', 'pdf'];
+const FORMATS = ['jpg', 'pdf', 'docx'];
+const DOCX_TYPE = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 // Of the 60 s: launching Chromium and loading the agenda page get this much,
 // counted from the start of the request; capture and upload get the rest.
 const LOAD_BUDGET_MS = 40000;
@@ -140,7 +143,7 @@ export async function POST(request) {
   }
 
   if (uploads) {
-    const all = [uploads.pdf, ...(uploads.jpg || [])].filter(Boolean);
+    const all = [uploads.pdf, uploads.docx, ...(uploads.jpg || [])].filter(Boolean);
     if (!all.every(uploadAllowed)) {
       return NextResponse.json({ detail: '上傳網址不在允許的儲存空間' }, { status: 400 });
     }
@@ -220,6 +223,7 @@ export async function POST(request) {
       const res = { name: window.__agendaExport.baseName() };
       if (wanted.includes('jpg')) res.jpg = await window.__agendaExport.jpg();
       if (wanted.includes('pdf')) res.pdf = await window.__agendaExport.pdf();
+      if (wanted.includes('docx')) res.docx = await window.__agendaExport.docx();
       return res;
     }, formats);
 
@@ -232,8 +236,11 @@ export async function POST(request) {
     await Promise.all([
       ...(out.jpg || []).map((d, i) => putDataUrl(jpgUrls[i], d, 'image/jpeg')),
       out.pdf ? putDataUrl(uploads.pdf, out.pdf, 'application/pdf') : null,
+      out.docx ? putDataUrl(uploads.docx, out.docx, DOCX_TYPE) : null,
     ].filter(Boolean));
-    return NextResponse.json({ name: out.name, jpgPages: (out.jpg || []).length, pdf: !!out.pdf });
+    return NextResponse.json({
+      name: out.name, jpgPages: (out.jpg || []).length, pdf: !!out.pdf, docx: !!out.docx,
+    });
   } catch (e) {
     console.error('agenda-export failed', e);
     return NextResponse.json({ detail: `議程輸出失敗：${e.message || e}` }, { status: 502 });

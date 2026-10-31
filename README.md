@@ -21,10 +21,11 @@ EntrepreneurAgenda/
 │   ├── login/                # 登入 / 自行註冊 / Microsoft 登入與申請（支援 ?next= 回跳）
 │   ├── home/                 # 會務 Dashboard
 │   ├── agenda/               # 議程表產生器（公開網址是 /index，見 next.config.mjs）
-│   ├── roles/                # 角色安排（多場例會 × 角色矩陣，ROLE_GROUPS / META_FIELDS）
+│   ├── roles/                # 角色安排（多場例會 × 角色矩陣，角色來自 lib/meetingRoles.json）
 │   ├── social/               # 社群發文
 │   ├── member/               # 會員管理
 │   ├── club/                 # 分會管理（品牌、版型設定、社群帳號、分會 AI 金鑰）
+│   ├── machines/             # 機台管理（電子名牌配對、綁定會員）
 │   ├── pathways/             # Pathways 目錄管理（system_admin）
 │   ├── change-password/      # 修改密碼 / 首次登入強制改密碼
 │   ├── oauth/authorize/      # MCP 客戶端的 OAuth 同意畫面
@@ -40,7 +41,7 @@ EntrepreneurAgenda/
 │   ├── auth.js               # 角色輔助函式、applyRoleUI()
 │   ├── agendaTemplates.js    # 議程版型引擎（AGENDA_TEMPLATES + 每版型 manifest / 預設素材 / 語言能力）
 │   ├── postTemplates.js      # 社群海報版型
-│   ├── socialPlatforms.js    # 各平台字數、圖片規則
+│   ├── socialPlatforms.js    # 各平台字數、圖片規則（資料在 socialPlatforms.json，後端也讀）
 │   ├── pathways.js           # Pathways 目錄載入與查詢
 │   ├── rolesSheet.js         # 角色表 Google Sheet 匯入解析
 │   └── memberAutocomplete.js # 會員自動完成（下拉建議 + 可自由輸入）
@@ -50,6 +51,8 @@ EntrepreneurAgenda/
 ├── middleware.js             # 未登入導向 /login；/api、/svc、/.well-known 放行
 ├── next.config.mjs           # 舊 .html 網址轉址、/index → /agenda
 ├── api/index.py              # FastAPI（本地開發 & 正式環境共用）
+├── api/_postgen/             # 受控貼文引擎（整併自 PostGenerator；底線開頭，Vercel 不會當成 function）
+├── tests/                    # pytest：引擎單元測試 + 對測試資料庫的 API／MCP 測試
 ├── requirements.txt          # Python 套件
 ├── package.json              # Node 套件（next / react / jose）
 ├── vercel.json               # /api/* 與 /.well-known/* 交給 api/index.py
@@ -101,11 +104,11 @@ EntrepreneurAgenda/
 - 品牌與版型為**即時解析**（不快照進 `agendas.data`）。
   - ✅ 編輯分會品牌後，該分會所有議程自動套用新資料。
   - ⚠️ 變更某分會的 `template_key` 會讓其**既有議程**也改用新版型呈現。
-- 未設定欄位的 fallback 鏈：分會設定 → 該版型 `fieldDefaults` / `assetDefaults` → 標準版預設。預設圖集中於 `media/Entrepreneur/`（標準版）與 `media/ChillHiHigh/`（Chill Hi High）。
+- 未設定欄位的 fallback 鏈：分會設定 → 該版型 `fieldDefaults` / `assetDefaults` → 標準版預設。預設圖集中於 `media/Entrepreneur/`（企業家）與 `media/ChillHiHigh/`（Chill Hi High）。
 
 ### 語言能力（依版型）
 
-- `standard` / `compact`：提供中/英切換（設定選單的「語言」）。
+- `standard` / `entrepreneur`：提供中/英切換（設定選單的「語言」）。
 - `chillhihigh`：中英混用，**隱藏「語言」切換**、固定渲染語言，且成員姓名顯示「English 中文」。
 - `app/agenda/page.js` 於 `updatePreview()` 依版型旗標顯示/隱藏「語言」選單並 pin 語言。
 
@@ -168,7 +171,7 @@ EntrepreneurAgenda/
 
 `個別講評 2'~3'`、`計時員報告 1'`、`贅語報告 1'`、`語言講評 3'~5'`、`總講評 3'~5'`、`講評員講評 2'~3'` 原本寫死在版型裡，現在改為每場可編輯的**顯示字串**（可填區間，不參與加總運算），與 `signals` 同一套模式：載入時 merge 到預設值上，舊議程自動沿用原本字樣。
 
-> 版型端從 `ctx.durationLabels` 取用，並以 `lib/agendaTemplates.js` 的 `DEFAULT_DURATION_LABELS` 作最後防線。`standard` 與 `compact` 已改為資料驅動；`chillhihigh` 的講評列本來就用 `signals` 的綠/黃/紅欄，不受影響。
+> 版型端從 `ctx.durationLabels` 取用，並以 `lib/agendaTemplates.js` 的 `DEFAULT_DURATION_LABELS` 作最後防線。`standard` 與 `entrepreneur` 已改為資料驅動；`chillhihigh` 的講評列本來就用 `signals` 的綠/黃/紅欄，不受影響。
 
 ### 每個欄位旁的「自動: X」與 ⟳
 
@@ -192,30 +195,40 @@ EntrepreneurAgenda/
 > 「版型設定」modal 欄位、預設值/預設圖、分會版型下拉（`TEMPLATE_OPTIONS`）皆會**自動跟上**——欄位只需在 manifest 宣告一次。
 
 > 內建版型：
-> - `standard`（標準版／企業家，**舊版**）
-> - `compact`（精簡單欄示範版）
+> - `standard`（標準版：仿 TI 官方酒紅色議程，新分會預設；幹部名單在「版型」設定填，每年 7/1 交接後更新）
+> - `entrepreneur`（企業家）
 > - `chillhihigh`（雙語幽默版／Chill Hi High：中英混用、內嵌綠/黃/紅時間牌欄、個別講評員依演講語言標示、底部 Meeting Roles 說明；**兩頁**：議程頁 + 宣傳後頁）
 > - `china`（CHINA Toastmasters／CHANGE IN ACTION：固定流程表 `CHINA_SCHEDULE`、全英文、附「下一場」角色欄；**兩頁**）
-> - `entrepreneur`（企業家版）
 
-#### `standard` 與 `entrepreneur`：分家了，不再共用 render
+#### 版型命名
 
-`entrepreneur` 一開始是 `{ ...AGENDA_TEMPLATES.standard }` 的 spread clone，兩者共用**同一個** `render` 與同一份 `assetDefaults` / `fieldDefaults` / `placeholders` / `settings` 物件參照。現在 `entrepreneur` 是 `AGENDA_TEMPLATES` 裡一個完整獨立的 entry，**自己的 `render()`、自己的預設值常數（`ENTREPRENEUR_*`）、自己的 `settings` manifest**——改企業家版不會動到標準版，反之亦然。
+- `standard`（標準版）仿國際演講會官方酒紅色 A4 議程範本：上方酒紅橫幅（Logo、分會名稱與編號、主題），左欄列日期、幹部名單、例會資訊與分會使命，右欄是議程。它是新分會的預設值；未設定或不認得的 `template_key` 一律退回它，所以不會帶到任何分會的真實資訊。它原本叫 `compact`，migration `0022` 改名。
+- 原本另有一個凍結的舊 `standard`（企業家版的副本），最後一個使用它的分會（Entrepreneur Toastmasters）改用 `entrepreneur` 後，連同它的 CSS 一起移除。
+- `entrepreneur` 是企業家分會自己的版型，版面要改就改這裡，樣式在 `.tmpl-entrepreneur`。
 
-- `entrepreneur` 是**活的**：企業家分會版面要改就改這裡。
-- `standard` 是**凍結的**：留著只為了讓 `template_key='standard'` 的舊分會記錄維持原樣，不要再改它。
-- 分家當下兩者輸出**完全一致**，所以既有議程不受影響。
-
-**CSS 也拆了。** `agenda.css` 原本這段版面樣式是全域選擇器（`.agenda-table`、`.doc-header`、`.rp-cell` …），兩個版型共用；現在拆成 `.tmpl-standard` 與 `.tmpl-entrepreneur` **兩份各自獨立的完整副本**（各 61 條規則，拆分當下內容相同），跟 `compact` / `chillhihigh` / `china` 一樣收進 `.tmpl-<key>` 命名空間。改其中一份不會影響另一份。
+每個版型的樣式都收在 `agenda.css` 的 `.tmpl-<key>` 命名空間裡。
 
 仍然保持全域的只有兩樣，都是刻意的：
 
 | 選擇器 | 為什麼不收進命名空間 |
 |--------|------------------|
 | `.agenda-page` | 所有版型共用的 A4 紙張外框（尺寸、邊距、字型、陰影），`page.js` 對每個版型都掛這個 class |
-| `.tc-g` / `.tc-y` / `.tc-r` | 時間規則的紅黃綠色塊，標準版／企業家版的右側面板與 **CHINA 第二頁**的 Time Control 表格共用 |
+| `.tc-g` / `.tc-y` / `.tc-r` | 時間規則的紅黃綠色塊，企業家版的右側面板與 **CHINA 第二頁**的 Time Control 表格共用 |
 
 ---
+
+## Word 匯出與自訂 Word 範本
+
+議程頁「設定」選單的「下載 Word」會產生一份可在 Word 裡修改的議程，給版面與分會習慣不完全相符、需要下載後自行調整的情況。
+
+- **範本來源**：分會在「版型」設定的「Word 匯出範本」區上傳的 .docx（存在 `clubs.settings.word_template_url`，檔案放 R2，透過 `/api/image-proxy` 讀取）；沒上傳就用內建的 `public/templates/agenda-default.docx`（仿標準版）。Word 範本屬於分會，不分議程版型。
+- **標記**：範本裡寫 `{{例會主題}}`、`{{總主持人}}` 這類中文標記，下載時換成當次例會資料。完整清單在 `lib/wordExport.js` 的 `WORD_FIELDS` / `WORD_LOOPS`，分會設定視窗的「可用的標記」也是從這份清單產生。
+- **重複的列**：`{{#演講}}`…`{{/演講}}`（還有 `講評員`、`講評員講評`、`多元單元`）的開頭與結尾放在表格同一列，該列依人數重複；清單是空的時整列消失。
+- **上傳檢查**：選檔當下在瀏覽器檢查。標記寫壞（例如迴圈沒關）會拒收並列出原因；系統不認得的標記只警告（下載時會是空白）。
+- **填入引擎**：[docxtemplater](https://docxtemplater.com/)（`docxtemplater` + `pizzip`），全在瀏覽器執行，後端不經手 Word 檔內容。
+- **改預設範本**：改 `scripts/build-word-template.mjs` 後執行 `node scripts/build-word-template.mjs`，重新產生 `public/templates/agenda-default.docx` 並一起 commit。
+- **企業家、Chill Hi High 分會的範本**：`scripts/build-word-template-entrepreneur.mjs`、`scripts/build-word-template-chillhihigh.mjs` 依各自版型產生 `scripts/word-templates/` 下的 .docx。這些不由系統內建，是以分會自訂範本的方式上傳（分會設定 → Word 匯出範本）；改版後重新產生再上傳即可。範本裡的 Logo、QR、圖片是內建素材，分會換圖時也要重新產生。
+- **圖片標記**：在 Word 放一張佔位圖片，替代文字設為 `{{主題圖片}}`，下載時換成該次例會上傳的主題圖片（裁成佔位圖的比例）；沒有上傳就保留佔位圖。清單在 `lib/wordExport.js` 的 `WORD_PICTURES`。
 
 ## 角色安排（`/roles`）
 
@@ -233,28 +246,49 @@ EntrepreneurAgenda/
 
 - ✅ 在此頁排定角色 → 該場議程表**立即**顯示同一個人。
 - ✅ 在議程產生器改角色 → 回到此頁重新載入即同步。
-- ⚠️ 角色清單（`app/roles/page.js` 的 `ROLE_GROUPS`）是**從議程欄位推導**的。議程若新增角色欄位，記得同步加進 `ROLE_GROUPS`。
+- ✅ 議程產生器只編輯它的版型用得到的欄位，但存檔時會**保留它沒顯示的欄位**（`app/agenda/page.js` 的 `savedData`）——在此頁排了、版型卻不印的角色，或分會自訂角色，不會被議程產生器的存檔洗掉。
 
-### 全站共用同一份角色 schema——不適用的欄位鎖住，不是拿掉
+### 角色目錄（`lib/meetingRoles.json`）——所有輸出共用的一份角色清單
 
-`agendas.data` 的角色欄位是**所有版型共用的同一份 schema**：每個角色（`ROLE_GROUPS` 裡的一筆定義）在每個分會的資料裡都是同一個欄位名，某個版型不需要的角色，該分會的資料裡就是空字串／未填，版型的 `render()` 自然不會讀它、也就不會印出來。
+所有可能出現的角色（各版型角色的聯集）只定義在 `lib/meetingRoles.json` 一處，所有地方都從這裡讀：
 
-角色安排矩陣**永遠顯示 `ROLE_GROUPS` 全部角色**（不會因為版型不同而整列消失）；只有「目前分會的版型不適用」的角色列會被**鎖住**（`role.locked`，灰階、輸入框 `disabled`，不管有沒有寫入權限都鎖），跟「這場例會剛好沒有這個名額」（`slotNote`，可以直接輸入把名額補上）是兩種不同的視覺語言，不要混淆。
+| 用到的地方 | 用來做什麼 |
+|------|------|
+| `/roles` 角色安排（`roleGroups()`） | 矩陣的分組與角色列、欄標題欄位（`meta` 裡 `header: true` 的） |
+| Word 匯出（`lib/wordExport.js`） | 每個角色的 `{{標記}}`（`word` 欄位）、「可用的標記」說明、上傳檢查、`{{#所有角色}}` 迴圈 |
+| 後端（`api/index.py` 啟動時讀同一份 JSON；`vercel.json` 以 `includeFiles` 一起打包） | MCP 的 `update_agenda` 欄位、`assign_roles` / `get_roles` / Google Sheet 匯入的角色 id 與「哪些版型會印出」 |
 
-角色定義可加 `templates: string[]`，列出「哪些版型會用到這個角色」（不寫＝所有版型都用得到）：`buildRows()` 依 `activeTemplateKey()` 算出每個角色的 `locked` 旗標。目前有 `templates` 限制的角色：
+每個角色：`key`（`agendas.data` 欄位名）、`zh`／`en`、`group`（分組）、`templates`（**哪些內建議程版型會印出**，`null`＝全部）、`word`（Word 標記）。**新增角色只要在這裡加一筆**；若要某個網頁版型印出它，再到該版型的 `render()` 讀 `data[key]`。
 
-| 角色 | 適用版型 | 為什麼 |
+角色的值不分版型，一律存在 `agendas.data[key]`——分會換版型、或 Word 範本用到網頁版型不印的角色，資料都在。
+
+### 角色安排頁：版型不印的角色預設收起
+
+矩陣預設只顯示**目前分會議程版型會印出**的角色；其餘角色收起，工具列的「顯示其他角色（N）」打開即可編輯（不是鎖住——排了人一樣會存，Word 範本等其他輸出可以使用，列名以斜體灰字標示）。某個收起的角色只要在載入的場次裡**已經排了人**，就會自動顯示，避免資料藏在看不到的地方。這和「這場例會剛好沒有這個名額」（`slotNote`，可直接輸入把名額補上）是兩件不同的事。
+
+目前有 `templates` 限制的角色：
+
+| 角色 | 會印出的版型 | 為什麼 |
 |------|------|------|
-| `callingToOrder` | standard／compact／entrepreneur／china | Chill Hi High 的「致歡迎詞 Opening Remarks」那列讀的是 `welcomeTME`，不再需要這格 |
+| `callingToOrder` | standard／entrepreneur／china | Chill Hi High 的「致歡迎詞 Opening Remarks」那列讀的是 `welcomeTME` |
 | `boardWriter`／`photographer` | chillhihigh | 只有 Chill Hi High 議程把板書、攝影列成獨立角色 |
 | `timerAssistant` | chillhihigh | Chill Hi High 的例會角色表另外排一位計時員幫手 |
-| `voteCounter` | china | CHINA 專屬的計票員（歸在「計時 / 記錄」組） |
-| `varietyHost` | standard／compact／entrepreneur／chillhihigh | CHINA 沒有多元單元 |
-| `wordOfTheDay`／`quizHost` | china | CHINA 專屬的每日一字、問答遊戲主持（歸在「單元主持」組） |
+| `voteCounter` | china | CHINA 專屬的計票員 |
+| `varietyHost` | standard／entrepreneur／chillhihigh | CHINA 沒有多元單元 |
+| `wordOfTheDay`／`quizHost` | china | CHINA 專屬的每日一字、問答遊戲主持 |
 
-其餘角色（`receptionHost`、`welcomeTME`、`tme`、`timer`、`ahCounter`、`tableTopicsMaster`、`speeches[i].speaker`、`evaluators[i]`、`langEvaluator`、`generalEvaluator`、`evalEvaluators[i]`、`awardsPresenter`、`sharingFeedback`）沒有 `templates` 限制，5 個版型都共用。
+### 分會自訂角色（`clubs.settings.custom_roles`）
 
-### 角色清單（`ROLE_GROUPS`）
+分會可以在「版型」設定的「分會自訂角色」區自己新增角色（例如笑話大師、祈禱），**不用改程式**：
+
+- 存成 `clubs.settings.custom_roles = [{ id, zh, en }]`；`id` 新增時產生、之後不變，所以改名不會遺失已排的人。
+- 每場的值存在 `agendas.data.customRoles[id]`。
+- 角色安排頁多出「分會自訂角色」分組；Word 範本用 `{{角色中文名}}` 帶入，也會出現在 `{{#所有角色}}`。
+- 名稱不能和內建角色或 Word 標記同名（因為名稱就是 Word 標記），存檔時檢查。
+- MCP 的角色 id 是 `custom_<id>`（`get_roles` 會列出該分會有哪些）。
+- 網頁議程版型目前**不會**印出自訂角色；要印的話是之後「版型可設定流程順序」的工作。
+
+### 角色清單
 
 | 分組 | 角色（`agendas.data` 欄位） |
 |------|------|
@@ -264,6 +298,7 @@ EntrepreneurAgenda/
 | 指定演講 | `speeches[i].speaker`（動態，至少 3 列） |
 | 講評 | `evaluators[i]`（動態，至少 3 列）、`langEvaluator`、`generalEvaluator`、`evalEvaluators[i]`（動態，0～3 列） |
 | 結尾 | `awardsPresenter`、`sharingFeedback` |
+| 分會自訂角色 | `customRoles[id]`（依分會設定） |
 
 演講 / 講評的列數取**目前載入場次中的最大值**（最少 3 列）——CHINA 的 3 篇指定演講／3 位個別講評也是走這同一套 `speeches`/`evaluators` 陣列，沒有另外的資料結構。
 
@@ -271,7 +306,7 @@ EntrepreneurAgenda/
 
 ### CHINA 版型：跟其他版型一樣的固定欄位
 
-CHINA 議程曾經是一份自由格式的逐列清單（`agendaRows`），已經改成跟其他版型相同的固定角色欄位——`lib/agendaTemplates.js` 的 `china` 版型內部有一張不對外匯出的 `CHINA_SCHEDULE`（該分會目前的週會流程表），每一列綁定要讀的欄位（例如 `Timer` 這一列讀 `data.timer`），純粹是 render() 排版用，角色安排矩陣完全不需要知道它的存在，就跟 standard/compact 一樣。
+CHINA 議程曾經是一份自由格式的逐列清單（`agendaRows`），已經改成跟其他版型相同的固定角色欄位——`lib/agendaTemplates.js` 的 `china` 版型內部有一張不對外匯出的 `CHINA_SCHEDULE`（該分會目前的週會流程表），每一列綁定要讀的欄位（例如 `Timer` 這一列讀 `data.timer`），純粹是 render() 排版用，角色安排矩陣完全不需要知道它的存在，就跟 standard/entrepreneur 一樣。
 
 CHINA 議程表右側原本每列都有一欄「下一場負責人」（`assigneeNext`），現在**不再存進資料庫**，改成**列印/預覽議程時即時查詢**：`app/agenda/page.js` 的 `ensureNextMeetingRoles()` 依「分會 + 這場日期」查詢同分會日期最近的下一場例會（`GET /api/agendas?order=date_asc&date_from=<+1天>&limit=1`），把該場的角色欄位整包當作 `ctx.nextMeetingRoles` 傳給 `render()`；查不到（還沒建立下一場）就顯示空白。查詢結果有 cache（只在分會/日期真的改變時才重查），不會每次打字都打 API。議程編輯頁因此不再有「下次 Next Meeting Assignee」的手動輸入欄。
 
@@ -279,15 +314,7 @@ CHINA 議程表右側原本每列都有一欄「下一場負責人」（`assigne
 
 欄標題的**場次編號**（`meetingNo`）、**例會主題**（`meetingTheme`）、**主題題目**（`themeQuestion`）都可直接編輯，走與角色**完全相同**的 draft / dirty / merge 流程，但刻意**不列入角色列**——因此不算進「已指派」計數（主題不是人），且不套用會員自動完成。
 
-`META_FIELDS` 也吃 `templates` 允許清單，但與角色列相反：**不適用的欄位直接不顯示**（欄標題塞不下一排灰掉的空欄位），由 `activeMetaFields()` 過濾。要再開放其他每場欄位，加一筆即可：
-
-```js
-const META_FIELDS = [
-  { key: 'meetingNo',     label: '場次編號', placeholder: '場次編號' },
-  { key: 'meetingTheme',  label: '例會主題', placeholder: '未設定主題' },
-  { key: 'themeQuestion', label: '主題題目', placeholder: '主題題目', templates: ['chillhihigh'] },
-];
-```
+它們是角色目錄 `meta` 裡標了 `header: true` 的欄位，同樣吃 `templates`，但與角色列相反：**不適用的欄位直接不顯示**（欄標題塞不下一排灰掉的空欄位），由 `activeMetaFields()` 過濾。要再開放其他每場欄位，在 `lib/meetingRoles.json` 的 `meta` 加一筆並標 `header: true`。
 
 ### 從 Google Sheet 匯入（`roles_sheet_url`）
 
@@ -565,6 +592,38 @@ Threads 帳號必須是**公開**的，私人帳號拿不到權杖。
 
 **宣傳缺日期、地址或入場費會被擋下**（`_KIND_REQUIRED`），訊息指名缺哪一個、去哪裡填。缺了還硬產，會得到一則看起來完成、實際上沒人能赴約的邀請。
 
+### 受控生成：宣傳與回顧（整併自 PostGenerator）
+
+`promo`（例會宣傳）與 `recap`（例會回顧）**綁定例會時**，文案改由受控引擎 `api/_postgen` 產生。這套引擎來自 D67 的 [post-generator](https://github.com/toastmasters-d67/post-generator)（作者 Asher，`4085048`），2026-11 整併進來，原系統退役、資料不搬。`other` 與沒綁定例會的貼文照舊走自由生成。
+
+引擎守三條紅線：
+
+1. **事實不經 AI**：日期、時間、地點、交通、費用、報名連結、人名、角色名稱由 renderer 直接從結構化資料印出；模型只寫開場、故事、角色亮點這些「可變段落」。模型在段落裡寫錯日期，資訊欄也不會跟著錯。
+2. **固定元素不可刪改**：品牌定位句、固定 hashtag 逐字帶入。
+3. **缺漏不補完**：必填事實缺了標成「[需由使用者提供]」並擋下；回顧文沒有亮點筆記的角色，AI 只寫中性的職責描述，而且會**指名列出**是哪幾位。
+
+| 步驟 | 在哪裡 |
+|---|---|
+| 事實來源 | 議程（日期、時間、地點、主題、各角色）＋分會設定（入場費、交通、預設地點與時間）＋貼文品牌設定（報名連結）。回顧文的「下次例會」取同分會的下一份議程 |
+| 生成 | `GenerationService`（`api/_postgen/service.py`），品質檢查沒過會重生一次 |
+| 品質檢查 | 事實白名單（QC-01）、活動資訊（QC-03）、角色逐字比對（QC-04）、禁用詞（QC-05）、行動呼籲（QC-08）。`crit` 就擋下，不能核可。報名連結是選填，不在檢查範圍 |
+| 各平台版本 | Facebook 是引擎的原生輸出；Instagram（連結改成「在個人簡介」）與 Threads（500 字內、只留標題鉤子與事實行）由 `renderers/social.py` **從同一份內容程式改寫**，不另外叫模型寫——另寫的版本沒有東西在檢查它的事實 |
+| 存檔 | 伺服器直接存成 `social_posts` 一列，`review_state='pending'`，品質檢查結果放 `governance`。**這兩個欄位只有伺服器寫**，瀏覽器送來的一律不收 |
+| 人工核可 | 編輯器的治理面板：幹部確認 AI 補寫的角色後按「核可」。被擋下的不能核可。**核可後改了文字（主文案或任一平台版本）會自動回到待核可**；只換圖片不會 |
+| 發布與海報 | 未核可時發布（網頁與 MCP 的 `publish_post` 都在 `_run_publish_job` 擋）與 PPTX 海報都會被拒絕 |
+
+**PPTX 海報**：設計師做的 `.pptx` 模板，程式只把 `{{HEADLINE}}`、`{{DATE}}`、`{{VENUE}}` 這類標記換成值（`api/_postgen/infrastructure/pptx/template_filler.py`），版面配色完全由模板決定。內建四個模板在 `api/_postgen/assets/templates/pptx/`；分會可以在「貼文品牌設定」上傳自己的（存 R2，表 `post_templates`），上傳時會檢查必要標記（`domain/template_tokens.py`）。回顧模板預留的角色頁不夠時會先合併未填滿的頁，還是不夠就**擋下並列出漏掉的人**。
+
+**貼文品牌設定**（`/social` 右上角「貼文品牌設定・海報模板」，表 `club_post_prefs`）分三個分頁：基本資料（報名連結、定位句與即時預覽、固定 hashtag 與禁用詞的標籤編輯）、語氣與規則（字數計數、三個旋鈕附上實際送給模型的指示）、海報模板（拖曳上傳、上傳失敗的原因就地顯示、可用標記清單、每個模板都能下載當範本）。hashtag 與禁用詞有「系統預設／自訂」兩種狀態：存 `null` 是用預設，存 `[]` 是刻意不要。旋鈕說明與標記清單都由 API 從引擎取得（`tuningChoices`、`templateTokens`），前端不另抄一份。可設定的項目：報名連結（選填；沒填時貼文不印連結那一行，海報的 `{{REGISTER_URL}}` 留空）、品牌定位句、固定 hashtag、禁用詞、品牌語氣、宣傳／回顧各自的補充規則、情緒／長度／emoji 的預設值。分會名一律取自 `clubs`，不讓人打字——打錯會讓貼文署名成別的分會。
+
+整併時對 PostGenerator 的改動（其餘照搬）：
+
+- **多分會化**：原本寫死 Chill Hi High 的星期（一律印「（二）」）、預設時間、報名表單、hashtag 與預設語氣，改成依日期計算或讀分會設定。
+- **本週問句改選填**：多數分會的議程沒有這一欄，照原本列為必填會擋下每一則宣傳。「主題缺英文」的警告（CHH 的雙語定位）拿掉。
+- **找不到 prompt 檔改為報錯**：原本回空字串——整併時目錄層數一變，紅線規則整段安靜地從 prompt 裡消失。
+- **不搬**：帳號／session、SQLite、它自己的 MCP 與 OAuth、金鑰加密（都用 EA 現有的）、「模板庫為空時程式畫圖」的舊路徑、規劃書列為零引用的骨架模組、議程文字解析。
+- 模型呼叫走 EA 的 AI 帳號三層取用（個人 → 分會 → 伺服器），Claude 與 ChatGPT 都能用；測試與本機示範設 `LLM_FAKE=1` 用假模型。
+
 ### 例會資訊從哪裡來
 
 三個欄位散在兩張表，而且其中兩個一度是拼不上的：
@@ -616,7 +675,7 @@ Toastmasters 標誌從本站的 `/media/toastmasters_logo.png` 取，同源，�
 
 ### 平台差異寫在哪
 
-`lib/socialPlatforms.js` 是唯一一份：字數上限、要不要媒體、影片與多媒體的規則、內文連結能不能點。編輯器的計數器、警告、發布視窗的可勾選狀態全部讀它。後端另有一份**散文版**的同一組規則（`api/index.py` 的 `_PLATFORM_BRIEF`）餵給寫文案的模型——一份是給人看的檢查，一份是給模型的指示，刻意不共用。
+`lib/socialPlatforms.json` 是唯一一份：字數上限、要不要媒體、影片與多媒體的規則、內文連結能不能點。編輯器的計數器、警告、發布視窗的可勾選狀態（`lib/socialPlatforms.js`）、後端的平台清單與受控貼文改寫 IG／Threads 版本時的字數上限（`api/_postgen/renderers/social.py`）全部讀它——和 `meetingRoles.json` 同一個做法，Vercel 用 `includeFiles`、VM 的 `Dockerfile.api` 用 `COPY` 帶進後端。後端另有一份**散文版**的規則（`api/index.py` 的 `_PLATFORM_BRIEF`）餵給寫文案的模型，那是給模型的指示，不是拿來比對的數字。
 
 | | 字數上限 | 一定要媒體 | 影片 | 多個媒體 | 內文連結 |
 |---|---|---|---|---|---|
@@ -658,18 +717,18 @@ hashtag 沒有特殊處理——就是文案的一部分，**算在字數裡**�
 
 清單**依價格由低到高排**方便比價；**預設是哪一個由 `default` 旗標決定，不靠排序**——顯示順序與預設值回答的是不同問題，綁在一起就會有一個被另一個悄悄改掉。目前 Claude 預設 Opus 5.5、ChatGPT 預設最省的、生圖預設最省的。
 
-模型清單帶著 `thinking` 旗標，記的是**呼叫差異而不是偏好**：Opus 5.5 與 Sonnet 5.5 吃 adaptive thinking 與 effort，**Haiku 4.5 兩個都拒收，送過去就是 400**。把差異放在 id 旁邊，選模型才不會變成組出一個無效的請求。
+文案一律以**強制工具呼叫**取回結構化結果，API 不允許它與 extended thinking 同時開，所以不論選哪個模型都不開 thinking。
 
 生圖另外可選**品質**（low／medium／high／auto，預設 low）。不指定時 OpenAI 用 `auto`，等於由模型決定品質，也就等於由模型決定你付多少——`gpt-image-1` 的 low 與 high 相差約 15 倍。選 `auto` 時不送這個參數，因為那本來就是 API 的預設，明寫只是多冒一次「某個模型不認得它」的風險。
 
 輪換 `CREDENTIALS_SECRET_KEY` 會讓既有金鑰解不開——此時 `_open()` 回一個「請重新設定」的錯誤，而不是丟出無意義的例外。
 
-文案有兩條路（`COPY_WRITERS`），兩邊拿到**完全相同**的 system prompt、使用者輸入與 JSON schema，回傳同一個 dict——端點不在乎是誰寫的。刻意寫成兩個函式而不是在一個函式裡分支，是為了讓兩家 SDK 各自演進時不會互相污染：
+**呼叫模型的程式只有一份**：受控引擎的 `api/_postgen/infrastructure/llm`（`AnthropicClient`、`OpenAIClient`）。自由生成（`other` 或沒綁例會）也走它（`_write_copy`），兩家拿到**完全相同**的 system prompt、使用者輸入與 schema（當成強制的工具呼叫），回傳同一個 dict。各家 SDK 的錯誤、截斷（撞到 `max_tokens`）與拒答都在那裡轉成中文訊息，整併前 EA 自己也有一套，已經拿掉。
 
-- **Claude**：`claude-opus-5` + adaptive thinking + structured outputs。`effort` 設 `medium` 而非預設的 `high`——這是掛在瀏覽器請求後面的短篇創作，深一層推理帶來的延遲比它換到的品質更貴。
-- **ChatGPT**：`chat.completions` + `response_format: json_schema`（`strict`）。
+- **Claude**：Messages API + `tool_choice` 指定工具。
+- **ChatGPT**：`chat.completions` + `tool_choice` 指定 function。
 
-**模型由使用者在產生視窗裡選**，兩家各三個（`COPY_MODELS`），清單依價格由低到高排，方便比價；預設是哪一個則由 `default` 旗標決定，不靠排序——顯示順序與預設值回答的是不同問題，綁在一起就會有一個被另一個悄悄改掉。目前 Claude 預設 Opus 5.5、ChatGPT 預設 GPT-6 Luna、生圖預設 GPT-Image 1 mini。`thinking` 旗標記的是呼叫差異不是偏好：Opus 5.5 與 Sonnet 5.5 吃 adaptive thinking 與 effort，Haiku 4.5 兩個都拒收，送了就是 400。
+**模型由使用者在產生視窗裡選**，兩家各三個（`COPY_MODELS`），清單依價格由低到高排，方便比價；預設是哪一個則由 `default` 旗標決定，不靠排序——顯示順序與預設值回答的是不同問題，綁在一起就會有一個被另一個悄悄改掉。目前 Claude 預設 Opus 5.5、ChatGPT 預設 GPT-6 Luna、生圖預設 GPT-Image 1 mini。
 
 兩邊都用 structured output，所以一次就吐出主文案與各平台版本，不用解析散文。生圖用 OpenAI `gpt-image-1`，產生後直接進 R2 只回公開 URL——**IG 與 Threads 只能發布平台抓得到的公開圖片**，所以這一步 Phase 1 也用得上。
 
@@ -838,7 +897,14 @@ https://<你的網域>/api/mcp
 | `get_post` | `posts:read` | 一則貼文的完整內容（主文案、各平台版本、圖片、發布狀態） |
 | `create_post` | `posts:write` | 建立草稿（`promo` / `recap` / `other`） |
 | `update_post` | `posts:write` | 修改標題、文案、用途、狀態、綁定例會、各平台版本 |
-| `generate_copy` | `ai:generate` | 用 AI 產生文案並存進貼文，**消耗呼叫者（或分會共用）的 AI 額度** |
+| `generate_copy` | `ai:generate` | 用 AI 產生文案並存進貼文，**消耗呼叫者（或分會共用）的 AI 額度**。宣傳／回顧且綁定例會時走受控流程，結果是待核可的貼文 |
+| `start_post` | `posts:write` | 受控貼文兩段式的第一步：回傳寫作規則、這場例會的資料與 `content_schema`，**由呼叫端自己的 AI 寫**，不花分會額度 |
+| `submit_post` | `posts:write` | 交回 `content`；系統套事實與固定句、跑品質檢查，通過才存成待核可的貼文，沒過說明原因、不存 |
+| `get_post_prefs` / `update_post_prefs` | `posts:read` / `posts:write` | 貼文品牌設定（報名連結、定位句、固定 hashtag、禁用詞、語氣、補充規則、預設旋鈕） |
+| `list_post_templates` | `posts:read` | PPTX 海報模板（內建＋分會上傳） |
+| `make_post_poster` | `posts:write` | 已核可的受控貼文 → 可編輯 PPTX，回傳 R2 連結。未核可拒絕 |
+| `review_post` | `publish` | 核可／退回／改回待核可。與網頁同規則：擋下的不能核可、AI 補寫的角色要列在 `confirmed`。見下方說明 |
+| `upload_post_template` / `update_post_template` / `delete_post_template` | `posts:write` | 上傳 `.pptx` 海報模板（與網頁同一個檢查，缺必要標記拒收，先檢查再存 R2）；改名稱、風格、啟用；刪除。內建模板不能改 |
 | `publish_post` | `publish` | 發布到 Facebook／Instagram／Threads，**公開且無法透過本系統收回**。已發布過的平台會略過，要再發一則得帶 `republish: true` |
 | `add_post_image` | `posts:write` | 把 AI 客戶端自己做的圖（或任何圖）加到貼文：`image`（ChatGPT 的檔案參數，`_meta["openai/fileParams"]`）、`image_url`（公開 https）或 `image_base64`。存到 R2，15 MB 上限，只收 JPG／PNG／WebP／GIF（看檔頭判斷，不信副檔名） |
 | `remove_post_image` | `posts:write` | 依順序（從 1 開始）移除貼文的一張圖 |
@@ -847,7 +913,7 @@ https://<你的網域>/api/mcp
 | `create_agenda` | `agendas:write` | 建立議程。時間地點沿用該分會上一份議程（再退到分會設定）；同一天已有議程時拒絕並回傳既有 id。`import_roles: true` 從角色試算表帶入 |
 | `update_agenda` | `agendas:write` | 只改有給的欄位；`speeches`／`evaluators` 依位置合併（`null` 表示該位置不變），刪減篇數用 `speech_count`／`evaluator_count`。`import_roles` 只補空白的角色，`overwrite_roles` 才覆蓋 |
 | `delete_agenda` | `agendas:write` | 刪除議程，與 `DELETE /api/agendas/{id}` 同規則（分會管理員以上、只能刪自己分會）。綁定這場的貼文保留、改為未綁定（FK `ON DELETE SET NULL`），回覆會列出是哪幾則 |
-| `export_agenda` | `posts:read` | 議程輸出 PDF／JPG（每頁一張），回傳 R2 公開連結。見下方「議程輸出」 |
+| `export_agenda` | `posts:read` | 議程輸出 PDF／JPG（每頁一張）／可編輯的 Word（docx），回傳 R2 公開連結。見下方「議程輸出」 |
 | `set_agenda_theme_image` | `agendas:write` | 設定（或 `clear` 移除）議程的主題圖 `themeImgUrl`，圖片來源同 `add_post_image`。只有 `standard`、`entrepreneur` 版型會顯示主題圖，其他版型直接拒絕 |
 | `generate_agenda_theme_image` | `ai:generate` | 用平台 OpenAI 生成主題圖並套用；沒給 prompt 時依例會主題產生。版型不顯示主題圖時**先拒絕、不花錢** |
 | `get_roles` | `posts:read` | 角色安排表：分會接下來（或指定範圍）每場已安排的角色 |
@@ -858,6 +924,10 @@ https://<你的網域>/api/mcp
 | `update_club` | `clubs:write` | 修改分會欄位與版型設定，只改有給的；`settings` 給 `null` 刪除。**限系統管理員**（與 `PUT /api/clubs/{id}` 同規則） |
 | `create_club` | `clubs:write` | 建立分會。限系統管理員 |
 | `set_club_image` | `clubs:write` | 更換 Logo、各 QR code、第二頁圖片。限系統管理員 |
+| `set_word_template` | `clubs:write` | 上傳分會的 Word 議程範本（`file`／`file_url`／`file_base64`），伺服器檢查 `{{標記}}` 與迴圈是否成對，壞的拒收；`clear: true` 改回預設。限系統管理員 |
+| `set_custom_roles` | `clubs:write` | 整份取代分會自訂角色；帶原 `id` 才會保留已排的人。限系統管理員 |
+| `list_machines` | `posts:read` | 電子名牌機台與綁定的會員。分會管理員以上 |
+| `pair_machine` / `update_machine` | `clubs:write` | 用配對碼綁定名牌；改名、換綁、解除綁定、停用。分會管理員以上 |
 | `delete_post` | `posts:write` | 從系統刪除一則貼文（草稿或已發布的都可以），與網頁的刪除相同。只刪系統紀錄，已發到社群平台上的貼文不受影響——本系統不管理發布之後的社群貼文 |
 
 - **所有 scope 都公開宣告**（`scopes_supported` 與 401 挑戰都列出），所以客戶端會一起請求；但同意畫面上 `publish` 預設**不勾**，並標示「公開且無法收回」，要使用者自己勾。客戶端沒指定 scope 時給 `posts:read posts:write agendas:write ai:generate`。
@@ -871,6 +941,7 @@ https://<你的網域>/api/mcp
 - `tools/list` **一律列出全部工具**，並帶 `annotations`（`readOnlyHint` / `destructiveHint` / `openWorldHint`），客戶端（例如 ChatGPT）據此決定哪些呼叫要先問使用者。呼叫沒 scope 的工具會收到 403 + `insufficient_scope` 挑戰，挑戰裡的 scope 是「現有的＋缺的」，客戶端補授權後不會掉掉原本的權限。
 - **說明頁 `/mcp`** 的工具清單直接讀 `MCP_TOOLS`，新增工具會自動出現。新增時順手在 `_TOOL_SUMMARY` 寫一句給人看的說明、在 `_TOOL_GROUPS` 放進分組；需要一般會員或系統管理員權限的，也要更新 `_TOOL_MIN_ROLE`（它只是說明，實際權限仍由各工具裡的 `_officer_only`／`_system_admin_only` 決定）。
 - 工具層級的失敗（找不到貼文、平台未連接、缺欄位）回 `isError: true` 的結果讓模型自行修正，不回 JSON-RPC 錯誤。
+- **人工核可（`review_post`）掛在 `publish` scope**：同意畫面上預設不勾，要使用者自己勾；工具標成 `destructiveHint`，客戶端會先問使用者；說明要求助理先把全文與治理註記給使用者看、取得明確同意，AI 補寫的角色要逐一確認後放進 `confirmed`——規則與網頁的核可完全相同（同一個函式），品質檢查擋下的照樣不能核可。
 
 ### 授權伺服器的設計
 
@@ -899,8 +970,8 @@ https://<你的網域>/api/mcp
 
 議程表是在瀏覽器裡畫的（各分會版型、列高平均、html2canvas），網頁的「下載 JPG／PDF」是截那個畫面。伺服器端不另寫一套 renderer，而是**用無頭 Chromium 開同一個 `/agenda` 頁面，請頁面做與按鈕完全相同的截圖**：
 
-1. MCP 工具（Python）檢查權限，產生 R2 的 presigned PUT 網址（PDF 一個、JPG 最多 4 頁），再簽一把**5 分鐘的登入 token**（呼叫者本人）。
-2. 呼叫 Next 的 `POST /svc/agenda-export`（`app/svc/agenda-export/route.js`，Node runtime）。它驗 token（`JWT_SECRET`）、用 `@sparticuz/chromium` + `puppeteer-core` 以這個身分開 `/agenda?id=…`，等 `window.__agendaExport.ready`，呼叫頁面上的 `jpg()`／`pdf()`（與下載按鈕共用 `captureJPGs`／`capturePDF`）。
+1. MCP 工具（Python）檢查權限，產生 R2 的 presigned PUT 網址（PDF 一個、Word 一個、JPG 最多 4 頁），再簽一把**5 分鐘的登入 token**（呼叫者本人）。
+2. 呼叫 Next 的 `POST /svc/agenda-export`（`app/svc/agenda-export/route.js`，Node runtime）。它驗 token（`JWT_SECRET`）、用 `@sparticuz/chromium` + `puppeteer-core` 以這個身分開 `/agenda?id=…`，等 `window.__agendaExport.ready`，呼叫頁面上的 `jpg()`／`pdf()`／`docx()`（與下載按鈕共用 `captureJPGs`／`capturePDF`／`buildWordBlob`；Word 一樣先用分會上傳的 Word 範本，沒有才用預設範本）。
 3. 檔案直接 PUT 到 R2，不經過兩邊 function 的回應大小上限；工具回傳公開連結（路徑含亂數，拿到連結的人都能開）。
 
 注意：
@@ -1111,6 +1182,28 @@ GitHub → Settings → Environments → `production` 需要的 secrets：
 
 ---
 
+### PostGenerator 退役（在 VM 上手動做）
+
+PostGenerator 的生成引擎已經在本專案裡（見「受控生成」），它原本的服務可以停掉。資料不搬（2026-11 決定重新開始）。這些步驟動到正式環境，**要人手動做**：
+
+1. **先通知 PostGenerator 的使用者**改用本系統的「社群發文」，並提醒他們 PostGenerator 上的歷史專案不會搬過來。
+2. **最後備份一次**：`docker compose -f /srv/post-generator/docker-compose.yml exec app python -m app.tools.backup`，確認 `/data/backups` 有新檔。
+3. **停服務但先留 volume**：`cd /srv/post-generator && docker compose down`（不要加 `-v`，觀察一段時間再刪）。
+4. **nginx**：`/etc/nginx/sites-enabled/postgen` 的 443 區塊裡，原本屬於 PostGenerator 的 `location /` 改成導到本系統，其餘（`include snippets/club-management*.conf` 與 MCP 的 `/.well-known/...club-management` 那兩條）不動：
+
+   ```nginx
+   location = / { return 302 /club-management; }
+   location /   { return 404; }
+   ```
+
+   `sudo nginx -t && sudo systemctl reload nginx`。PostGenerator 自己的 MCP 連線（`/mcp`）會失效，那是預期的，改連本系統的 `/club-management/api/mcp`。
+5. **GitHub**：`toastmasters-d67/post-generator` 設為 Archived（唯讀），停用它的 Deploy workflow。
+6. 觀察一兩週沒問題後再 `docker volume rm` 掉 PostGenerator 的 volume、刪除 GHCR 上的舊 image。B1s 的記憶體會因此寬鬆一些。
+
+本專案這邊不需要新的環境變數；**正式環境不可以設 `LLM_FAKE`**（設了會用假模型產文案）。
+
+---
+
 ## 本地開發
 
 本機要同時跑兩個行程：FastAPI（:8001）與 Next.js（:3000）。瀏覽器開 `http://localhost:3000`，Next.js 的 `/svc/*` 代理會把請求轉到 `http://localhost:8001/api/*`（可用 `FASTAPI_BASE_URL` 覆寫）。
@@ -1142,6 +1235,22 @@ npm run dev
 |----------|------|
 | Swagger UI | http://localhost:8001/docs |
 | ReDoc | http://localhost:8001/redoc |
+
+### 測試
+
+```powershell
+# 引擎單元測試：不需要資料庫
+python -m pytest -q tests/postgen
+
+# 全部（含 API／MCP）：需要一個「丟了也沒關係」的 PostgreSQL，先跑完 migration
+docker run -d --name ea-test-pg -e POSTGRES_PASSWORD=test -e POSTGRES_DB=agenda -p 127.0.0.1:55432:5432 postgres:16-alpine
+$env:DATABASE_URL = "postgresql://postgres:test@127.0.0.1:55432/agenda"; alembic upgrade head
+$env:TEST_DATABASE_URL = $env:DATABASE_URL; python -m pytest -q tests
+```
+
+- **`TEST_DATABASE_URL` 絕對不要指向正式資料庫**：測試會建立、刪除分會與使用者。本機 `.env` 的 `DATABASE_URL` 通常就是正式庫，所以測試只看 `TEST_DATABASE_URL`，沒設就跳過 API 測試。
+- 測試一律用假模型（`LLM_FAKE=1`），也把 R2 換成假的——本機 `.env` 裡是正式 R2 的憑證。
+- CI（`.github/workflows/ci-cd.yml`）起一個 Postgres service，跑完整 migration 再跑 `pytest`。
 
 ### 本地 .env 設定
 
@@ -1200,6 +1309,9 @@ alembic upgrade head
 17. `0017` — `users` 加 `email`（不分大小寫唯一）與 `ms_sub`（綁定的 Microsoft 身分，唯一）
 18. `0018` — `oauth_refresh_tokens` 加 `grant_id`（授權的固定識別碼，回填為原 `token_hash`，已發出的 access token 不受影響）與 `prev_token_hash`（refresh token 輪換與重複使用偵測）
 19. `0019` — 建立 `club_memberships`（多分會會籍，每列一個人 × 分會與在該分會的角色），以現有的 `users.club_id`／`users.role` 回填；`oauth_refresh_tokens` 加 `active_club_id`（MCP `switch_club`）
+20. `0020` — 建立 `machines`、`machine_pairings`、`machine_tokens`（電子名牌，見「機台管理」）
+21. `0021` — `clubs.template_key` 預設值改為 `compact`
+22. `0022` — 版型 `compact` 改名為 `standard`（既有分會一併更新），預設值改為 `standard`
 
 ### 常用指令
 
@@ -1298,6 +1410,7 @@ DATABASE_URL=postgresql://user:pass@ep-xxx-pooler.../neondb?sslmode=require
 | `/social` | `app/social/page.js` | 社群發文，AI 產生文案／生圖、海報版型、各平台版本與規則檢查、發布；個人與分會共用 AI 金鑰也在這裡設定 | `club_admin`（寫入） |
 | `/member` | `app/member/page.js` | 會員管理，新增、編輯（含 Email）、批量匯入、審核、重設密碼、移除會員；system_admin 另可設定角色與所屬分會 | `club_admin`（寫入） |
 | `/club` | `app/club/page.js` | 分會管理：新增／刪除分會、品牌、版型設定、社群帳號（Meta App）設定 | `system_admin`（寫入） |
+| `/machines` | `app/machines/page.js` | 機台管理：輸入名牌上的配對碼綁定會員、換綁、停用、解除綁定、刪除；顯示最後上線時間 | `club_admin` |
 | `/pathways` | `app/pathways/page.js` | Pathways 路徑管理：路徑、各級必修、專案中英名稱、選修清單 | `system_admin` |
 | `/change-password` | `app/change-password/page.js` | 修改密碼；admin 建立帳號後首次登入強制跳轉；沒有密碼的帳號在這裡設定第一組（不需舊密碼） | 任何登入用戶 |
 | `/mcp` | `app/mcp/page.js` | 「AI 助理串接」：Claude／ChatGPT／Codex 串接步驟、授權選項說明、全部 MCP 功能與所需授權和角色（依登入者角色標出可用的項目）。網址、scope、工具清單都由 `GET /api/mcp/catalog` 提供 | 任何登入用戶 |
@@ -1429,6 +1542,41 @@ DATABASE_URL=postgresql://user:pass@ep-xxx-pooler.../neondb?sslmode=require
 | POST | `/api/upload/presign` | 取得 R2 Presigned URL（前端直傳） | `club_admin` 以上 |
 | GET  | `/api/image-proxy` | 代理取得 R2 私有圖片（`?url=...`） | 已登入 |
 
+### 機台管理（電子名牌）
+
+名牌本身沒有帳號，用自己的機台憑證（`mt_…`）；這把憑證**只能**打下面「名牌」三支，不能當會員登入用。管理端則是一般的登入 JWT。
+
+**名牌韌體流程**
+
+1. `POST /api/machines/register` `{"serial": "<序號>"}` → `{machine_id, pairing_code, poll_secret, expires_in: 600, poll_interval: 5}`。螢幕顯示 `pairing_code`。同一序號重新註冊會沿用同一台機台，只換新的配對碼。
+2. 每 `poll_interval` 秒 `POST /api/machines/token` `{machine_id, poll_secret}`：
+   - `{"status": "pending"}` → 繼續等
+   - `{"status": "paired", "access_token": "mt_…"}` → 存起來（只會給一次）
+   - 404 → 配對碼過期或被新的取代，回到第 1 步
+3. 約每 60 秒 `GET /api/machines/me/badge`，帶 `Authorization: Bearer mt_…`，以及上次拿到的 `If-None-Match`：
+   - 200 → `{machineName, member: {nameZh, nameEn, level}, club: {name, nameZh, nameEn, logoUrl}}`，回應標頭有 `ETag`
+   - 304 → 內容沒變
+   - 403 → 被停用，顯示「已停用」並繼續輪詢（重新啟用後就會恢復，不用重新配對）
+   - 401 → 被解除綁定、刪除，或綁定的會員已不在這個分會，回到第 1 步
+
+`logoUrl` 可能是完整網址，也可能是站內路徑（如 `/media/...`），名牌要自行補上網站來源。
+
+| 方法 | 路徑 | 說明 | 權限 |
+|------|------|------|------|
+| POST | `/api/machines/register` | 名牌註冊，取得配對碼 | 無（名牌） |
+| POST | `/api/machines/token` | 名牌輪詢取得憑證 | `poll_secret`（名牌） |
+| GET  | `/api/machines/me/badge` | 名牌要顯示的內容（ETag） | 機台憑證 |
+| GET  | `/api/machines` | 機台列表；system_admin 可帶 `?club_id=`，不帶則列出全部分會 | `club_admin` 以上 |
+| POST | `/api/machines/pair` | `{code, username, name?, club_id?}` 用配對碼綁定本分會會員；system_admin 必須帶 `club_id` | `club_admin` 以上 |
+| PUT  | `/api/machines/{id}` | `{name?, username?, unbind?, status?}` 改名、換綁（不需重新配對）、解除綁定（撤銷憑證）、啟用／停用 | `club_admin` 以上（本分會） |
+| DELETE | `/api/machines/{id}` | 刪除機台 | `club_admin` 以上（本分會） |
+
+規則：
+
+- 只能綁定**機台所屬分會**的會員；會員之後退出該分會，名牌就收到 401，列表上標示「已不是本分會會員」。
+- 名牌若已綁定在別的分會，club_admin 不能用配對碼直接搶走，要由原分會先解除綁定。system_admin 不受這個限制。
+- 註冊後超過一天都沒有配對到任何分會的機台，會在下次有名牌註冊時清掉。
+
 ### OAuth 與 MCP
 
 這組端點給 MCP 客戶端用，認證方式跟上面不同：MCP 端點吃的是 OAuth access token，不是登入 JWT。細節見「MCP：讓 AI 助理操作這個系統」。
@@ -1514,6 +1662,7 @@ CREATE TABLE agendas (
 | `club_social_accounts` | `0012` | 分會已連接的 FB 粉專／IG／Threads，長效 token 加密存，`expires_at` 用來提前警告；`(club_id, platform)` 唯一 |
 | `pathways`、`pathway_projects`、`pathway_required`、`pathway_electives` | `0013` | Pathways 目錄，見「Pathways 路徑管理」 |
 | `oauth_codes` | `0015`、`0016` | MCP 授權碼（只存雜湊，5 分鐘） |
+| `machines`、`machine_pairings`、`machine_tokens` | `0020` | 電子名牌。`machines`：`serial`（唯一）、`club_id`、`bound_username`、`status`（`pending`／`active`／`disabled`）、`last_seen_at`；`machine_pairings`：配對中的配對碼與輪詢密鑰（只存雜湊，10 分鐘）；`machine_tokens`：名牌憑證（只存雜湊，可撤銷） |
 | `club_memberships` | `0019` | 多分會會籍：`username`、`club_id`、`role`（`club_admin`／`club_member`，在該分會的角色）。主鍵 `(username, club_id)`，刪帳號或分會時一併刪除。`users.club_id`／`users.role` 是主要分會的鏡像 |
 | `oauth_refresh_tokens` | `0015`、`0016`、`0018`、`0019` | MCP 的「授權」本身。`active_club_id`：`switch_club` 選的目前分會（空值＝主要分會）。`grant_id` 固定識別碼；`token_hash` 目前這把 refresh token 的雜湊（每次使用輪換）、`prev_token_hash` 上一把（用來偵測重複使用）；`client_name` 同意時的客戶端名稱、`revoked_at` 撤銷時間、`last_used_at` 最後使用時間、`expires_at` 閒置到期（60 天，每次使用往後延） |
 

@@ -212,11 +212,15 @@ tr.rm-sub-row .rm-role-zh { font-weight: 500; font-size: 11px; color: #475569; }
    matrix always reflects the full shared schema, but locked, greyed, and
    excluded from the assignment tally. Distinct from .rm-inactive (a real slot
    this specific meeting doesn't have yet); this is a whole-row, template-level lock. */
-tr.rm-locked-row th.rm-role { background: #f8fafc; }
-tr.rm-locked-row .rm-role-zh,
-tr.rm-locked-row .rm-role-en { color: #cbd5e1; }
-.rm-cell.rm-locked { background: #fafbfc; }
-.rm-cell.rm-locked .rm-input { cursor: not-allowed; }
+/* A role the club's agenda template doesn't print (still saved, for Word etc.) */
+tr.rm-other-row th.rm-role { background: #f8fafc; }
+tr.rm-other-row .rm-role-zh { color: #64748b; font-style: italic; }
+tr.rm-other-row .rm-role-en { color: #94a3b8; }
+.other-roles-toggle {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; color: #475569; cursor: pointer; user-select: none;
+}
+.other-roles-toggle input { margin: 0; cursor: pointer; }
 
 .matrix-empty { text-align: center; padding: 56px 24px; color: #94a3b8; font-size: 13px; line-height: 1.8; }
 .matrix-empty-add { margin: 14px auto 0; }
