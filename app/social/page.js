@@ -327,7 +327,7 @@ function renderEditor() {
       <span class="ai-bar-hint">${isGovernedKind() && current.agendaId
         ? '受控生成：日期、地點、人名由系統從議程帶入，產出後要經幹部核可才能發布。'
         : '會讀取上面綁定的例會資料，用你自己的 AI 帳號產生。'}</span>
-      <button class="btn-mini" onclick="window.__socialOpenPrefs()">貼文品牌設定</button>
+      <button class="btn-mini" onclick="window.__socialOpenPrefs()">貼文品牌設定・海報模板</button>
     </div>` : ''}
 
     ${renderGovernance()}
@@ -854,7 +854,7 @@ async function openPrefsModal() {
     </select>`;
   document.getElementById('prefsBody').innerHTML = `
     <p class="modal-field-hint" style="margin-top:0">宣傳與回顧貼文用的分會設定。留空就用預設值（灰字）。</p>
-    <label class="modal-field-label">報名連結（必填：貼文的行動呼籲指向這裡）</label>
+    <label class="modal-field-label">報名連結（選填：有填才會印在貼文與海報上）</label>
     <input id="pp_register_url" class="modal-input" ${ro} value="${esc(p.register_url || '')}" placeholder="https://…">
     <label class="modal-field-label">品牌定位句（逐字印在回顧貼文結尾）</label>
     <input id="pp_brand_signature" class="modal-input" ${ro} value="${esc(p.brand_signature || '')}"
@@ -1926,6 +1926,9 @@ export default function SocialPage() {
           <div className="topbar-actions">
             <span className="save-state" id="saveState"></span>
             <button className="btn-ghost" onClick={openCredModal}>AI 帳號</button>
+            {/* Also reachable without a post open: it holds the club's PPTX
+                templates, which people look for before writing anything. */}
+            <button className="btn-ghost write-action" onClick={openPrefsModal}>貼文品牌設定・海報模板</button>
             <button className="btn-add write-action" onClick={savePost} disabled={saveDisabled}>{saveLabel}</button>
           </div>
         </header>

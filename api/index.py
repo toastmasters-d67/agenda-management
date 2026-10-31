@@ -7884,7 +7884,7 @@ MCP_TOOLS = [
     {
         "name": "update_post_prefs", "scope": "posts:write", "title": "修改貼文品牌設定",
         "description": "修改貼文品牌設定，只改有給的欄位；文字欄位給空字串＝改回預設。"
-                       "報名連結沒設定時，宣傳與回顧貼文都無法通過品質檢查。限分會管理員以上。",
+                       "報名連結是選填，沒設定時貼文不印連結那一行。限分會管理員以上。",
         "inputSchema": {"type": "object", "properties": {
             "club_id": {"type": "integer"},
             "prefs": {"type": "object", "additionalProperties": False, "properties": {

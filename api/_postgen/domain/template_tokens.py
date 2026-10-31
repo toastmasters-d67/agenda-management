@@ -12,11 +12,12 @@ ROLE_SLOTS_PER_PAGE = 4
 # ── 預告海報（單頁）────────────────────────────────────────────────
 # QUESTION_ZH 選填：本週問句在 EntrepreneurAgenda 是選填事實（fact_whitelist），
 # 模板不能要求一個多數分會的議程沒有的欄位。
+# REGISTER_URL 也是選填：報名連結在 EntrepreneurAgenda 是選填設定。
 PRE_EVENT_REQUIRED = {
     "HEADLINE", "THEME",
-    "DATE", "TIME", "VENUE", "FEE", "REGISTER_URL",
+    "DATE", "TIME", "VENUE", "FEE",
 }
-PRE_EVENT_OPTIONAL = {"QUESTION_ZH", "QUESTION_EN", "TRANSPORT", "HOST_NAME"}
+PRE_EVENT_OPTIONAL = {"QUESTION_ZH", "QUESTION_EN", "TRANSPORT", "HOST_NAME", "REGISTER_URL"}
 PRE_EVENT_PHOTOS = {"PHOTO_HOST"}
 
 # ── 回顧（封面 / 角色頁 / 封底）─────────────────────────────────────
@@ -32,9 +33,9 @@ RECAP_ROLE_OPTIONAL = {
 
 RECAP_CLOSING_REQUIRED = {
     "NEXT_DATE", "NEXT_TIME", "NEXT_VENUE", "NEXT_FEE",
-    "REGISTER_URL", "BRAND_SIGNATURE",
+    "BRAND_SIGNATURE",
 }
-RECAP_CLOSING_OPTIONAL = {"NEXT_TRANSPORT", "THEME"}
+RECAP_CLOSING_OPTIONAL = {"NEXT_TRANSPORT", "THEME", "REGISTER_URL"}
 
 RECAP_PHOTOS = {"PHOTO_GROUP"} | {f"PHOTO_ROLE_{i}" for i in range(1, ROLE_SLOTS_PER_PAGE + 1)}
 

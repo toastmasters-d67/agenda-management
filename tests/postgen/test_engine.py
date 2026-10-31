@@ -128,10 +128,26 @@ def test_the_theme_question_is_optional():
     assert "本週主題" not in resp.facebook and MISSING not in resp.facebook
 
 
-def test_missing_register_link_blocks_and_says_where_to_set_it():
-    _, resp = run(PRE_EVENT, ClubProfile(club_id=2, name="沒設定的分會"))
-    assert resp.blocked and qc(resp, "cta").state == "crit"
-    assert "貼文品牌設定" in qc(resp, "cta").detail
+NO_LINK = ClubProfile(club_id=2, name="沒設定的分會", standing=PROFILE.standing)
+
+
+@pytest.mark.parametrize("raw", [PRE_EVENT, POST_REVIEW])
+def test_the_register_link_is_optional(raw):
+    svc, resp = run(raw, NO_LINK)
+    assert not resp.blocked
+    assert qc(resp, "cta").state == "ok" and qc(resp, "event").state == "ok"
+    assert "報名連結" not in resp.facebook and "http" not in resp.facebook
+    assert not resp.facebook.rstrip().endswith("：")
+    assert not any("報名連結" in n.text for n in resp.compliance_notes)
+    ctx, cc = svc.last_ctx, svc.last_cc
+    assert "http" not in social.threads(ctx.req, cc, svc.settings)
+    assert "個人簡介" not in social.instagram(ctx.req, cc, svc.settings, resp.facebook)
+    if raw is POST_REVIEW:
+        assert "👉 立即報名下一場例會\n" in resp.facebook
+
+
+def test_an_unset_signature_is_flagged():
+    _, resp = run(PRE_EVENT, NO_LINK)
     assert any("品牌定位句" in n.text for n in resp.compliance_notes)
 
 

@@ -86,7 +86,8 @@ def _render_pre_event(req: PostRequest, cc: CanonicalContent, settings: Settings
         f"{p[1]}地點｜{fact_or_missing(e.venue)}",
         f"{p[2]}交通｜{e.transport or '[需由使用者提供]'}",
         f"{p[3]}費用｜{fact_or_missing(e.fee)}",
-        f"{p[4]}報名連結：{url}",
+        # 報名連結是選填：沒有就整行不印，不留一個空的冒號。
+        *([f"{p[4]}報名連結：{url}"] if url else []),
         "",
         " ".join(_dedupe_tags(tags)),
     ]
@@ -117,7 +118,7 @@ def _render_review(req: PostRequest, cc: CanonicalContent, settings: Settings) -
         "—",
         cc.brand_signature,
         "",
-        f"{p[0]}{cc.cta_text}：{url}",
+        f"{p[0]}{cc.cta_text}：{url}" if url else f"{p[0]}{cc.cta_text}",
         f"{p[1]}下次例會｜{fmt_date(ne.date) if ne.date else '[需由使用者提供]'}{weekday_zh(ne.date)}{time}",
         f"{p[2]}地點｜{fact_or_missing(ne.venue)}",
         f"{p[3]}交通｜{ne.transport or '[需由使用者提供]'}",

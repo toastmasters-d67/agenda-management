@@ -52,10 +52,10 @@ def apply_defaults_and_notes(
         _apply(req.next_event, "fee", club.get("fee"), "下次費用", notes)
         _infer_next_date(req, club, notes)
 
-    # 報名連結預設（CTA-02）
-    if not req.cta.url.strip():
+    # 報名連結預設（CTA-02）。選填：分會沒設定就不填，也不留「套用」的紀錄。
+    if not req.cta.url.strip() and url_default:
         req.cta.url = url_default
-        notes.append(ComplianceNote(severity="info", text="報名連結未填 → 套用品牌固定連結（CTA-02）"))
+        notes.append(ComplianceNote(severity="info", text="報名連結未填 → 套用分會的報名連結（CTA-02）"))
 
     # 缺漏必填事實（REQ-003：標記不補完）——在套完常態之後才判定
     for label in fact_whitelist.find_missing(req):
