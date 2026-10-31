@@ -5656,7 +5656,7 @@ def _tool_export_agenda(caller, args):
                       "url": f"{R2_PUBLIC_URL}/{keys['jpg'][i]}"})
     if out.get("docx"):
         files.append({"format": "docx", "url": f"{R2_PUBLIC_URL}/{keys['docx']}"})
-    names = {"pdf": "PDF", "jpg": "JPG", "docx": "Word（可編輯）"}
+    names = {"pdf": "PDF", "jpg": "JPG", "docx": "Word"}
     lines = [f"{names[f['format']]}{'（第 %d 頁）' % f['page'] if 'page' in f else ''}：{f['url']}"
              for f in files]
     return _tool_text("議程檔案（任何拿到連結的人都能開啟）：\n" + "\n".join(lines),

@@ -217,7 +217,7 @@ EntrepreneurAgenda/
 
 ## Word 匯出與自訂 Word 範本
 
-議程頁「設定」選單的「下載 Word（可編輯）」會產生一份可在 Word 裡修改的議程，給版面與分會習慣不完全相符、需要下載後自行調整的情況。
+議程頁「設定」選單的「下載 Word」會產生一份可在 Word 裡修改的議程，給版面與分會習慣不完全相符、需要下載後自行調整的情況。
 
 - **範本來源**：分會在「版型」設定的「Word 匯出範本」區上傳的 .docx（存在 `clubs.settings.word_template_url`，檔案放 R2，透過 `/api/image-proxy` 讀取）；沒上傳就用內建的 `public/templates/agenda-default.docx`（仿標準版）。Word 範本屬於分會，不分議程版型。
 - **標記**：範本裡寫 `{{例會主題}}`、`{{總主持人}}` 這類中文標記，下載時換成當次例會資料。完整清單在 `lib/wordExport.js` 的 `WORD_FIELDS` / `WORD_LOOPS`，分會設定視窗的「可用的標記」也是從這份清單產生。

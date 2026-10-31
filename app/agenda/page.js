@@ -2858,7 +2858,7 @@ export default function AgendaIndexPage() {
                   </button>
                   <button className="settings-menu-item" onClick={downloadPDF}>下載 PDF</button>
                   <button className="settings-menu-item" onClick={downloadJPG}>下載 JPG</button>
-                  <button className="settings-menu-item" onClick={downloadWord}>下載 Word（可編輯）</button>
+                  <button className="settings-menu-item" onClick={downloadWord}>下載 Word</button>
                 </div>
               </div>
               <div className="toolbar-sep"></div>
