@@ -1,0 +1,45 @@
+# 模板庫索引。設計師交付完稿模板後，在此新增一筆即可（不需改程式）。
+# S3 階段會改由資料庫供給（可在介面上上傳／啟用／停用），屆時本檔作為預設值。
+version: 1
+templates:
+  # ── 目前為 token 骨架檔（無視覺設計），供功能驗證用 ──
+  - id: pre_event_skeleton_v1
+    name: 預告骨架（待套視覺）
+    use: PRE_EVENT
+    style: [骨架, 測試]
+    file: pre_event_skeleton_v1.pptx
+    preview: null
+
+  - id: recap_skeleton_v1
+    name: 回顧骨架（待套視覺）
+    use: POST_REVIEW
+    style: [骨架, 測試]
+    file: recap_skeleton_v1.pptx
+    preview: null
+    role_slots_per_page: 4
+    role_pages: 5
+
+  # ── 品牌配色起始版（已套視覺，可直接使用或再微調） ──
+  - id: pre_event_navy_v1
+    name: 深藍沉靜
+    use: PRE_EVENT
+    style: [沉靜, 勇氣, 內省]
+    file: pre_event_navy_v1.pptx
+    preview: null
+
+  - id: recap_yellow_v1
+    name: 品牌黃回顧
+    use: POST_REVIEW
+    style: [溫暖, 熱鬧]
+    file: recap_yellow_v1.pptx
+    preview: null
+    role_slots_per_page: 4
+    role_pages: 5
+
+  # ── 設計完稿模板請照下列格式新增（範例，尚未存在） ──
+  # - id: pre_event_navy_v1
+  #   name: 深藍沉靜
+  #   use: PRE_EVENT
+  #   style: [沉靜, 勇氣, 內省]
+  #   file: pre_event_navy_v1.pptx
+  #   preview: pre_event_navy_v1.png

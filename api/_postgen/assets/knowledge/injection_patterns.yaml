@@ -1,0 +1,8 @@
+# Prompt Injection 越權字串樣式（REQ-022）⚠️ OQ #5 待確認
+version: v1
+status: PLACEHOLDER
+patterns:
+  - "忽略上述"
+  - "改用"
+  - "ignore the above"
+  # 【需補：完整越權樣式清單】

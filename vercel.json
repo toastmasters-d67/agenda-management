@@ -2,7 +2,7 @@
   "functions": {
     "api/index.py": {
       "maxDuration": 60,
-      "includeFiles": "lib/meetingRoles.json"
+      "includeFiles": "{lib/meetingRoles.json,api/_postgen/**}"
     }
   },
   "rewrites": [

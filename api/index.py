@@ -2304,11 +2304,17 @@ def _social_row(r):
         "updatedAt": r[9].isoformat() if r[9] else "",
         "published": r[10] or {},
         "kind": r[11] or "other",
+        # Human review of a governed post: none / pending / approved / rejected.
+        "reviewState": r[12] or "none",
+        "governance": r[13] or {},
+        "reviewedBy": r[14] or "",
+        "reviewedAt": r[15].isoformat() if r[15] else "",
     }
 
 
 _SOCIAL_COLS = ("id, club_id, agenda_id, title, status, body, variants, images,"
-                " created_at, updated_at, published, kind")
+                " created_at, updated_at, published, kind,"
+                " review_state, governance, reviewed_by, reviewed_at")
 
 # What the post is for. Drives the copywriter's brief, which facts are
 # required, and which image template applies.
@@ -2334,6 +2340,10 @@ class SocialGenerateRequest(BaseModel):
     provider:  str = "anthropic"     # whose account writes it — see COPY_WRITERS
     model:     str = ""              # one of COPY_MODELS[provider]; blank = cheapest
     kind:      str = "other"         # see _KIND_BRIEF
+    # Governed generation (promo / recap with a meeting) saves its result and
+    # needs to know which post to overwrite; blank = a new post.
+    post_id:   Optional[int] = None
+    options:   Optional[Dict[str, Any]] = None   # see GovernedOptions
 
 
 @app.get("/api/social-posts")
@@ -2396,15 +2406,26 @@ def update_social_post(post_id: int, req: SocialPostRequest,
         raise HTTPException(status_code=400, detail="狀態不正確")
     with get_db() as conn:
         with conn.cursor() as cur:
-            _load_social_post(cur, post_id, user)   # 404 / 403 before writing
+            before = _social_row(_load_social_post(cur, post_id, user))   # 404 / 403 before writing
+            # An approved post whose text changes goes back to review: what
+            # was approved is the text, not the post id. (Images and status
+            # do not reopen it.)
+            state = before["reviewState"]
+            if state == "approved" and (req.body != before["body"]
+                                        or _variant_texts(req.variants) != _variant_texts(before["variants"])):
+                state = "pending"
             cur.execute(
                 "UPDATE social_posts SET agenda_id=%s, kind=%s, title=%s, status=%s,"
-                " body=%s, variants=%s::jsonb, images=%s::jsonb, updated_at=NOW()"
+                " body=%s, variants=%s::jsonb, images=%s::jsonb, review_state=%s, updated_at=NOW()"
                 " WHERE id=%s",
                 (req.agenda_id, _kind_of(req), req.title[:200], req.status, req.body,
-                 json.dumps(req.variants), json.dumps(req.images), post_id),
+                 json.dumps(req.variants), json.dumps(req.images), state, post_id),
             )
-    return {"ok": True}
+    return {"ok": True, "reviewState": state}
+
+
+def _variant_texts(variants) -> dict:
+    return {p: (v or {}).get("text", "") for p, v in (variants or {}).items() if isinstance(v, dict)}
 
 
 @app.delete("/api/social-posts/{post_id}")
@@ -2687,6 +2708,11 @@ def get_meeting_fields(agenda_id: int = Query(...),
 @app.post("/api/social-posts/generate")
 def generate_social_copy(req: SocialGenerateRequest,
                          user: dict = Depends(require_club_admin_or_above)):
+    # Promo and recap posts about a meeting go through the governed engine
+    # (see "governed posts" below), which saves the result as a post awaiting
+    # review and returns that post. Everything else is written freely here.
+    if req.kind in _GOVERNED_KINDS and req.agenda_id:
+        return {"post": _governed_generate(req, user)}
     provider = req.provider if req.provider in COPY_WRITERS else "anthropic"
 
     # The caller's own connected account is what pays. Anthropic additionally
@@ -2775,6 +2801,656 @@ def generate_social_copy(req: SocialGenerateRequest,
         "variants": {p: {"text": (data.get("variants") or {}).get(p, ""), "enabled": True}
                      for p in platforms},
     }
+
+
+# ------------------------------------------------------------------ governed posts
+# Promo and recap posts are written by PostGenerator's governed engine
+# (api/_postgen, merged in from toastmasters-d67/post-generator). The engine
+# keeps three red lines: facts never pass through the model (the renderer prints
+# them from structured input), locked brand lines are printed verbatim, and
+# nothing missing is made up. Its Quality Checker can block a draft, and a
+# human must approve it before it can be published or its poster downloaded.
+#
+# The engine itself never touches the database. Everything club-specific is
+# read here into a ClubProfile; the agenda becomes its PostRequest here too.
+#
+# Trust: the QC result and the review state are written only by the server.
+# A governed generation is saved straight into social_posts, so the browser
+# never holds a "result" it could hand back altered.
+
+# api/_postgen imports itself as `api._postgen`, which needs the project root
+# on sys.path. uvicorn (api.index) already has it; a runtime that loads this
+# file by path (Vercel) may not.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in __import__("sys").path:
+    __import__("sys").path.insert(0, _PROJECT_ROOT)
+
+_GOVERNED_KINDS = {"promo": "PRE_EVENT", "recap": "POST_REVIEW"}
+_REVIEW_STATES = ("none", "pending", "approved", "rejected")
+_CJK_RE = re.compile(r"[㐀-鿿豈-﫿]")
+_LEVEL_SUFFIX_RE = re.compile(r",\s*[A-Za-z0-9]{2,6}\s*$")
+
+
+def _split_theme(theme: str) -> tuple:
+    """「勇氣 Courage」→ ("勇氣", "Courage")；只有一種語言就整串放第一格。"""
+    theme = (theme or "").strip().strip("-").strip()
+    if not theme or not _CJK_RE.search(theme):
+        return theme, ""
+    words = theme.split()
+    zh = " ".join(w for w in words if _CJK_RE.search(w))
+    en = " ".join(w for w in words if not _CJK_RE.search(w))
+    return (zh, en) if zh and en else (theme, "")
+
+
+def _person(v) -> str:
+    """議程存的會員值（「郭家瑀, DL5」）→ 貼文上的名字（「郭家瑀」）。"""
+    return _LEVEL_SUFFIX_RE.sub("", str(v or "")).strip()
+
+
+def _role_emoji(role_type: str) -> str:
+    for keys, emoji in ((("總主持",), "🎤"), (("演講",), "🗣️"), (("講評",), "💬"),
+                        (("即席",), "💡"), (("計時",), "⏱️"), (("贅",), "📝"),
+                        (("暖場", "多元"), "🔥"), (("攝影",), "📸"), (("板書", "白板"), "🖊️")):
+        if any(k in role_type for k in keys):
+            return emoji
+    return ""
+
+
+def _agenda_roles(d: dict, club_settings: dict) -> list:
+    """回顧文的角色名單：依角色目錄的分組順序，與角色安排頁、Word「所有角色」相同。"""
+    out = []
+
+    def add(role_type, value):
+        name = _person(value)
+        if name:
+            out.append({"roleType": role_type, "name": name, "emoji": _role_emoji(role_type)})
+
+    speeches = [s for s in (d.get("speeches") or []) if isinstance(s, dict)]
+    evaluators = d.get("evaluators") or []
+    for g in _ROLE_CATALOG["groups"]:
+        roles = [r for r in _ROLE_CATALOG["roles"] if r["group"] == g["key"]]
+        if g["key"] == "speech":
+            for i, sp in enumerate(speeches, 1):
+                add(f"指定演講者 #{i}", sp.get("speaker"))
+        elif g["key"] == "eval":
+            for i, ev in enumerate(evaluators, 1):
+                add(f"個別講評員 #{i}", ev)
+            for r in roles:
+                add(r["zh"], d.get(r["key"]))
+            for i, ev in enumerate(d.get("evalEvaluators") or [], 1):
+                add(f"講評員講評 #{i}", ev)
+        elif g["key"] == "custom":
+            values = d.get("customRoles") or {}
+            for cr in club_settings.get("custom_roles") or []:
+                add(cr.get("zh") or "", values.get(cr.get("id")))
+        else:
+            for r in roles:
+                if r.get("kind") == "variety":
+                    vs = d.get("varietySession") or {}
+                    if vs.get("enabled"):
+                        add(r["zh"], vs.get("host"))
+                else:
+                    add(r["zh"], d.get(r["key"]))
+    return out
+
+
+def _post_profile(cur, club_id: int):
+    """這個分會給引擎的一切：名稱、貼文品牌設定、分會常態、上傳的模板。"""
+    from api._postgen.context import ClubProfile
+
+    cur.execute("SELECT name, name_zh, fee, settings FROM clubs WHERE id=%s", (club_id,))
+    row = cur.fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="找不到這個分會")
+    st = parse_jsonb(row[3])
+    cur.execute("SELECT prefs FROM club_post_prefs WHERE club_id=%s", (club_id,))
+    prefs_row = cur.fetchone()
+    cur.execute("SELECT id, use, name, style, file_url, role_slots_per_page, role_pages"
+                " FROM post_templates WHERE club_id=%s AND enabled ORDER BY created_at",
+                (club_id,))
+    templates = tuple({
+        "id": t[0], "use": t[1], "name": t[2], "style": t[3] or [], "file": f"{t[0]}.pptx",
+        "file_url": t[4], "role_slots_per_page": t[5] or 4, "role_pages": t[6],
+    } for t in cur.fetchall())
+    return ClubProfile(
+        club_id=club_id,
+        name=(row[1] or row[0] or "").strip(),
+        prefs=parse_jsonb(prefs_row[0]) if prefs_row else {},
+        standing={
+            "venue": _strip_label(st.get("venue") or ""),
+            "transport": (st.get("transit") or "").strip(),
+            "fee": (row[2] or "").strip(),
+            "meeting_time": (st.get("timeRange") or "").strip(),
+        },
+        templates=templates,
+    )
+
+
+def _next_meeting(cur, club_id: int, after: str) -> dict:
+    """同分會、這場之後最近的一場議程（回顧文的「下次例會」）。"""
+    if not after:
+        return {}
+    cur.execute("SELECT data FROM agendas WHERE club_id=%s AND data->>'meetingDate' > %s"
+                " ORDER BY data->>'meetingDate' LIMIT 1", (club_id, after))
+    row = cur.fetchone()
+    if not row:
+        return {}
+    d = parse_jsonb(row[0])
+    return {"date": d.get("meetingDate") or "", "time": (d.get("timeRange") or "").strip(),
+            "venue": _strip_label(d.get("venueInfo") or "")}
+
+
+class GovernedOptions(BaseModel):
+    """這一篇的選項（都可省略）。"""
+    host_highlight: str = ""                 # 宣傳：總主持人的特色（有填才寫）
+    role_notes: Dict[str, str] = {}          # 回顧：角色姓名 → 這次的亮點筆記
+    tuning: Dict[str, str] = {}              # emotion / length / use_emoji
+    layout: Dict[str, Any] = {}              # titleTagline / reviewHeadline / ctaText / orgLine / infoEmoji / emojiSet
+    poster: bool = True                      # 要不要一併產出 PPTX 海報計畫
+
+
+def _governed_request(cur, agenda_id: int, user: dict, kind: str, brief: str,
+                      opts: GovernedOptions):
+    """一場議程 → 引擎的 PostRequest。事實全部來自資料庫，不經使用者打字。"""
+    from api._postgen.schemas.post_request import PostRequest
+
+    f = _meeting_fields(cur, agenda_id, user)
+    d = f["agenda"]
+    cur.execute("SELECT club_id FROM agendas WHERE id=%s", (agenda_id,))
+    club_id = cur.fetchone()[0]
+    cur.execute("SELECT settings FROM clubs WHERE id=%s", (club_id,))
+    club_settings = parse_jsonb((cur.fetchone() or [None])[0])
+    zh, en = _split_theme(f.get("theme") or "")
+    question = (d.get("themeQuestion") or d.get("tableTopicsQuestion") or "").strip()
+    platforms = ["FACEBOOK"] + (["PPTX_POSTER"] if opts.poster else [])
+    raw = {
+        "postType": _GOVERNED_KINDS[kind],
+        "platforms": platforms,
+        "topic": {"title_zh": zh, "title_en": en, "question_zh": question},
+        "meetingDate": f.get("date") or "",
+        "extraNotes": (brief or "")[:500],
+        "runtime": {"emotion": opts.tuning.get("emotion") or None,
+                    "useEmoji": opts.tuning.get("use_emoji") or None,
+                    "length": opts.tuning.get("length") or None},
+        "layout": opts.layout or {},
+    }
+    if kind == "promo":
+        raw["event"] = {"date": f.get("date") or "", "time": f.get("time") or "",
+                        "venue": f.get("venue") or "", "transport": f.get("transit") or "",
+                        "fee": f.get("fee") or ""}
+        raw["host"] = {"name": _person(d.get("tme")), "role": "總主持人",
+                       "highlight": (opts.host_highlight or "").strip()[:300]}
+    else:
+        nxt = _next_meeting(cur, club_id, f.get("date") or "")
+        raw["nextEvent"] = {**nxt, "transport": f.get("transit") or "", "fee": f.get("fee") or ""}
+        roles = _agenda_roles(d, club_settings)
+        for r in roles:
+            r["contribution"] = (opts.role_notes.get(r["name"]) or "").strip()[:300]
+        raw["roles"] = roles
+    try:
+        return club_id, PostRequest.model_validate(raw)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"這一篇的選項不正確：{e}")
+
+
+def _resolve_ai_key(username: str, provider: str, club_id: Optional[int]):
+    """(金鑰, 來源)。來源只用來告訴使用者這次記在誰的帳上。"""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT key_cipher FROM user_ai_credentials"
+                        " WHERE username=%s AND provider=%s", (username, provider))
+            row = cur.fetchone()
+    if row:
+        return _open(row[0]), "user"
+    if club_id is not None:
+        key = _get_club_secret(club_id, _club_ai_name(provider))
+        if key:
+            return key, "club"
+    if provider == "anthropic" and os.getenv("ANTHROPIC_API_KEY"):
+        return os.getenv("ANTHROPIC_API_KEY"), "server"
+    return None, ""
+
+
+def _engine_llm(provider: str, api_key: str, model: dict):
+    from api._postgen.domain.secret import Secret
+    if provider == "openai":
+        from api._postgen.infrastructure.llm.openai_client import OpenAIClient
+        return OpenAIClient(Secret(api_key), model["id"])
+    from api._postgen.infrastructure.llm.client import AnthropicClient
+    return AnthropicClient(Secret(api_key), model["id"], max_tokens=8000)
+
+
+def _platform_texts(svc, ctx, cc, fb_text: str, platforms: list) -> dict:
+    """三個平台的文字都從同一份受控內容出來（見 renderers/social.py）。"""
+    from api._postgen.renderers import social
+    texts = {"facebook": fb_text or "",
+             "instagram": social.instagram(ctx.req, cc, svc.settings, fb_text or ""),
+             "threads": social.threads(ctx.req, cc, svc.settings)}
+    return {p: {"text": texts[p], "enabled": True} for p in platforms}
+
+
+def _governance_record(resp, req, key_source: str) -> dict:
+    return {
+        "postType": resp.post_type,
+        "qc": [c.model_dump() for c in resp.qc],
+        "complianceNotes": [n.model_dump() for n in resp.compliance_notes],
+        "blocked": resp.blocked,
+        "aiWrittenHighlights": resp.ai_written_highlights,
+        "posterPlan": resp.poster_plan,
+        "usedModel": resp.used_model,
+        "keySource": key_source,
+        "request": req.model_dump(by_alias=True, mode="json"),
+        "generatedAt": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _save_governed(cur, post_id: Optional[int], club_id: int, agenda_id: int, kind: str,
+                   title: str, variants: dict, body: str, governance: dict, user: dict) -> int:
+    """受控生成的結果直接存檔；核可狀態一律回到 pending（重新生成 = 重新審稿）。"""
+    if post_id:
+        row = _load_social_post(cur, post_id, user)
+        if row[1] != club_id:
+            raise HTTPException(status_code=400, detail="這則貼文與那場議程不屬於同一個分會")
+        cur.execute(
+            "UPDATE social_posts SET agenda_id=%s, kind=%s, title=%s, body=%s, variants=%s::jsonb,"
+            " governance=%s::jsonb, review_state='pending', reviewed_by=NULL, reviewed_at=NULL,"
+            " status='draft', updated_at=NOW() WHERE id=%s",
+            (agenda_id, kind, title[:200], body, json.dumps(variants), json.dumps(governance), post_id))
+        return post_id
+    cur.execute(
+        "INSERT INTO social_posts (club_id, agenda_id, kind, title, status, body, variants, images,"
+        " governance, review_state) VALUES (%s,%s,%s,%s,'draft',%s,%s::jsonb,'[]'::jsonb,%s::jsonb,"
+        " 'pending') RETURNING id",
+        (club_id, agenda_id, kind, title[:200], body, json.dumps(variants), json.dumps(governance)))
+    return cur.fetchone()[0]
+
+
+def _governed_generate(req, user: dict) -> dict:
+    """宣傳／回顧：跑受控引擎、存成待核可的貼文，回傳那一筆。"""
+    from api._postgen.core.exceptions import LLMError
+    from api._postgen.service import GenerationService
+
+    kind = req.kind
+    platforms = [p for p in req.platforms if p in SOCIAL_PLATFORMS] or list(SOCIAL_PLATFORMS)
+    _social_scope(user, req.club_id)
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            try:
+                opts = GovernedOptions.model_validate(req.options or {})
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=f"這一篇的選項不正確：{e}")
+            club_id, preq = _governed_request(cur, req.agenda_id, user, kind, req.brief, opts)
+            if user["role"] != "system_admin" and club_id != user["club_id"]:
+                raise HTTPException(status_code=403, detail="無權存取其他分會的資料")
+            profile = _post_profile(cur, club_id)
+
+    provider = req.provider if req.provider in COPY_WRITERS else "anthropic"
+    if os.getenv("LLM_FAKE") == "1":
+        # Tests and local demos: PostGenerator's fake model, no key, no cost.
+        from api._postgen.infrastructure.llm.fake import FakeLLMClient
+        svc = GenerationService(FakeLLMClient(), profile, key_source="fake", model="fake")
+        resp = svc.generate(preq)
+        return _store_governed_result(svc, svc.last_ctx, svc.last_cc, resp, user, req.post_id,
+                                      req.agenda_id, kind, platforms, "fake")
+    api_key, source = _resolve_ai_key(user["username"], provider, club_id)
+    if not api_key:
+        label = "Anthropic" if provider == "anthropic" else "OpenAI"
+        raise HTTPException(status_code=400,
+                            detail=f"沒有可用的 {label} 帳號。請在「AI 帳號」填自己的金鑰，"
+                                   "或由分會幹部設定一組分會共用的。")
+    model = _copy_model(provider, req.model)
+    svc = GenerationService(_engine_llm(provider, api_key, model), profile,
+                            key_source=source, model=model["id"])
+    try:
+        resp = svc.generate(preq)
+    except LLMError as e:
+        raise HTTPException(status_code=502, detail=f"{e}。{e.hint}")
+    return _store_governed_result(svc, svc.last_ctx, svc.last_cc, resp, user, req.post_id,
+                                  req.agenda_id, kind, platforms, source)
+
+
+def _store_governed_result(svc, ctx, cc, resp, user, post_id, agenda_id, kind, platforms,
+                           source) -> dict:
+    """把一次受控生成（網頁或 MCP 兩段式）存成待核可的貼文。
+
+    三個平台的文字都從 `cc`——Facebook 文字印出來的那同一份內容——改寫。
+    """
+    variants = _platform_texts(svc, ctx, cc, resp.facebook or "", platforms)
+    theme = ctx.req.topic.title_zh or ctx.req.topic.title_en
+    title = ("宣傳｜" if kind == "promo" else "回顧｜") + (theme or "例會")
+    governance = _governance_record(resp, ctx.req, source)
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            new_id = _save_governed(cur, post_id, svc.profile.club_id, agenda_id, kind, title,
+                                    variants, resp.facebook or "", governance, user)
+            return _social_row(_load_social_post(cur, new_id, user))
+
+
+# ---- review gate ----
+
+class ReviewRequest(BaseModel):
+    action: str                               # approve | reject | reopen
+    confirmed: List[str] = []                 # 已逐一審閱過的 AI 補寫角色
+    note: str = ""
+
+
+@app.post("/api/social-posts/{post_id}/review")
+def review_social_post(post_id: int, req: ReviewRequest,
+                       user: dict = Depends(require_club_admin_or_above)):
+    """人工核可。只有幹部能做；被品質檢查擋下的不能核可。"""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            post = _social_row(_load_social_post(cur, post_id, user))
+            state, gov = post["reviewState"], post["governance"]
+            if state == "none":
+                raise HTTPException(status_code=400, detail="這則貼文不是受控生成的，不需要核可")
+            if req.action == "approve":
+                if gov.get("blocked"):
+                    raise HTTPException(status_code=400,
+                                        detail="品質檢查有紅線未過，不能核可。請依治理面板修正後重新生成")
+                missing = [n for n in gov.get("aiWrittenHighlights") or []
+                           if n not in set(req.confirmed)]
+                if missing:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="這些角色的描述是 AI 依職責補寫的，請逐一確認後再核可：" + "、".join(missing))
+                new_state = "approved"
+            elif req.action == "reject":
+                new_state = "rejected"
+            elif req.action == "reopen":
+                new_state = "pending"
+            else:
+                raise HTTPException(status_code=400, detail="action 必須是 approve、reject 或 reopen")
+            gov = {**gov, "reviewNote": req.note[:500]} if req.note else gov
+            cur.execute("UPDATE social_posts SET review_state=%s, governance=%s::jsonb,"
+                        " reviewed_by=%s, reviewed_at=NOW(), updated_at=NOW() WHERE id=%s",
+                        (new_state, json.dumps(gov), user["username"], post_id))
+            return _social_row(_load_social_post(cur, post_id, user))
+
+
+def _require_approved(post: dict):
+    if post["reviewState"] in ("pending", "rejected"):
+        raise HTTPException(status_code=403,
+                            detail="這則貼文還沒通過人工核可（目前：" +
+                                   {"pending": "待核可", "rejected": "已退回"}[post["reviewState"]] +
+                                   "）。請先在貼文的治理面板完成核可")
+
+
+# ---- poster (PPTX) ----
+
+class PosterRequest(BaseModel):
+    template_id: str = ""
+    photos: Dict[str, str] = {}               # PHOTO_* → 這則貼文自己的附圖網址
+
+
+def _download_r2(url: str, suffix: str) -> str:
+    """R2 上的檔案 → 本機暫存路徑。只收本系統 R2 的網址。"""
+    import tempfile
+    prefix = R2_PUBLIC_URL + "/"
+    if not R2_PUBLIC_URL or not url.startswith(prefix):
+        raise HTTPException(status_code=400, detail="檔案不在本系統的儲存空間")
+    obj = _r2().get_object(Bucket=R2_BUCKET_NAME, Key=url[len(prefix):])
+    fd, path = tempfile.mkstemp(suffix=suffix)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(obj["Body"].read(30 * 1024 * 1024))
+    return path
+
+
+def _template_local_path(tpl: dict) -> str:
+    from api._postgen.modules.template_selector import pptx_registry
+    if tpl.get("file_url"):
+        return _download_r2(tpl["file_url"], ".pptx")
+    return str(pptx_registry.template_path(tpl))
+
+
+def _build_poster(post: dict, club_id: int, req: PosterRequest) -> dict:
+    """依存好的海報計畫填模板 → 上傳 R2 → 回傳網址。不重新呼叫模型。"""
+    from api._postgen.infrastructure.pptx.template_filler import fill_template
+    from api._postgen.modules.template_selector import pptx_registry
+    from api._postgen.renderers import pptx as pptx_renderer
+    from api._postgen.schemas.post_request import PostRequest
+    from api._postgen.domain.canonical_content import CanonicalContent
+
+    _require_approved(post)
+    gov = post["governance"]
+    plan = dict(gov.get("posterPlan") or {})
+    if not plan:
+        raise HTTPException(status_code=400, detail="這則貼文沒有海報計畫，請勾選海報後重新生成")
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            profile = _post_profile(cur, club_id)
+    templates = pptx_registry.list_templates(list(profile.templates), plan.get("use"))
+    tpl = pptx_registry.resolve_from(templates, req.template_id or plan.get("template_id"))
+    if not tpl:
+        raise HTTPException(status_code=404, detail="找不到這個海報模板")
+    if req.template_id and req.template_id != plan.get("template_id"):
+        # Another template: the same content and facts, re-planned for its
+        # page count. Nothing is regenerated.
+        preq = PostRequest.model_validate(gov.get("request") or {})
+        cc = CanonicalContent(post_type=preq.post_type, poster_headline=plan.get("fields", {}).get("HEADLINE", ""),
+                              brand_signature=plan.get("fields", {}).get("BRAND_SIGNATURE", ""))
+        plan = pptx_renderer.build_poster_plan(preq, cc, profile.settings(), [tpl], tpl["id"]) or plan
+        if plan.get("dropped_roles"):
+            raise HTTPException(status_code=400, detail="這個模板頁數不夠，會漏掉角色："
+                                                        + "、".join(plan["dropped_roles"]))
+    own = {img.get("url") for img in post["images"] if isinstance(img, dict)}
+    temp_files = []
+
+    def resolve_photo(ref):
+        if ref not in own:          # only this post's own attachments
+            return None
+        path = _download_r2(ref, os.path.splitext(ref)[1] or ".jpg")
+        temp_files.append(path)
+        return path
+
+    plan["photos"] = {k: v for k, v in (req.photos or {}).items() if k.startswith("PHOTO_")}
+    src = _template_local_path(tpl)
+    try:
+        data = fill_template(src, plan, resolve_photo=resolve_photo)
+    finally:
+        for p in temp_files + ([src] if tpl.get("file_url") else []):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+    key = f"media/clubs/{club_id}/social/poster_{post['id']}_{uuid.uuid4().hex[:8]}.pptx"
+    _r2().put_object(Bucket=R2_BUCKET_NAME, Key=key, Body=data,
+                     ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation")
+    return {"url": f"{R2_PUBLIC_URL}/{key}", "template": tpl["id"], "templateName": tpl["name"]}
+
+
+@app.post("/api/social-posts/{post_id}/poster")
+def make_post_poster(post_id: int, req: PosterRequest,
+                     user: dict = Depends(require_club_admin_or_above)):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            post = _social_row(_load_social_post(cur, post_id, user))
+    return _build_poster(post, post["clubId"], req)
+
+
+# ---- club post prefs ----
+
+def _prefs_scope(user: dict, club_id: int) -> int:
+    cid = _social_scope(user, club_id)
+    if cid is None:
+        raise HTTPException(status_code=400, detail="請指定分會")
+    return cid
+
+
+@app.get("/api/clubs/{club_id}/post-prefs")
+def get_post_prefs(club_id: int, user: dict = Depends(get_current_user)):
+    from api._postgen import context as pctx
+    cid = _prefs_scope(user, club_id)
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            profile = _post_profile(cur, cid)
+    brand = profile.brand()
+    return {
+        "prefs": profile.prefs,
+        # What applies when a field is left blank, for placeholders.
+        "defaults": {
+            "brand_signature": pctx.DEFAULT_SIGNATURE.format(name=profile.name or "本分會"),
+            "fixed_hashtags": pctx.DEFAULT_FIXED_HASHTAGS,
+            "banned_words": pctx.DEFAULT_BANNED_WORDS,
+            "post_persona": pctx.DEFAULT_PERSONA,
+        },
+        "effective": {k: brand[k] for k in ("brand_signature", "fixed_hashtags", "banned_words")},
+        "tuningChoices": {k: list(v) for k, v in pctx.TUNING_CHOICES.items()},
+        "standing": profile.standing,
+    }
+
+
+@app.put("/api/clubs/{club_id}/post-prefs")
+def update_post_prefs(club_id: int, payload: Dict[str, Any],
+                      user: dict = Depends(require_club_admin_or_above)):
+    from api._postgen.context import clean_prefs
+    cid = _prefs_scope(user, club_id)
+    try:
+        cleaned = clean_prefs(payload)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT prefs FROM club_post_prefs WHERE club_id=%s", (cid,))
+            row = cur.fetchone()
+            merged = {**(parse_jsonb(row[0]) if row else {}), **cleaned}
+            # A list explicitly emptied is a decision ("no fixed hashtags");
+            # a blank text field means "use the default", so drop it.
+            merged = {k: v for k, v in merged.items() if isinstance(v, list) or v}
+            cur.execute("INSERT INTO club_post_prefs (club_id, prefs, updated_by, updated_at)"
+                        " VALUES (%s,%s::jsonb,%s,NOW()) ON CONFLICT (club_id) DO UPDATE"
+                        " SET prefs=EXCLUDED.prefs, updated_by=EXCLUDED.updated_by, updated_at=NOW()",
+                        (cid, json.dumps(merged), user["username"]))
+    return get_post_prefs(cid, user)
+
+
+# ---- poster templates ----
+
+def _template_row(r) -> dict:
+    return {"id": r[0], "clubId": r[1], "use": r[2], "name": r[3], "style": r[4] or [],
+            "fileUrl": r[5], "roleSlotsPerPage": r[6], "rolePages": r[7], "enabled": r[8],
+            "source": "upload"}
+
+
+_TEMPLATE_COLS = "id, club_id, use, name, style, file_url, role_slots_per_page, role_pages, enabled"
+
+
+@app.get("/api/post-templates")
+def list_post_templates(club_id: Optional[int] = Query(default=None),
+                        user: dict = Depends(get_current_user)):
+    from api._postgen.modules.template_selector import pptx_registry
+    cid = _social_scope(user, club_id)
+    builtin = [{"id": t["id"], "use": t["use"], "name": t["name"], "style": t["style"],
+                "rolePages": t.get("role_pages"), "enabled": True, "source": "builtin"}
+               for t in pptx_registry.list_templates([])]
+    if cid is None:
+        return builtin
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT {_TEMPLATE_COLS} FROM post_templates WHERE club_id=%s"
+                        " ORDER BY created_at", (cid,))
+            uploaded = [_template_row(r) for r in cur.fetchall()]
+    return uploaded + builtin
+
+
+def check_poster_template(path: str, use: str) -> dict:
+    """上傳的 .pptx 在存進模板庫之前先檢查：缺必要 token 拒收，不認得的只警告。"""
+    from pptx import Presentation
+    from api._postgen.domain import template_tokens as tt
+
+    try:
+        prs = Presentation(path)
+    except Exception:
+        return {"errors": ["這不是可以開啟的 PowerPoint 檔"], "warnings": [], "slides": 0}
+    found = set()
+    for slide in prs.slides:
+        for shape in slide.shapes:
+            if getattr(shape, "has_text_frame", False) and shape.has_text_frame:
+                found |= set(tt.find_tokens(shape.text_frame.text))
+    slides = len(prs.slides)
+    if use == "POST_REVIEW":
+        required = tt.RECAP_COVER_REQUIRED | tt.RECAP_ROLE_REQUIRED | tt.RECAP_CLOSING_REQUIRED
+    else:
+        required = tt.PRE_EVENT_REQUIRED
+    errors = [f"缺少必要標記 {{{{{k}}}}}" for k in sorted(required - found)]
+    if use == "POST_REVIEW" and slides < 3:
+        errors.append("回顧模板至少要 3 頁（封面、角色頁、封底）")
+    unknown = sorted(found - tt.ALL_KNOWN)
+    return {"errors": errors, "warnings": [f"不認得的標記 {{{{{k}}}}}，產出時會是空白" for k in unknown],
+            "slides": slides}
+
+
+class PostTemplateRequest(BaseModel):
+    club_id: Optional[int] = None
+    use: str = "PRE_EVENT"
+    name: str = ""
+    style: List[str] = []
+    file_url: str = ""
+    role_slots_per_page: int = 4
+    enabled: bool = True
+
+
+@app.post("/api/post-templates")
+def create_post_template(req: PostTemplateRequest,
+                         user: dict = Depends(require_club_admin_or_above)):
+    cid = _prefs_scope(user, req.club_id) if req.club_id is not None else _prefs_scope(user, user["club_id"])
+    use = req.use.upper()
+    if use not in ("PRE_EVENT", "POST_REVIEW"):
+        raise HTTPException(status_code=400, detail="用途必須是 PRE_EVENT（宣傳）或 POST_REVIEW（回顧）")
+    path = _download_r2(req.file_url, ".pptx")
+    try:
+        result = check_poster_template(path, use)
+    finally:
+        os.remove(path)
+    if result["errors"]:
+        raise HTTPException(status_code=400, detail="模板有問題，未存入：" + "；".join(result["errors"]))
+    tid = f"club{cid}_{uuid.uuid4().hex[:10]}"
+    role_pages = max(result["slides"] - 2, 1) if use == "POST_REVIEW" else None
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO post_templates (id, club_id, use, name, style, file_url,"
+                " role_slots_per_page, role_pages, enabled, created_by)"
+                " VALUES (%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s)",
+                (tid, cid, use, (req.name or "未命名模板")[:100], json.dumps(req.style[:10]),
+                 req.file_url, max(1, min(req.role_slots_per_page, 8)), role_pages,
+                 req.enabled, user["username"]))
+            cur.execute(f"SELECT {_TEMPLATE_COLS} FROM post_templates WHERE id=%s", (tid,))
+            return {**_template_row(cur.fetchone()), "warnings": result["warnings"]}
+
+
+def _load_template(cur, template_id: str, user: dict):
+    cur.execute(f"SELECT {_TEMPLATE_COLS} FROM post_templates WHERE id=%s", (template_id,))
+    row = cur.fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="找不到這個模板（內建模板不能修改）")
+    if user["role"] != "system_admin" and row[1] != user["club_id"]:
+        raise HTTPException(status_code=403, detail="無權存取其他分會的資料")
+    return row
+
+
+@app.put("/api/post-templates/{template_id}")
+def update_post_template(template_id: str, payload: Dict[str, Any],
+                         user: dict = Depends(require_club_admin_or_above)):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            row = _load_template(cur, template_id, user)
+            name = str(payload.get("name", row[3]) or "")[:100]
+            style = payload.get("style", row[4] or [])
+            enabled = bool(payload.get("enabled", row[8]))
+            cur.execute("UPDATE post_templates SET name=%s, style=%s::jsonb, enabled=%s WHERE id=%s",
+                        (name, json.dumps([str(s) for s in style][:10]), enabled, template_id))
+            cur.execute(f"SELECT {_TEMPLATE_COLS} FROM post_templates WHERE id=%s", (template_id,))
+            return _template_row(cur.fetchone())
+
+
+@app.delete("/api/post-templates/{template_id}")
+def delete_post_template(template_id: str, user: dict = Depends(require_club_admin_or_above)):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            _load_template(cur, template_id, user)
+            cur.execute("DELETE FROM post_templates WHERE id=%s", (template_id,))
+    return {"ok": True}
 
 
 # ------------------------------------------------------------------ AI credentials
@@ -3912,11 +4588,14 @@ def _run_publish_job(username: str, club_id: Optional[int], params: dict) -> dic
 
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT club_id, body, variants, images, published"
+            cur.execute("SELECT club_id, body, variants, images, published, review_state"
                         " FROM social_posts WHERE id=%s", (post_id,))
             row = cur.fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="找不到這則貼文")
+    # The human review gate (governed posts). Here rather than in the endpoint
+    # so the web page and the MCP publish_post tool are held by the same check.
+    _require_approved({"reviewState": row[5] or "none"})
 
     # The job was authorised against `club_id`, but `post_id` arrived in the
     # job's params and has been trusted by nothing so far. Without this a club

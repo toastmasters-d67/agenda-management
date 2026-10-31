@@ -12,3 +12,9 @@ anthropic
 cryptography
 openai
 python-multipart
+# PostGenerator 受控貼文引擎（api/_postgen）：PPTX 海報模板、YAML 預設值
+python-pptx>=0.6.23
+PyYAML>=6.0
+Pillow>=10.0
+lxml>=5.0
+pydantic>=2.7
