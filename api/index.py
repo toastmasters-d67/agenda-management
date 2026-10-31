@@ -3126,6 +3126,20 @@ def _store_governed_result(svc, ctx, cc, resp, user, post_id, agenda_id, kind, p
             return _social_row(_load_social_post(cur, new_id, user))
 
 
+@app.get("/api/post-facts")
+def get_post_facts(agenda_id: int = Query(...), user: dict = Depends(get_current_user)):
+    """生成前給使用者看的：這場的主題、總主持人與回顧文會列出的角色（填亮點筆記用）。"""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            f = _meeting_fields(cur, agenda_id, user)
+            cur.execute("SELECT c.settings FROM agendas a JOIN clubs c ON c.id=a.club_id"
+                        " WHERE a.id=%s", (agenda_id,))
+            st = parse_jsonb((cur.fetchone() or [None])[0])
+    d = f.pop("agenda")
+    return {"theme": f.get("theme", ""), "date": f.get("date", ""), "host": _person(d.get("tme")),
+            "roles": _agenda_roles(d, st)}
+
+
 # ---- review gate ----
 
 class ReviewRequest(BaseModel):

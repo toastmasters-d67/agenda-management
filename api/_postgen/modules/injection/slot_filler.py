@@ -75,7 +75,7 @@ def apply_defaults_and_notes(
             notes.append(ComplianceNote(
                 severity="warn",
                 text=(f"有 {len(no_contrib)} 位角色未提供亮點筆記 → 描述由 AI 依「角色職責」補寫，"
-                      f"**非本人實際表現**，請在核可前逐一審閱："
+                      f"（非本人實際表現），請在核可前逐一審閱："
                       + "、".join(no_contrib)),
             ))
 

@@ -162,7 +162,7 @@ class GenerationService:
             notes.append(ComplianceNote(
                 severity="warn",
                 text="本分會尚未設定品牌定位句，貼文結尾目前是系統用分會名自動組的一句話。"
-                     "請至「分會管理 → 貼文品牌設定」改成你們自己的一句話。"))
+                     "請至「社群發文 → 貼文品牌設定」改成你們自己的一句話。"))
         # 費用歸屬是使用者有權知道的資訊（T5.3），不影響 blocked。
         if self.key_source in ("club", "server"):
             who = "分會共用" if self.key_source == "club" else "系統共用"

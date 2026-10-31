@@ -488,3 +488,67 @@ body {
   cursor: pointer; line-height: 1; padding: 0;
 }
 .img-move button:hover { background: #1d4ed8; }
+
+/* ------------------------------------------- governed posts (PostGenerator) */
+.gov-panel {
+  padding: 12px 14px; margin-bottom: 18px; border-radius: 9px;
+  border: 1px solid #e2e8f0; background: #f8fafc; font-size: 12.5px;
+}
+.gov-panel.gov-pending  { border-color: #fcd34d; background: #fffbeb; }
+.gov-panel.gov-approved { border-color: #86efac; background: #f0fdf4; }
+.gov-panel.gov-rejected { border-color: #fca5a5; background: #fef2f2; }
+.gov-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.gov-badge { font-weight: 700; color: #0f172a; }
+.gov-meta { font-size: 11px; color: #64748b; }
+.gov-blocked {
+  padding: 8px 10px; margin-bottom: 8px; border-radius: 7px;
+  background: #fee2e2; color: #991b1b; font-weight: 600; line-height: 1.5;
+}
+.gov-qc { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+.qc { padding: 2px 8px; border-radius: 999px; font-size: 11px; cursor: help; }
+.qc-ok   { background: #dcfce7; color: #166534; }
+.qc-warn { background: #fef3c7; color: #92400e; }
+.qc-crit { background: #fee2e2; color: #991b1b; font-weight: 700; }
+.gov-notes { margin: 0 0 8px; padding-left: 18px; line-height: 1.6; }
+.gov-notes .note-crit { color: #991b1b; font-weight: 600; }
+.gov-notes .note-warn { color: #92400e; }
+.gov-notes .note-info { color: #475569; }
+.gov-info summary { cursor: pointer; font-size: 11.5px; color: #64748b; margin-bottom: 4px; }
+.gov-ai { padding: 8px 10px; margin-bottom: 8px; border-radius: 7px; background: #fff; border: 1px dashed #f59e0b; }
+.gov-ai-t { margin-bottom: 6px; color: #92400e; line-height: 1.5; }
+.gov-ai-item { display: inline-flex; align-items: center; gap: 5px; margin-right: 14px; cursor: pointer; }
+.gov-actions { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
+.btn-approve {
+  padding: 7px 16px; background: #15803d; border: 1px solid #15803d; border-radius: 8px;
+  font-family: inherit; font-size: 12.5px; font-weight: 700; color: #fff; cursor: pointer;
+}
+.btn-approve:hover:not(:disabled) { background: #166534; }
+.btn-approve:disabled { opacity: 0.5; cursor: not-allowed; }
+.gov-poster {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-top: 10px; padding-top: 10px; border-top: 1px solid #e2e8f0;
+}
+.gov-poster .ed-label { margin: 0; }
+
+/* governed options in the generate dialog, and the 貼文品牌設定 dialog */
+.modal-input {
+  display: block; width: 100%; padding: 8px 10px; margin-bottom: 4px;
+  border: 1px solid #e2e8f0; border-radius: 8px; background: #f8fafc;
+  font-family: inherit; font-size: 12.5px; color: #0f172a;
+}
+.modal-input:focus { outline: none; border-color: #004165; background: #fff; }
+.pp-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.pp-row .ed-select { width: 100%; }
+.gen-roles { display: flex; flex-direction: column; gap: 6px; max-height: 260px; overflow-y: auto; }
+.gen-role { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); gap: 8px; align-items: center; font-size: 12px; }
+.gen-role .modal-input { margin: 0; }
+.pp-tpls { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+.pp-tpl { display: flex; align-items: center; gap: 10px; font-size: 12.5px; }
+.pp-tpl-name { font-weight: 600; color: #0f172a; }
+.pp-tpl-use { font-size: 11px; color: #64748b; flex: 1; }
+.pp-tpl-on { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }
+.pp-upload { display: grid; grid-template-columns: auto 1fr 1fr auto; gap: 6px; align-items: center; }
+.pp-upload .modal-input { margin: 0; }
+@media (max-width: 560px) {
+  .pp-row, .pp-upload, .gen-role { grid-template-columns: 1fr; }
+}
