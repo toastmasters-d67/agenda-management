@@ -549,6 +549,15 @@ details[open] summary::before { content: "▼ "; }
 }
 .settings-menu-item:hover { background: #2a2a42; color: #fff; }
 .settings-menu-item + .settings-menu-item { border-top: 1px solid #2a2a42; }
+/* Which layout PDF / JPG will use (the club's Word one or the web one). */
+.settings-menu-note {
+  max-width: 220px;
+  padding: 8px 14px 10px;
+  border-top: 1px solid #2a2a42;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #9a9ab0;
+}
 .btn-toolbar-nav,
 .btn-home-rwd {
   padding: 4px 11px;

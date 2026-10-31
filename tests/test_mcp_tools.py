@@ -260,3 +260,51 @@ def test_platform_list_is_the_shared_file(index):
     spec = _json.load(open(os.path.join(os.path.dirname(index.__file__), "..", "lib",
                                         "socialPlatforms.json"), encoding="utf-8"))
     assert index.SOCIAL_PLATFORMS == tuple(p["key"] for p in spec["platforms"])
+
+
+class _FakeR2Deletes(_FakeR2):
+    def __init__(self):
+        super().__init__()
+        self.deleted = []
+
+    def delete_object(self, Bucket, Key):
+        self.deleted.append(Key)
+
+
+def test_word_templates_per_language_and_old_files_are_deleted(index, env, monkeypatch):
+    fake = _FakeR2Deletes()
+    monkeypatch.setattr(index, "_r2", lambda: fake)
+    monkeypatch.setattr(index, "R2_PUBLIC_URL", "https://r2.example")
+    doc = _docx("{{總主持人}}")
+    zh = call(index, "set_word_template", env["admin"], {"club_id": env["cid"], "file_base64": doc})
+    en = call(index, "set_word_template", env["admin"], {"club_id": env["cid"], "lang": "en", "file_base64": doc})
+    club = call(index, "get_club", env["admin"], {"club_id": env["cid"]})["structuredContent"]
+    assert club["settings"]["word_template_url"] == zh["structuredContent"]["url"]
+    assert club["settings"]["word_template_url_en"] == en["structuredContent"]["url"]
+    # Replacing the English one deletes its old file and leaves the Chinese one.
+    call(index, "set_word_template", env["admin"], {"club_id": env["cid"], "lang": "en", "file_base64": doc})
+    assert fake.deleted == [en["structuredContent"]["url"].split("https://r2.example/")[1]]
+    call(index, "set_word_template", env["admin"], {"club_id": env["cid"], "clear": True})
+    assert zh["structuredContent"]["url"].split("https://r2.example/")[1] in fake.deleted
+
+
+def test_saving_the_club_without_a_template_deletes_only_this_clubs_file(index, monkeypatch):
+    fake = _FakeR2Deletes()
+    monkeypatch.setattr(index, "_r2", lambda: fake)
+    monkeypatch.setattr(index, "R2_PUBLIC_URL", "https://r2.example")
+    before = {"word_template_url": "https://r2.example/media/clubs/7/a.docx",
+              "word_template_url_en": "https://r2.example/media/clubs/8/someone-elses.docx"}
+    index._drop_replaced_word_templates(7, before, {})
+    assert fake.deleted == ["media/clubs/7/a.docx"]
+    fake.deleted.clear()
+    index._drop_replaced_word_templates(7, before, dict(before))      # unchanged → nothing deleted
+    assert fake.deleted == []
+
+
+def test_word_render_says_unavailable_without_libreoffice(index, env, monkeypatch):
+    import shutil
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    assert index.word_render_status(user=env["officer"]) == {"available": False}
+    with pytest.raises(index.HTTPException) as e:
+        index.word_render(index.WordRenderRequest(docx=_docx("x")), user=env["officer"])
+    assert e.value.status_code == 503

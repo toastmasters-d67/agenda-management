@@ -37,7 +37,9 @@ const BLUE = 'C2D8EC';
 const GREY_ROW = 'F5F5F5';
 const LINE = '777777';
 const TC = { g: '5CB85C', y: 'F0AD4E', r: 'D9534F' };
-const FONT = { ascii: 'Arial', hAnsi: 'Arial', eastAsia: 'Microsoft JhengHei' };
+// Noto Sans CJK TC: the font the server lays PDF / JPG out with (/api/word-render),
+// so they match this file. A PC without it shows its own substitute in Word.
+const FONT = { ascii: 'Arial', hAnsi: 'Arial', eastAsia: 'Noto Sans CJK TC' };
 
 // A4 portrait with 16 mm side margins → 178 mm, the agenda's own width.
 const mm = (n) => Math.round(n * 56.693);
@@ -45,7 +47,7 @@ const PAGE_W = 11906;
 const MARGIN_X = mm(16);
 const MARGIN_Y = mm(10);
 const WIDTH = PAGE_W - MARGIN_X * 2;
-const COL = { time: mm(10), secdur: mm(7), dur: mm(11), agenda: mm(58), taker: mm(44) };
+const COL = { time: mm(12), secdur: mm(7), dur: mm(11), agenda: mm(57), taker: mm(43) };
 const AGENDA_W = COL.time + COL.secdur + COL.dur + COL.agenda + COL.taker;
 const PANEL_W = WIDTH - AGENDA_W;
 
@@ -278,7 +280,7 @@ const pathways = new Table({
   })],
 });
 
-const TR_W = [PANEL_W - 120 - mm(8) * 3, mm(8), mm(8), mm(8)];
+const TR_W = [PANEL_W - 120 - mm(9) * 3, mm(9), mm(9), mm(9)];
 const trCell = (text, i, fill) => cell([para(run(text, { size: 17, bold: !!fill, color: fill ? 'FFFFFF' : undefined }),
   { align: i ? C : AlignmentType.LEFT })], TR_W[i], { borders: BOX('AAAAAA'), fill });
 const trRow = (label, a, b, c) => new TableRow({

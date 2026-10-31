@@ -43,14 +43,16 @@ const HEAD_BG = 'F1F5F9';
 const SECTION_BG = 'FDF1D6';
 const BAND_BG = 'E5E7EB';
 const SIG = { g: ['DCFCE7', '15803D'], y: ['FEF9C3', 'A16207'], r: ['FEE2E2', 'B91C1C'] };
-const FONT = { ascii: 'Arial', hAnsi: 'Arial', eastAsia: 'Microsoft JhengHei' };
+// Noto Sans CJK TC: the font the server lays PDF / JPG out with (/api/word-render),
+// so they match this file. A PC without it shows its own substitute in Word.
+const FONT = { ascii: 'Arial', hAnsi: 'Arial', eastAsia: 'Noto Sans CJK TC' };
 
 // A4 portrait, 8 mm margins → 194 mm, the agenda page's width.
 const mm = (n) => Math.round(n * 56.693);
 const PAGE_W = 11906;
 const MARGIN = mm(8);
 const WIDTH = PAGE_W - MARGIN * 2;
-const COL = { time: mm(12), dur: mm(13), host: mm(38), sig: mm(11) };
+const COL = { time: mm(12), dur: mm(13), host: mm(37), sig: mm(12.5) };
 COL.ag = WIDTH - COL.time - COL.dur - COL.host - COL.sig * 3;
 const C = AlignmentType.CENTER;
 

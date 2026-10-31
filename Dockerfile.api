@@ -3,6 +3,16 @@ FROM python:3.12-slim
 WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
+# Word -> PDF / JPG for clubs with their own Word template (/api/word-render):
+# LibreOffice lays the .docx out, poppler cuts the pages into JPGs. Noto CJK is
+# what Chinese text is set in, Noto Color Emoji covers emoji, Liberation stands
+# in for Arial / Times, and the fontconfig aliases send Windows font names
+# (微軟正黑體 …) to Noto.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libreoffice-writer-nogui fonts-noto-cjk fonts-noto-color-emoji fonts-liberation poppler-utils \
+    && rm -rf /var/lib/apt/lists/*
+COPY deploy/fonts/99-agenda-fonts.conf /etc/fonts/conf.d/99-agenda-fonts.conf
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 COPY api ./api

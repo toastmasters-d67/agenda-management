@@ -221,7 +221,12 @@ EntrepreneurAgenda/
 
 議程頁「設定」選單的「下載 Word」會產生一份可在 Word 裡修改的議程，給版面與分會習慣不完全相符、需要下載後自行調整的情況。
 
-- **範本來源**：分會在「版型」設定的「Word 匯出範本」區上傳的 .docx（存在 `clubs.settings.word_template_url`，檔案放 R2，透過 `/api/image-proxy` 讀取）；沒上傳就用內建的 `public/templates/agenda-default.docx`（仿標準版）。Word 範本屬於分會，不分議程版型。
+- **範本來源**：分會在「版型」設定的「Word 匯出範本」區上傳的 .docx，**中文場、英文場各一份**（`clubs.settings.word_template_url`／`word_template_url_en`，檔案放 R2，透過 `/api/image-proxy` 讀取）。下載 Word 依序用：該場語言的範本 → 中文場範本 → 內建的 `public/templates/agenda-default.docx`（仿標準版）。Word 範本屬於分會，不分議程版型。
+- **移除範本**：「移除範本」按下並儲存後，設定清掉、R2 上的檔案也一併刪除（替換新範本時舊檔同樣刪除；只刪本分會目錄下的檔案）。MCP 用 `set_word_template` 的 `clear: true`。
+- **PDF／JPG 也跟著 Word 版型**：分會**有上傳該場語言的範本**時，議程頁的「下載 PDF／JPG」與 MCP 的 `export_agenda` 都改用 Word 版型——瀏覽器照「下載 Word」同一套程式填好 .docx，送到 `/api/word-render`，伺服器用 LibreOffice 排版成 PDF、poppler 切成每頁一張 JPG。沒有該語言的範本（例如只上傳中文場、這場是英文場）就照舊截網頁議程。設定選單的下載按鈕下方會寫出這次用的是哪一種。
+  - **只在 Azure VM**：`Dockerfile.api` 裝了 LibreOffice、思源黑體（Noto CJK）、Noto Color Emoji、Liberation（代替 Arial），映像約 740 MB。Vercel 沒有這些，`GET /api/word-render` 回 `available: false`，PDF／JPG 一律用網頁版型。
+  - **字型**：Windows 的微軟正黑體、新細明體、標楷體不能放進伺服器（授權），`deploy/fonts/99-agenda-fonts.conf` 把它們對應到思源黑體／思源宋體。企業家與 Chill Hi High 的範本直接用 `Noto Sans CJK TC`，PDF 才會與 Word 一致；分會自己做的範本建議也用它。
+  - **轉檔失敗**時退回網頁版型並告知原因，不讓下載整個失敗；同一時間只跑一個 LibreOffice（1 vCPU 的 VM），一份約 1 秒。
 - **標記**：範本裡寫 `{{例會主題}}`、`{{總主持人}}` 這類中文標記，下載時換成當次例會資料。完整清單在 `lib/wordExport.js` 的 `WORD_FIELDS` / `WORD_LOOPS`，分會設定視窗的「可用的標記」也是從這份清單產生。
 - **重複的列**：`{{#演講}}`…`{{/演講}}`（還有 `講評員`、`講評員講評`、`多元單元`）的開頭與結尾放在表格同一列，該列依人數重複；清單是空的時整列消失。
 - **上傳檢查**：選檔當下在瀏覽器檢查。標記寫壞（例如迴圈沒關）會拒收並列出原因；系統不認得的標記只警告（下載時會是空白）。
