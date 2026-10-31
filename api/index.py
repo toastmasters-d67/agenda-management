@@ -4694,7 +4694,7 @@ MCP_SCOPES = {
     "posts:read":    "讀取分會、例會議程與貼文，並匯出議程 PDF／JPG",
     "posts:write":   "建立與修改貼文草稿、加入或移除貼文圖片",
     "agendas:write": "建立與修改議程、安排角色（含從角色試算表帶入）",
-    "clubs:write":   "修改分會設定與圖片（名稱、版型、地點、QR code；限系統管理員）",
+    "clubs:write":   "修改分會設定與圖片（名稱、版型、地點、QR code、Word 範本；限系統管理員），以及配對電子名牌",
     "ai:generate":   "用你的 AI 帳號產生文案與圖片（會消耗你的 API 額度）",
     "publish":       "代表分會公開發文到 Facebook／Instagram／Threads",
 }
@@ -5722,8 +5722,25 @@ def _tool_generate_copy(caller, args):
         brief=args.get("brief") or "",
         platforms=[p for p in (args.get("platforms") or []) if p in SOCIAL_PLATFORMS],
         provider=args.get("provider") or "anthropic",
-        model=args.get("model") or "")
+        model=args.get("model") or "",
+        post_id=post_id,
+        options={"host_highlight": args.get("host_highlight") or "",
+                 "role_notes": args.get("role_notes") or {},
+                 "tuning": args.get("tuning") or {}})
     out = generate_social_copy(req, caller)      # same path the browser takes
+
+    if "post" in out:
+        # Promo / recap about a meeting: the governed engine already saved it,
+        # pending review. Nothing to write back here.
+        saved = out["post"]
+        gov = saved["governance"]
+        text = (f"已用受控流程為貼文 #{post_id} 產生文案（{'品質檢查有紅線未過' if gov.get('blocked') else '待核可'}）。"
+                "日期、地點、人名由系統從議程帶入。請使用者到網頁的社群發文頁檢查並核可，核可後才能發布。")
+        crit = [n["text"] for n in gov.get("complianceNotes") or [] if n["severity"] == "crit"]
+        if crit:
+            text += "\n未過的項目：\n" + "\n".join(f"- {c}" for c in crit)
+        fb = (saved["variants"].get("facebook") or {}).get("text", "")
+        return _tool_text(f"{text}\n\nFacebook 版：\n{fb}", {"post": saved})
 
     with get_db() as conn:
         with conn.cursor() as cur:
@@ -6732,6 +6749,13 @@ _CLUB_IMAGE_SETTINGS = {
     "page2_hero_url": "第二頁 圖1（我們是誰）", "page2_img2_url": "第二頁 圖2（招生／入會流程）",
     "banner_url": "橫幅背景圖（標準版）",
 }
+# On/off settings (the standard template's 顯示項目). Booleans, not strings.
+_CLUB_FLAG_SETTINGS = {
+    "show_logo": "橫幅顯示 Logo（標準版）", "show_officers": "左欄顯示幹部名單（標準版）",
+    "show_info": "左欄顯示例會時間地點（標準版）", "show_mission": "左欄顯示分會使命（標準版）",
+}
+# Shown by get_club but set through their own tools.
+_CLUB_TOOL_SETTINGS = {"word_template_url": "set_word_template", "custom_roles": "set_custom_roles"}
 _TEMPLATE_KEYS = ("standard", "entrepreneur", "chillhihigh", "china")
 
 
@@ -6747,7 +6771,7 @@ def _club_view(cur, club_id: int) -> dict:
         raise HTTPException(status_code=404, detail="找不到此分會")
     c = _club_row_to_dict(row)
     st = c.pop("settings") or {}
-    visible = {**_CLUB_SETTINGS, **_CLUB_IMAGE_SETTINGS}
+    visible = {**_CLUB_SETTINGS, **_CLUB_IMAGE_SETTINGS, **_CLUB_FLAG_SETTINGS, **_CLUB_TOOL_SETTINGS}
     c["settings"] = {k: v for k, v in st.items() if k in visible}
     return c
 
@@ -6782,7 +6806,8 @@ def _club_changes(args: dict):
     cols = {k: v for k, v in (args.get("fields") or {}).items()}
     sets = dict(args.get("settings") or {})
     bad = [k for k in cols if k not in _CLUB_COLUMNS and k not in _CLUB_IMAGE_COLUMNS] + \
-          [k for k in sets if k not in _CLUB_SETTINGS and k not in _CLUB_IMAGE_SETTINGS]
+          [k for k in sets if k not in _CLUB_SETTINGS and k not in _CLUB_IMAGE_SETTINGS
+           and k not in _CLUB_FLAG_SETTINGS]
     if bad:
         raise HTTPException(status_code=400, detail="不能修改的欄位：" + "、".join(bad))
     if "name" in cols and not str(cols["name"] or "").strip():
@@ -6791,7 +6816,8 @@ def _club_changes(args: dict):
         raise HTTPException(status_code=400, detail="template_key 只能是 " + "、".join(_TEMPLATE_KEYS))
     cols = {k: (None if v is None else str(v).strip() if k == "name" else str(v))
             for k, v in cols.items()}
-    return cols, {k: (None if v is None else str(v)) for k, v in sets.items()}
+    return cols, {k: (None if v is None else bool(v) if k in _CLUB_FLAG_SETTINGS else str(v))
+                  for k, v in sets.items()}
 
 
 def _tool_update_club(caller, args):
@@ -6879,6 +6905,274 @@ def _tool_set_club_image(caller, args):
     label = _CLUB_IMAGE_COLUMNS.get(slot) or _CLUB_IMAGE_SETTINGS[slot]
     return _tool_text(f"已更新分會 #{cid} 的「{label}」：{url}",
                       {"clubId": cid, "slot": slot, "url": url})
+
+
+# ---- Word export template (clubs.settings.word_template_url) ----
+
+_DOCX_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+
+def check_word_template(raw: bytes) -> list:
+    """
+    Structural check of an uploaded .docx before it becomes a club's template:
+    it opens as Word, and its {{marks}} and {{#loop}}…{{/loop}} pairs close.
+    The browser runs docxtemplater's own compile for the same purpose
+    (app/club/page.js); this is the server-side version for MCP uploads, so a
+    broken template is refused here too rather than failing every download.
+    Unknown marks are not checked — they print blank, as in the browser.
+    """
+    import io
+    import zipfile
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw)) as z:
+            xml = z.read("word/document.xml").decode("utf-8", "replace")
+    except Exception:
+        return ["這不是可以開啟的 Word（.docx）檔"]
+    text = "".join(re.findall(r"<w:t(?:\s[^>]*)?>([^<]*)</w:t>", xml))
+    errors, stack, pos = [], [], 0
+    while True:
+        start = text.find("{{", pos)
+        stray = text.find("}}", pos)
+        if stray != -1 and (start == -1 or stray < start):
+            errors.append(f"標記 {text[max(0, stray - 10):stray + 2]} 缺少開頭的 {{{{")
+            pos = stray + 2
+            continue
+        if start == -1:
+            break
+        end = text.find("}}", start + 2)
+        nxt = text.find("{{", start + 2)
+        if end == -1 or (nxt != -1 and nxt < end):
+            errors.append(f"標記 {text[start:start + 12]} 缺少結尾的 }}}}")
+            pos = start + 2
+            continue
+        tag = text[start + 2:end].strip()
+        if tag[:1] in "#^":
+            stack.append(tag[1:].strip())
+        elif tag[:1] == "/":
+            name = tag[1:].strip()
+            if not stack:
+                errors.append(f"{{{{/{name}}}}} 前面沒有對應的 {{{{#{name}}}}}")
+            elif stack[-1] != name:
+                errors.append(f"迴圈的開頭與結尾標記不一致（{stack[-1]} / {name}）")
+                stack.pop()
+            else:
+                stack.pop()
+        pos = end + 2
+    errors += [f"迴圈 {{{{#{n}}}}} 沒有對應的 {{{{/{n}}}}}" for n in stack]
+    return errors
+
+
+def _file_from_args(args: dict, max_bytes: int = 15 * 1024 * 1024) -> bytes:
+    """Raw bytes from file / file_url / file_base64 (the image helper's twin)."""
+    import base64
+    f = args.get("file") if isinstance(args.get("file"), dict) else {}
+    url = f.get("download_url") or args.get("file_url")
+    if url:
+        return _download_image(str(url))
+    if args.get("file_base64"):
+        b64 = str(args["file_base64"])
+        try:
+            raw = base64.b64decode(b64[b64.find(",") + 1:] if b64.startswith("data:") else b64)
+        except Exception:
+            raise HTTPException(status_code=400, detail="file_base64 不是有效的 base64")
+        if len(raw) > max_bytes:
+            raise HTTPException(status_code=400, detail="檔案太大")
+        return raw
+    raise HTTPException(status_code=400, detail="請提供 file（檔案）、file_url 或 file_base64 其中一個")
+
+
+def _tool_set_word_template(caller, args):
+    _system_admin_only(caller)
+    cid = int(args["club_id"])
+    if args.get("clear"):
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                _club_write(cur, cid, {}, {"word_template_url": None})
+        return _tool_text(f"分會 #{cid} 已改回系統預設的 Word 範本", {"clubId": cid, "url": None})
+    raw = _file_from_args(args)
+    errors = check_word_template(raw)
+    if errors:
+        return _tool_text("範本有錯，沒有存入：\n" + "\n".join(errors), {"errors": errors}, is_error=True)
+    key = f"media/clubs/{cid}/{uuid.uuid4().hex}.docx"
+    try:
+        _r2().put_object(Bucket=R2_BUCKET_NAME, Key=key, Body=raw, ContentType=_DOCX_TYPE)
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=502, detail="範本上傳雲端失敗，請稍後再試")
+    url = f"{R2_PUBLIC_URL}/{key}"
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            _club_write(cur, cid, {}, {"word_template_url": url})
+    return _tool_text(f"已設定分會 #{cid} 的 Word 範本：{url}。之後下載 Word（網頁或 export_agenda）都會用它。",
+                      {"clubId": cid, "url": url})
+
+
+# ---- the club's own meeting roles (clubs.settings.custom_roles) ----
+
+def _tool_set_custom_roles(caller, args):
+    """
+    Replace the club's own roles. Ids are kept for roles given with one —
+    a meeting's assignment lives at agendas.data.customRoles[id], so keeping
+    the id is what keeps who was assigned when a role is renamed.
+    """
+    _system_admin_only(caller)
+    cid = int(args["club_id"])
+    roles, seen = [], set()
+    for r in args.get("roles") or []:
+        zh = str(r.get("zh") or "").strip()[:30]
+        if not zh:
+            continue
+        rid = str(r.get("id") or "").strip()
+        if not re.fullmatch(r"r[a-z0-9]{3,20}", rid) or rid in seen:
+            rid = "r" + uuid.uuid4().hex[:10]
+        seen.add(rid)
+        roles.append({"id": rid, "zh": zh, "en": str(r.get("en") or "").strip()[:60]})
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE clubs SET settings = COALESCE(settings,'{}'::jsonb)"
+                        " || jsonb_build_object('custom_roles', %s::jsonb) WHERE id=%s",
+                        (json.dumps(roles), cid))
+            if cur.rowcount == 0:
+                raise HTTPException(status_code=404, detail="找不到此分會")
+    names = "、".join(r["zh"] for r in roles) or "（無）"
+    return _tool_text(f"分會 #{cid} 的自訂角色：{names}。在 assign_roles 用 custom_<id> 排人。",
+                      {"clubId": cid, "roles": roles})
+
+
+# ---- governed posts (PostGenerator engine) ----
+
+def _governed_target(caller, args):
+    """(post or None, agenda_id, kind, options) for start_post / submit_post / generate_copy."""
+    post = None
+    if args.get("post_id"):
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                post = _social_row(_load_social_post(cur, int(args["post_id"]), caller))
+    kind = args.get("kind") or (post or {}).get("kind")
+    agenda_id = args.get("agenda_id") or (post or {}).get("agendaId")
+    if kind not in _GOVERNED_KINDS or not agenda_id:
+        raise HTTPException(status_code=400,
+                            detail="受控生成只用在例會宣傳（promo）與例會回顧（recap），而且要綁定一場例會")
+    try:
+        opts = GovernedOptions.model_validate({
+            "host_highlight": args.get("host_highlight") or "",
+            "role_notes": args.get("role_notes") or {},
+            "tuning": {k: v for k, v in (args.get("tuning") or {}).items() if isinstance(v, str)},
+            "poster": args.get("poster", True) is not False,
+        })
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"選項不正確：{e}")
+    return post, int(agenda_id), kind, opts
+
+
+def _governed_context(caller, agenda_id, kind, opts, brief=""):
+    from api._postgen.service import GenerationService
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            club_id, preq = _governed_request(cur, agenda_id, caller, kind, brief, opts)
+            if caller["role"] != "system_admin" and club_id != caller["club_id"]:
+                raise HTTPException(status_code=403, detail="無權存取其他分會的資料")
+            profile = _post_profile(cur, club_id)
+    svc = GenerationService(None, profile, key_source="mcp", model="（你的 AI）")
+    return svc, svc.begin(preq)
+
+
+def _tool_start_post(caller, args):
+    _officer_only(caller)
+    _post, agenda_id, kind, opts = _governed_target(caller, args)
+    svc, ctx = _governed_context(caller, agenda_id, kind, opts, args.get("brief") or "")
+    prompt = svc.story_prompt(ctx)
+    notes = [n.text for n in ctx.input_notes if n.severity in ("crit", "warn")]
+    text = ("請你（AI 助理）依下面的寫作規則與資料，寫出這則貼文的「可變段落」，"
+            "然後呼叫 submit_post，把結果放在 content（格式見 content_schema）。\n"
+            "日期、地點、費用、人名、連結由系統照資料印出，你只寫文案段落；寫了也不會被採用。\n\n"
+            f"=== 寫作規則（system）===\n{prompt.system}\n\n=== 本次資料與任務（user）===\n{prompt.user}")
+    if notes:
+        text += "\n\n=== 系統註記（請一併告訴使用者）===\n" + "\n".join(f"- {n}" for n in notes)
+    return _tool_text(text, {"agendaId": agenda_id, "kind": kind,
+                             "content_schema": prompt.tool["input_schema"], "notes": notes})
+
+
+def _tool_submit_post(caller, args):
+    _officer_only(caller)
+    post, agenda_id, kind, opts = _governed_target(caller, args)
+    content = args.get("content")
+    if not isinstance(content, dict):
+        return _tool_text("content 必須是依 start_post 的 content_schema 寫成的物件", is_error=True)
+    svc, ctx = _governed_context(caller, agenda_id, kind, opts, args.get("brief") or "")
+    cc = svc.parse(ctx, content)
+    fb_text, checks = svc.render_and_check(ctx, cc)
+    resp = svc.finish(ctx, cc, fb_text, checks)
+    if resp.blocked:
+        crit = [n.text for n in resp.compliance_notes if n.severity == "crit"]
+        return _tool_text("品質檢查沒過，沒有存檔。請依下列原因修改後再交（若是資料缺漏，"
+                          "請使用者先補議程或貼文品牌設定）：\n" + "\n".join(f"- {c}" for c in crit),
+                          {"blocked": True, "reasons": crit}, is_error=True)
+    platforms = list(SOCIAL_PLATFORMS)
+    saved = _store_governed_result(svc, ctx, cc, resp, caller, (post or {}).get("id"),
+                                   agenda_id, kind, platforms, "mcp")
+    ai = saved["governance"].get("aiWrittenHighlights") or []
+    text = (f"已存成貼文 #{saved['id']}（待核可）。請使用者到網頁的社群發文頁檢查並按「核可」，"
+            "核可後才能發布或下載海報。")
+    if ai:
+        text += "\n這些角色的描述是 AI 依職責補寫的，核可時要逐一確認：" + "、".join(ai)
+    return _tool_text(text + "\n\nFacebook 版：\n" + (saved["variants"].get("facebook") or {}).get("text", ""),
+                      {"post": saved})
+
+
+def _tool_get_post_prefs(caller, args):
+    cid = _prefs_scope(caller, args.get("club_id") or caller["club_id"])
+    out = get_post_prefs(cid, caller)
+    return _tool_text(json.dumps(out, ensure_ascii=False, indent=1), out)
+
+
+def _tool_update_post_prefs(caller, args):
+    _officer_only(caller)
+    cid = _prefs_scope(caller, args.get("club_id") or caller["club_id"])
+    out = update_post_prefs(cid, dict(args.get("prefs") or {}), caller)
+    return _tool_text("已更新貼文品牌設定：" + "、".join((args.get("prefs") or {}).keys()), out)
+
+
+def _tool_list_post_templates(caller, args):
+    rows = list_post_templates(args.get("club_id") or caller["club_id"], caller)
+    lines = [f"{t['id']}｜{t['name']}｜{'回顧' if t['use'] == 'POST_REVIEW' else '宣傳'}"
+             f"｜{'內建' if t['source'] == 'builtin' else ('分會上傳' + ('' if t['enabled'] else '（停用）'))}"
+             for t in rows]
+    return _tool_text("\n".join(lines) or "沒有模板", {"templates": rows})
+
+
+def _tool_make_post_poster(caller, args):
+    _officer_only(caller)
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            post = _social_row(_load_social_post(cur, int(args["post_id"]), caller))
+    out = _build_poster(post, post["clubId"], PosterRequest(template_id=args.get("template_id") or ""))
+    return _tool_text(f"已產生「{out['templateName']}」海報（可編輯 PPTX）：{out['url']}", out)
+
+
+# ---- badges (machines) ----
+
+def _tool_list_machines(caller, args):
+    _officer_only(caller)
+    rows = list_machines(args.get("club_id"), caller)
+    lines = [f"#{m['id']} {m['name'] or m['serial']}｜{m['status']}｜"
+             f"{(m['nameZh'] or m['nameEn'] or m['username']) if m['username'] else '未綁定'}"
+             f"{'' if m['bindingValid'] or not m['username'] else '（已不在分會，名牌不顯示）'}"
+             for m in rows]
+    return _tool_text("\n".join(lines) or "這個分會還沒有機台", {"machines": rows})
+
+
+def _tool_pair_machine(caller, args):
+    out = pair_machine(MachinePairRequest(**{k: v for k, v in args.items()
+                                             if k in MachinePairRequest.model_fields}), caller)
+    return _tool_text("已配對，名牌下次更新時會顯示該會員", out)
+
+
+def _tool_update_machine(caller, args):
+    fields = {k: v for k, v in args.items() if k in MachineUpdateRequest.model_fields}
+    out = update_machine(int(args["machine_id"]), MachineUpdateRequest(**fields), caller)
+    return _tool_text(f"已更新機台 #{args['machine_id']}（狀態：{out['status']}）", out)
 
 
 # ------------------------------------------------------------------ agenda theme image
@@ -7085,6 +7379,19 @@ _AGENDA_FIELDS_SCHEMA = {
 # `annotations` are hints a client uses to decide what to confirm with the
 # person first (ChatGPT asks before any tool not marked readOnlyHint). They
 # are advice to the client, never a permission — scopes and role checks are.
+# Options of a governed (promo / recap) post, shared by generate_copy,
+# start_post and submit_post.
+_GOVERNED_OPTION_PROPS = {
+    "host_highlight": {"type": "string", "description": "宣傳：總主持人的特色（有給才寫，不會杜撰）"},
+    "role_notes": {"type": "object", "additionalProperties": {"type": "string"},
+                   "description": "回顧：角色姓名 → 這次的亮點筆記。沒給的角色只寫中性職責描述，核可時要逐一確認"},
+    "tuning": {"type": "object", "additionalProperties": False, "properties": {
+        "emotion": {"type": "string", "enum": ["共鳴", "懸念", "溫暖", "幽默", "激勵"]},
+        "length": {"type": "string", "enum": ["short", "medium", "long"]},
+        "use_emoji": {"type": "string", "enum": ["none", "light", "moderate", "rich"]}},
+        "description": "這一篇的語氣旋鈕；不給就用分會預設"},
+}
+
 MCP_TOOLS = [
     {
         "name": "whoami", "scope": None, "title": "我是誰",
@@ -7186,6 +7493,9 @@ MCP_TOOLS = [
     {
         "name": "generate_copy", "scope": "ai:generate", "title": "AI 產生文案",
         "description": "用 AI 依貼文用途與綁定例會的資料產生文案，並直接存進該則貼文。"
+                       "例會宣傳／回顧且綁定例會時走受控流程：事實由系統帶入、會跑品質檢查，"
+                       "產出後是「待核可」，要使用者在網頁核可才能發布。"
+                       "想用你自己（AI 助理）寫而不花 API 額度，請改用 start_post／submit_post。"
                        "⚠️ 這會消耗呼叫者自己（或分會共用）的 AI 帳號額度。",
         "inputSchema": {"type": "object", "properties": {
             "post_id": {"type": "integer"},
@@ -7194,6 +7504,7 @@ MCP_TOOLS = [
                           "description": "要產生哪些平台，預設全部"},
             "provider": {"type": "string", "enum": ["anthropic", "openai"]},
             "model": {"type": "string", "description": "留空用預設模型"},
+            **_GOVERNED_OPTION_PROPS,
         }, "required": ["post_id"], "additionalProperties": False},
         "annotations": {"readOnlyHint": False, "destructiveHint": True,
                         "idempotentHint": False, "openWorldHint": True},
@@ -7442,15 +7753,18 @@ MCP_TOOLS = [
     {
         "name": "update_club", "scope": "clubs:write", "title": "修改分會設定",
         "description": "修改分會設定，只會改有給的欄位；settings 裡的值給 null 表示刪除。限系統管理員。"
-                       "圖片（Logo、QR code、第二頁圖片）請用 set_club_image。",
+                       "圖片（Logo、QR code、第二頁圖片）請用 set_club_image；Word 範本用 set_word_template；"
+                       "自訂角色用 set_custom_roles。",
         "inputSchema": {"type": "object", "properties": {
             "club_id": {"type": "integer"},
             "fields": {"type": "object", "additionalProperties": False,
                        "properties": {k: {"type": ["string", "null"], "description": d}
                                       for k, d in _CLUB_COLUMNS.items()}},
             "settings": {"type": "object", "additionalProperties": False,
-                         "properties": {k: {"type": ["string", "null"], "description": d}
-                                        for k, d in _CLUB_SETTINGS.items()}},
+                         "properties": {**{k: {"type": ["string", "null"], "description": d}
+                                           for k, d in _CLUB_SETTINGS.items()},
+                                        **{k: {"type": ["boolean", "null"], "description": d}
+                                           for k, d in _CLUB_FLAG_SETTINGS.items()}}},
         }, "required": ["club_id"], "additionalProperties": False},
         "annotations": {"readOnlyHint": False, "destructiveHint": True,
                         "idempotentHint": True, "openWorldHint": False},
@@ -7464,8 +7778,10 @@ MCP_TOOLS = [
                        "properties": {k: {"type": ["string", "null"], "description": d}
                                       for k, d in _CLUB_COLUMNS.items()}},
             "settings": {"type": "object", "additionalProperties": False,
-                         "properties": {k: {"type": ["string", "null"], "description": d}
-                                        for k, d in _CLUB_SETTINGS.items()}},
+                         "properties": {**{k: {"type": ["string", "null"], "description": d}
+                                           for k, d in _CLUB_SETTINGS.items()},
+                                        **{k: {"type": ["boolean", "null"], "description": d}
+                                           for k, d in _CLUB_FLAG_SETTINGS.items()}}},
         }, "required": ["fields"], "additionalProperties": False},
         "annotations": {"readOnlyHint": False, "destructiveHint": False,
                         "idempotentHint": False, "openWorldHint": False},
@@ -7501,6 +7817,168 @@ MCP_TOOLS = [
         "annotations": {"readOnlyHint": False, "destructiveHint": True,
                         "idempotentHint": True, "openWorldHint": False},
         "handler": _tool_delete_post,
+    },
+    # ---- governed posts (PostGenerator engine) ----
+    {
+        "name": "start_post", "scope": "posts:write", "title": "受控貼文：取得寫作簡報",
+        "description": "兩段式寫例會宣傳／回顧貼文的第一步，用你（AI 助理）自己寫、不花分會 API 額度。"
+                       "回傳寫作規則、這場例會的資料與 content_schema；你依規則寫好後呼叫 submit_post。"
+                       "日期、地點、費用、人名由系統照資料印出，你只寫文案段落。"
+                       "給 post_id（已綁定例會的宣傳／回顧貼文），或給 agenda_id 加 kind。",
+        "inputSchema": {"type": "object", "properties": {
+            "post_id": {"type": "integer", "description": "要寫進哪一則貼文；不給則 submit 時新建"},
+            "agenda_id": {"type": "integer"},
+            "kind": {"type": "string", "enum": ["promo", "recap"], "description": "promo=例會宣傳、recap=例會回顧"},
+            "brief": {"type": "string", "description": "這一篇的補充需求（不是事實來源）"},
+            **_GOVERNED_OPTION_PROPS,
+        }, "additionalProperties": False},
+        "annotations": {"readOnlyHint": True, "destructiveHint": False,
+                        "idempotentHint": True, "openWorldHint": False},
+        "handler": _tool_start_post,
+    },
+    {
+        "name": "submit_post", "scope": "posts:write", "title": "受控貼文：交回文案",
+        "description": "兩段式的第二步：交回依 start_post 寫好的 content。系統套上事實與固定句、跑品質檢查；"
+                       "通過就存成「待核可」的貼文（post_id 有給就覆蓋那一則），沒過會說明原因、不存檔。"
+                       "核可只能由使用者在網頁上做。其他參數請與 start_post 給的相同。",
+        "inputSchema": {"type": "object", "properties": {
+            "post_id": {"type": "integer"},
+            "agenda_id": {"type": "integer"},
+            "kind": {"type": "string", "enum": ["promo", "recap"]},
+            "brief": {"type": "string"},
+            "content": {"type": "object", "description": "依 start_post 回傳的 content_schema 寫成的物件"},
+            **_GOVERNED_OPTION_PROPS,
+        }, "required": ["content"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True,
+                        "idempotentHint": False, "openWorldHint": False},
+        "handler": _tool_submit_post,
+    },
+    {
+        "name": "get_post_prefs", "scope": "posts:read", "title": "查看貼文品牌設定",
+        "description": "分會寫宣傳／回顧貼文用的設定：報名連結、品牌定位句、固定 hashtag、禁用詞、語氣、補充規則、預設旋鈕。"
+                       "留空的欄位會用 defaults 裡的預設值。",
+        "inputSchema": {"type": "object", "properties": {
+            "club_id": {"type": "integer"},
+        }, "additionalProperties": False},
+        "annotations": {"readOnlyHint": True, "destructiveHint": False,
+                        "idempotentHint": True, "openWorldHint": False},
+        "handler": _tool_get_post_prefs,
+    },
+    {
+        "name": "update_post_prefs", "scope": "posts:write", "title": "修改貼文品牌設定",
+        "description": "修改貼文品牌設定，只改有給的欄位；文字欄位給空字串＝改回預設。"
+                       "報名連結沒設定時，宣傳與回顧貼文都無法通過品質檢查。限分會管理員以上。",
+        "inputSchema": {"type": "object", "properties": {
+            "club_id": {"type": "integer"},
+            "prefs": {"type": "object", "additionalProperties": False, "properties": {
+                "register_url": {"type": "string", "description": "報名連結"},
+                "brand_signature": {"type": "string", "description": "品牌定位句（逐字印在回顧貼文結尾）"},
+                "fixed_hashtags": {"type": "array", "items": {"type": "string"}},
+                "banned_words": {"type": "array", "items": {"type": "string"}},
+                "post_persona": {"type": "string", "description": "品牌語氣（1000 字內）"},
+                "post_notes_pre": {"type": "string", "description": "宣傳貼文的補充規則"},
+                "post_notes_review": {"type": "string", "description": "回顧貼文的補充規則"},
+                "post_default_emotion": {"type": "string", "enum": ["", "共鳴", "懸念", "溫暖", "幽默", "激勵"]},
+                "post_default_length": {"type": "string", "enum": ["", "short", "medium", "long"]},
+                "post_default_emoji": {"type": "string", "enum": ["", "none", "light", "moderate", "rich"]},
+            }},
+        }, "required": ["prefs"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True,
+                        "idempotentHint": True, "openWorldHint": False},
+        "handler": _tool_update_post_prefs,
+    },
+    {
+        "name": "list_post_templates", "scope": "posts:read", "title": "列出海報模板",
+        "description": "宣傳／回顧貼文可用的 PPTX 海報模板（內建 + 分會上傳）。",
+        "inputSchema": {"type": "object", "properties": {
+            "club_id": {"type": "integer"},
+        }, "additionalProperties": False},
+        "annotations": {"readOnlyHint": True, "destructiveHint": False,
+                        "idempotentHint": True, "openWorldHint": False},
+        "handler": _tool_list_post_templates,
+    },
+    {
+        "name": "make_post_poster", "scope": "posts:write", "title": "產生 PPTX 海報",
+        "description": "依已核可的受控貼文產生可編輯的 PPTX 海報，回傳下載連結。不重新呼叫 AI。"
+                       "貼文還沒核可會被拒絕。template_id 可換別的模板（list_post_templates）。",
+        "inputSchema": {"type": "object", "properties": {
+            "post_id": {"type": "integer"},
+            "template_id": {"type": "string"},
+        }, "required": ["post_id"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": False,
+                        "idempotentHint": False, "openWorldHint": False},
+        "handler": _tool_make_post_poster,
+    },
+    # ---- club configuration added after the first MCP release ----
+    {
+        "name": "set_word_template", "scope": "clubs:write", "title": "設定 Word 匯出範本",
+        "description": "上傳分會自己的 Word（.docx）範本，之後下載議程 Word 都會用它；clear=true 改回系統預設範本。"
+                       "給 file（檔案）、file_url 或 file_base64 其中一個。標記寫壞（{{ 沒關、迴圈沒收尾）會被拒收。"
+                       "可用的標記見網頁「分會管理 → Word 匯出範本 → 可用的標記」。限系統管理員。",
+        "inputSchema": {"type": "object", "properties": {
+            "club_id": {"type": "integer"},
+            "file": {"type": "object", "description": "範本檔案（支援檔案參數的客戶端使用）",
+                     "properties": {"download_url": {"type": "string"}, "file_id": {"type": "string"}}},
+            "file_url": {"type": "string"},
+            "file_base64": {"type": "string"},
+            "clear": {"type": "boolean", "description": "true = 改回系統預設範本"},
+        }, "required": ["club_id"], "additionalProperties": False},
+        "_meta": {"openai/fileParams": ["file"]},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True,
+                        "idempotentHint": True, "openWorldHint": True},
+        "handler": _tool_set_word_template,
+    },
+    {
+        "name": "set_custom_roles", "scope": "clubs:write", "title": "設定分會自訂角色",
+        "description": "整份取代分會的自訂角色（角色目錄以外、這個分會自己的角色）。"
+                       "改名請帶原本的 id，已排的人才會跟著保留；沒帶 id 的視為新角色。"
+                       "排人用 assign_roles 的 custom_<id>。限系統管理員。",
+        "inputSchema": {"type": "object", "properties": {
+            "club_id": {"type": "integer"},
+            "roles": {"type": "array", "items": {"type": "object", "properties": {
+                "id": {"type": "string"}, "zh": {"type": "string"}, "en": {"type": "string"}},
+                "required": ["zh"], "additionalProperties": False}},
+        }, "required": ["club_id", "roles"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True,
+                        "idempotentHint": True, "openWorldHint": False},
+        "handler": _tool_set_custom_roles,
+    },
+    {
+        "name": "list_machines", "scope": "posts:read", "title": "列出電子名牌機台",
+        "description": "分會的電子名牌機台與各自綁定的會員。限分會管理員以上。",
+        "inputSchema": {"type": "object", "properties": {
+            "club_id": {"type": "integer"},
+        }, "additionalProperties": False},
+        "annotations": {"readOnlyHint": True, "destructiveHint": False,
+                        "idempotentHint": True, "openWorldHint": False},
+        "handler": _tool_list_machines,
+    },
+    {
+        "name": "pair_machine", "scope": "clubs:write", "title": "配對電子名牌",
+        "description": "用名牌螢幕上顯示的配對碼，把那台名牌綁定到分會的一位會員（username 見 list_members）。限分會管理員以上。",
+        "inputSchema": {"type": "object", "properties": {
+            "code": {"type": "string", "description": "名牌螢幕上的配對碼"},
+            "username": {"type": "string"},
+            "name": {"type": "string", "description": "機台名稱（選填）"},
+            "club_id": {"type": "integer", "description": "系統管理員指定分會用"},
+        }, "required": ["code", "username"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": False,
+                        "idempotentHint": False, "openWorldHint": False},
+        "handler": _tool_pair_machine,
+    },
+    {
+        "name": "update_machine", "scope": "clubs:write", "title": "修改電子名牌",
+        "description": "改機台名稱、換綁另一位會員、解除綁定（unbind=true，會讓名牌的權杖失效）或停用／啟用。限分會管理員以上。",
+        "inputSchema": {"type": "object", "properties": {
+            "machine_id": {"type": "integer"},
+            "name": {"type": "string"},
+            "username": {"type": "string", "description": "換綁到這位會員"},
+            "unbind": {"type": "boolean"},
+            "status": {"type": "string", "enum": ["active", "disabled"]},
+        }, "required": ["machine_id"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True,
+                        "idempotentHint": True, "openWorldHint": False},
+        "handler": _tool_update_machine,
     },
 ]
 
