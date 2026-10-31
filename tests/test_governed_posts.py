@@ -271,3 +271,28 @@ def test_regenerating_keeps_a_title_the_user_wrote(api, club):
                json={**payload, "agenda_id": post["agendaId"], "title": "我自己的標題"})
     again = generate(client, club, post_id=post["id"])
     assert again["title"] == "我自己的標題"
+
+
+def test_post_prefs_lists_can_go_back_to_the_default(api, club):
+    _, client = api
+    h = club["headers"]["club_admin"]
+    url = f"/api/clubs/{club['id']}/post-prefs"
+    client.put(url, json={"fixed_hashtags": []}, headers=h)          # an empty list is a choice
+    assert client.get(url, headers=h).json()["effective"]["fixed_hashtags"] == []
+    got = client.put(url, json={"fixed_hashtags": None}, headers=h).json()   # null = default again
+    assert "fixed_hashtags" not in got["prefs"]
+    assert got["effective"]["fixed_hashtags"] == got["defaults"]["fixed_hashtags"]
+    assert {o["value"] for o in got["tuningChoices"]["length"]} == {"short", "medium", "long"}
+    assert all(o["hint"] for o in got["tuningChoices"]["emotion"])
+    assert "HEADLINE" in got["templateTokens"]["PRE_EVENT"]["required"]
+    assert "REGISTER_URL" in got["templateTokens"]["PRE_EVENT"]["optional"]
+
+
+def test_builtin_templates_can_be_downloaded(api, club):
+    import io
+    from pptx import Presentation
+    _, client = api
+    r = client.get("/api/post-templates/pre_event_navy_v1/file", headers=club["headers"]["member"])
+    assert r.status_code == 200
+    assert Presentation(io.BytesIO(r.content)).slides
+    assert client.get("/api/post-templates/nope/file", headers=club["headers"]["member"]).status_code == 404

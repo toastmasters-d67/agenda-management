@@ -3253,8 +3253,27 @@ def get_post_prefs(club_id: int, user: dict = Depends(get_current_user)):
             "post_persona": pctx.DEFAULT_PERSONA,
         },
         "effective": {k: brand[k] for k in ("brand_signature", "fixed_hashtags", "banned_words")},
-        "tuningChoices": {k: list(v) for k, v in pctx.TUNING_CHOICES.items()},
+        # Each knob's options with the instruction the model actually gets, so
+        # the settings page can say what a choice does (the engine owns both).
+        "tuningChoices": {k: [{"value": v, "hint": hint} for v, hint in opts.items()]
+                          for k, opts in pctx.TUNING_CHOICES.items()},
+        "maxLength": pctx.POST_PREF_MAX,
+        "templateTokens": _template_token_help(),
         "standing": profile.standing,
+    }
+
+
+def _template_token_help() -> dict:
+    """The marks a poster template may use, per kind — from the engine's contract."""
+    from api._postgen.domain import template_tokens as tt
+    return {
+        "PRE_EVENT": {"required": sorted(tt.PRE_EVENT_REQUIRED), "optional": sorted(tt.PRE_EVENT_OPTIONAL),
+                      "photos": sorted(tt.PRE_EVENT_PHOTOS)},
+        "POST_REVIEW": {"required": sorted(tt.RECAP_COVER_REQUIRED | tt.RECAP_ROLE_REQUIRED
+                                           | tt.RECAP_CLOSING_REQUIRED),
+                        "optional": sorted(tt.RECAP_COVER_OPTIONAL | tt.RECAP_ROLE_OPTIONAL
+                                           | tt.RECAP_CLOSING_OPTIONAL),
+                        "photos": sorted(tt.RECAP_PHOTOS)},
     }
 
 
@@ -3263,8 +3282,11 @@ def update_post_prefs(club_id: int, payload: Dict[str, Any],
                       user: dict = Depends(require_club_admin_or_above)):
     from api._postgen.context import clean_prefs
     cid = _prefs_scope(user, club_id)
+    # null = back to the default (the only way to undo a list, since an empty
+    # list is itself a choice: "no fixed hashtags").
+    reset = {k for k, v in payload.items() if v is None}
     try:
-        cleaned = clean_prefs(payload)
+        cleaned = clean_prefs({k: v for k, v in payload.items() if v is not None})
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     with get_db() as conn:
@@ -3274,7 +3296,8 @@ def update_post_prefs(club_id: int, payload: Dict[str, Any],
             merged = {**(parse_jsonb(row[0]) if row else {}), **cleaned}
             # A list explicitly emptied is a decision ("no fixed hashtags");
             # a blank text field means "use the default", so drop it.
-            merged = {k: v for k, v in merged.items() if isinstance(v, list) or v}
+            merged = {k: v for k, v in merged.items()
+                      if k not in reset and (isinstance(v, list) or v)}
             cur.execute("INSERT INTO club_post_prefs (club_id, prefs, updated_by, updated_at)"
                         " VALUES (%s,%s::jsonb,%s,NOW()) ON CONFLICT (club_id) DO UPDATE"
                         " SET prefs=EXCLUDED.prefs, updated_by=EXCLUDED.updated_by, updated_at=NOW()",
@@ -3401,6 +3424,26 @@ def _load_template(cur, template_id: str, user: dict):
     if user["role"] != "system_admin" and row[1] != user["club_id"]:
         raise HTTPException(status_code=403, detail="無權存取其他分會的資料")
     return row
+
+
+@app.get("/api/post-templates/{template_id}/file")
+def download_post_template(template_id: str, club_id: Optional[int] = Query(default=None),
+                           user: dict = Depends(get_current_user)):
+    """The .pptx itself — so a designer can start from a built-in one."""
+    from api._postgen.modules.template_selector import pptx_registry
+    builtin = next((t for t in pptx_registry.list_templates([]) if t["id"] == template_id), None)
+    if builtin:
+        with open(pptx_registry.template_path(builtin), "rb") as fh:
+            data = fh.read()
+    else:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                row = _load_template(cur, template_id, user)
+        prefix = R2_PUBLIC_URL + "/"
+        obj = _r2().get_object(Bucket=R2_BUCKET_NAME, Key=row[5][len(prefix):])
+        data = obj["Body"].read()
+    return Response(content=data, media_type=(
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation"))
 
 
 @app.put("/api/post-templates/{template_id}")
@@ -7890,8 +7933,10 @@ MCP_TOOLS = [
             "prefs": {"type": "object", "additionalProperties": False, "properties": {
                 "register_url": {"type": "string", "description": "報名連結"},
                 "brand_signature": {"type": "string", "description": "品牌定位句（逐字印在回顧貼文結尾）"},
-                "fixed_hashtags": {"type": "array", "items": {"type": "string"}},
-                "banned_words": {"type": "array", "items": {"type": "string"}},
+                "fixed_hashtags": {"type": ["array", "null"], "items": {"type": "string"},
+                                   "description": "給 null 改回系統預設；給 [] 表示不要固定 hashtag"},
+                "banned_words": {"type": ["array", "null"], "items": {"type": "string"},
+                                 "description": "給 null 改回系統預設"},
                 "post_persona": {"type": "string", "description": "品牌語氣（1000 字內）"},
                 "post_notes_pre": {"type": "string", "description": "宣傳貼文的補充規則"},
                 "post_notes_review": {"type": "string", "description": "回顧貼文的補充規則"},
