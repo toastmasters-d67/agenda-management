@@ -148,6 +148,9 @@ class AnthropicClient:
                 "請在 .env 調高 MAX_TOKENS（角色多的議程或回顧建議 8000 以上），或分批處理。",
             )
 
+        if resp.stop_reason == "refusal":
+            raise LLMError("Claude 拒絕產生這則內容", "請調整補充指示後再試。")
+
         for block in resp.content:
             if getattr(block, "type", None) == "tool_use":
                 return dict(block.input)

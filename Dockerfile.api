@@ -6,6 +6,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 COPY api ./api
+# The JSON files the backend shares with the frontend (role catalog, platform
+# rules). api/index.py reads them at import, so without them the API exits on start.
+COPY lib/meetingRoles.json lib/socialPlatforms.json ./lib/
 COPY migrations ./migrations
 COPY alembic.ini ./
 RUN useradd --create-home app

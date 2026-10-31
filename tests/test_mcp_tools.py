@@ -185,3 +185,78 @@ def test_members_cannot_use_the_officer_only_machine_tools(index, env):
         with pytest.raises(index.HTTPException) as e:
             call(index, name, member, args)
         assert e.value.status_code == 403
+
+
+def test_review_post_follows_the_web_rules(index, env):
+    from api._postgen.infrastructure.llm.fake import FakeLLMClient
+    args = {"agenda_id": env["aid"], "kind": "recap"}
+    brief = call(index, "start_post", env["officer"], args)
+    user = brief["content"][0]["text"].split("=== 本次資料與任務（user）===")[1]
+    content = FakeLLMClient().generate("", user, {"name": "emit_canonical_content",
+                                                 "input_schema": brief["structuredContent"]["content_schema"]})
+    post = call(index, "submit_post", env["officer"], {**args, "content": content})["structuredContent"]["post"]
+    tool = next(t for t in index.MCP_TOOLS if t["name"] == "review_post")
+    assert tool["scope"] == "publish" and tool["annotations"]["destructiveHint"]
+    with pytest.raises(index.HTTPException) as e:
+        call(index, "review_post", env["officer"], {"post_id": post["id"], "action": "approve"})
+    assert e.value.status_code == 400
+    names = post["governance"]["aiWrittenHighlights"]
+    out = call(index, "review_post", env["officer"],
+               {"post_id": post["id"], "action": "approve", "confirmed": names})
+    assert out["structuredContent"]["post"]["reviewState"] == "approved"
+    member = {**env["officer"], "role": "club_member"}
+    with pytest.raises(index.HTTPException):
+        call(index, "review_post", member, {"post_id": post["id"], "action": "reject"})
+
+
+def _pptx_b64(text: str) -> str:
+    from pptx import Presentation
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[5])
+    slide.shapes.title.text = text
+    buf = io.BytesIO()
+    prs.save(buf)
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def test_poster_template_tools(index, env, monkeypatch):
+    fake = _FakeR2()
+    monkeypatch.setattr(index, "_r2", lambda: fake)
+    with pytest.raises(index.HTTPException):                 # missing required marks → refused, nothing stored
+        call(index, "upload_post_template", env["officer"],
+             {"use": "PRE_EVENT", "file_base64": _pptx_b64("{{HEADLINE}}")})
+    assert not fake.objects
+    marks = " ".join("{{%s}}" % k for k in ("HEADLINE", "THEME", "DATE", "TIME", "VENUE", "FEE", "REGISTER_URL"))
+    out = call(index, "upload_post_template", env["officer"],
+               {"use": "PRE_EVENT", "name": "我們的海報", "file_base64": _pptx_b64(marks + " {{WHATEVER}}")})
+    row = out["structuredContent"]
+    assert row["source"] == "upload" and len(fake.objects) == 1 and row["warnings"]
+    (key,) = fake.objects
+    assert key.startswith(f"media/clubs/{env['cid']}/")
+    up = call(index, "update_post_template", env["officer"], {"template_id": row["id"], "enabled": False})
+    assert up["structuredContent"]["enabled"] is False
+    call(index, "delete_post_template", env["officer"], {"template_id": row["id"]})
+    names = [t["id"] for t in call(index, "list_post_templates", env["officer"], {})["structuredContent"]["templates"]]
+    assert row["id"] not in names
+
+
+def test_free_copy_goes_through_the_engine_clients(index, monkeypatch):
+    from api._postgen.core.exceptions import LLMError
+
+    class Boom:
+        def generate(self, system, user, tool):
+            assert tool["name"] == "emit_social_copy" and tool["input_schema"]["type"] == "object"
+            raise LLMError("Claude 拒絕產生這則內容", "請調整補充指示後再試。")
+
+    monkeypatch.setattr(index, "_engine_llm", lambda *a: Boom())
+    with pytest.raises(index.HTTPException) as e:
+        index._write_copy("anthropic", "k", "sys", "user", {"type": "object", "properties": {}},
+                          {"id": "claude-haiku-4-5"})
+    assert e.value.status_code == 502 and "拒絕" in e.value.detail
+
+
+def test_platform_list_is_the_shared_file(index):
+    import json as _json
+    spec = _json.load(open(os.path.join(os.path.dirname(index.__file__), "..", "lib",
+                                        "socialPlatforms.json"), encoding="utf-8"))
+    assert index.SOCIAL_PLATFORMS == tuple(p["key"] for p in spec["platforms"])

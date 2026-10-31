@@ -10,11 +10,13 @@ TOKEN_RE = re.compile(r"\{\{([A-Z0-9_]+)\}\}")
 ROLE_SLOTS_PER_PAGE = 4
 
 # ── 預告海報（單頁）────────────────────────────────────────────────
+# QUESTION_ZH 選填：本週問句在 EntrepreneurAgenda 是選填事實（fact_whitelist），
+# 模板不能要求一個多數分會的議程沒有的欄位。
 PRE_EVENT_REQUIRED = {
-    "HEADLINE", "THEME", "QUESTION_ZH",
+    "HEADLINE", "THEME",
     "DATE", "TIME", "VENUE", "FEE", "REGISTER_URL",
 }
-PRE_EVENT_OPTIONAL = {"QUESTION_EN", "TRANSPORT", "HOST_NAME"}
+PRE_EVENT_OPTIONAL = {"QUESTION_ZH", "QUESTION_EN", "TRANSPORT", "HOST_NAME"}
 PRE_EVENT_PHOTOS = {"PHOTO_HOST"}
 
 # ── 回顧（封面 / 角色頁 / 封底）─────────────────────────────────────

@@ -41,7 +41,7 @@ EntrepreneurAgenda/
 │   ├── auth.js               # 角色輔助函式、applyRoleUI()
 │   ├── agendaTemplates.js    # 議程版型引擎（AGENDA_TEMPLATES + 每版型 manifest / 預設素材 / 語言能力）
 │   ├── postTemplates.js      # 社群海報版型
-│   ├── socialPlatforms.js    # 各平台字數、圖片規則
+│   ├── socialPlatforms.js    # 各平台字數、圖片規則（資料在 socialPlatforms.json，後端也讀）
 │   ├── pathways.js           # Pathways 目錄載入與查詢
 │   ├── rolesSheet.js         # 角色表 Google Sheet 匯入解析
 │   └── memberAutocomplete.js # 會員自動完成（下拉建議 + 可自由輸入）
@@ -675,7 +675,7 @@ Toastmasters 標誌從本站的 `/media/toastmasters_logo.png` 取，同源，�
 
 ### 平台差異寫在哪
 
-`lib/socialPlatforms.js` 是唯一一份：字數上限、要不要媒體、影片與多媒體的規則、內文連結能不能點。編輯器的計數器、警告、發布視窗的可勾選狀態全部讀它。後端另有一份**散文版**的同一組規則（`api/index.py` 的 `_PLATFORM_BRIEF`）餵給寫文案的模型——一份是給人看的檢查，一份是給模型的指示，刻意不共用。
+`lib/socialPlatforms.json` 是唯一一份：字數上限、要不要媒體、影片與多媒體的規則、內文連結能不能點。編輯器的計數器、警告、發布視窗的可勾選狀態（`lib/socialPlatforms.js`）、後端的平台清單與受控貼文改寫 IG／Threads 版本時的字數上限（`api/_postgen/renderers/social.py`）全部讀它——和 `meetingRoles.json` 同一個做法，Vercel 用 `includeFiles`、VM 的 `Dockerfile.api` 用 `COPY` 帶進後端。後端另有一份**散文版**的規則（`api/index.py` 的 `_PLATFORM_BRIEF`）餵給寫文案的模型，那是給模型的指示，不是拿來比對的數字。
 
 | | 字數上限 | 一定要媒體 | 影片 | 多個媒體 | 內文連結 |
 |---|---|---|---|---|---|
@@ -717,18 +717,18 @@ hashtag 沒有特殊處理——就是文案的一部分，**算在字數裡**�
 
 清單**依價格由低到高排**方便比價；**預設是哪一個由 `default` 旗標決定，不靠排序**——顯示順序與預設值回答的是不同問題，綁在一起就會有一個被另一個悄悄改掉。目前 Claude 預設 Opus 5.5、ChatGPT 預設最省的、生圖預設最省的。
 
-模型清單帶著 `thinking` 旗標，記的是**呼叫差異而不是偏好**：Opus 5.5 與 Sonnet 5.5 吃 adaptive thinking 與 effort，**Haiku 4.5 兩個都拒收，送過去就是 400**。把差異放在 id 旁邊，選模型才不會變成組出一個無效的請求。
+文案一律以**強制工具呼叫**取回結構化結果，API 不允許它與 extended thinking 同時開，所以不論選哪個模型都不開 thinking。
 
 生圖另外可選**品質**（low／medium／high／auto，預設 low）。不指定時 OpenAI 用 `auto`，等於由模型決定品質，也就等於由模型決定你付多少——`gpt-image-1` 的 low 與 high 相差約 15 倍。選 `auto` 時不送這個參數，因為那本來就是 API 的預設，明寫只是多冒一次「某個模型不認得它」的風險。
 
 輪換 `CREDENTIALS_SECRET_KEY` 會讓既有金鑰解不開——此時 `_open()` 回一個「請重新設定」的錯誤，而不是丟出無意義的例外。
 
-文案有兩條路（`COPY_WRITERS`），兩邊拿到**完全相同**的 system prompt、使用者輸入與 JSON schema，回傳同一個 dict——端點不在乎是誰寫的。刻意寫成兩個函式而不是在一個函式裡分支，是為了讓兩家 SDK 各自演進時不會互相污染：
+**呼叫模型的程式只有一份**：受控引擎的 `api/_postgen/infrastructure/llm`（`AnthropicClient`、`OpenAIClient`）。自由生成（`other` 或沒綁例會）也走它（`_write_copy`），兩家拿到**完全相同**的 system prompt、使用者輸入與 schema（當成強制的工具呼叫），回傳同一個 dict。各家 SDK 的錯誤、截斷（撞到 `max_tokens`）與拒答都在那裡轉成中文訊息，整併前 EA 自己也有一套，已經拿掉。
 
-- **Claude**：`claude-opus-5` + adaptive thinking + structured outputs。`effort` 設 `medium` 而非預設的 `high`——這是掛在瀏覽器請求後面的短篇創作，深一層推理帶來的延遲比它換到的品質更貴。
-- **ChatGPT**：`chat.completions` + `response_format: json_schema`（`strict`）。
+- **Claude**：Messages API + `tool_choice` 指定工具。
+- **ChatGPT**：`chat.completions` + `tool_choice` 指定 function。
 
-**模型由使用者在產生視窗裡選**，兩家各三個（`COPY_MODELS`），清單依價格由低到高排，方便比價；預設是哪一個則由 `default` 旗標決定，不靠排序——顯示順序與預設值回答的是不同問題，綁在一起就會有一個被另一個悄悄改掉。目前 Claude 預設 Opus 5.5、ChatGPT 預設 GPT-6 Luna、生圖預設 GPT-Image 1 mini。`thinking` 旗標記的是呼叫差異不是偏好：Opus 5.5 與 Sonnet 5.5 吃 adaptive thinking 與 effort，Haiku 4.5 兩個都拒收，送了就是 400。
+**模型由使用者在產生視窗裡選**，兩家各三個（`COPY_MODELS`），清單依價格由低到高排，方便比價；預設是哪一個則由 `default` 旗標決定，不靠排序——顯示順序與預設值回答的是不同問題，綁在一起就會有一個被另一個悄悄改掉。目前 Claude 預設 Opus 5.5、ChatGPT 預設 GPT-6 Luna、生圖預設 GPT-Image 1 mini。
 
 兩邊都用 structured output，所以一次就吐出主文案與各平台版本，不用解析散文。生圖用 OpenAI `gpt-image-1`，產生後直接進 R2 只回公開 URL——**IG 與 Threads 只能發布平台抓得到的公開圖片**，所以這一步 Phase 1 也用得上。
 
@@ -903,6 +903,8 @@ https://<你的網域>/api/mcp
 | `get_post_prefs` / `update_post_prefs` | `posts:read` / `posts:write` | 貼文品牌設定（報名連結、定位句、固定 hashtag、禁用詞、語氣、補充規則、預設旋鈕） |
 | `list_post_templates` | `posts:read` | PPTX 海報模板（內建＋分會上傳） |
 | `make_post_poster` | `posts:write` | 已核可的受控貼文 → 可編輯 PPTX，回傳 R2 連結。未核可拒絕 |
+| `review_post` | `publish` | 核可／退回／改回待核可。與網頁同規則：擋下的不能核可、AI 補寫的角色要列在 `confirmed`。見下方說明 |
+| `upload_post_template` / `update_post_template` / `delete_post_template` | `posts:write` | 上傳 `.pptx` 海報模板（與網頁同一個檢查，缺必要標記拒收，先檢查再存 R2）；改名稱、風格、啟用；刪除。內建模板不能改 |
 | `publish_post` | `publish` | 發布到 Facebook／Instagram／Threads，**公開且無法透過本系統收回**。已發布過的平台會略過，要再發一則得帶 `republish: true` |
 | `add_post_image` | `posts:write` | 把 AI 客戶端自己做的圖（或任何圖）加到貼文：`image`（ChatGPT 的檔案參數，`_meta["openai/fileParams"]`）、`image_url`（公開 https）或 `image_base64`。存到 R2，15 MB 上限，只收 JPG／PNG／WebP／GIF（看檔頭判斷，不信副檔名） |
 | `remove_post_image` | `posts:write` | 依順序（從 1 開始）移除貼文的一張圖 |
@@ -939,7 +941,7 @@ https://<你的網域>/api/mcp
 - `tools/list` **一律列出全部工具**，並帶 `annotations`（`readOnlyHint` / `destructiveHint` / `openWorldHint`），客戶端（例如 ChatGPT）據此決定哪些呼叫要先問使用者。呼叫沒 scope 的工具會收到 403 + `insufficient_scope` 挑戰，挑戰裡的 scope 是「現有的＋缺的」，客戶端補授權後不會掉掉原本的權限。
 - **說明頁 `/mcp`** 的工具清單直接讀 `MCP_TOOLS`，新增工具會自動出現。新增時順手在 `_TOOL_SUMMARY` 寫一句給人看的說明、在 `_TOOL_GROUPS` 放進分組；需要一般會員或系統管理員權限的，也要更新 `_TOOL_MIN_ROLE`（它只是說明，實際權限仍由各工具裡的 `_officer_only`／`_system_admin_only` 決定）。
 - 工具層級的失敗（找不到貼文、平台未連接、缺欄位）回 `isError: true` 的結果讓模型自行修正，不回 JSON-RPC 錯誤。
-- **人工核可沒有 MCP 工具**，刻意的：核可是人確認 AI 寫的東西，讓 AI 助理自己核可等於沒有這道關卡。助理只會告訴使用者去網頁核可。
+- **人工核可（`review_post`）掛在 `publish` scope**：同意畫面上預設不勾，要使用者自己勾；工具標成 `destructiveHint`，客戶端會先問使用者；說明要求助理先把全文與治理註記給使用者看、取得明確同意，AI 補寫的角色要逐一確認後放進 `confirmed`——規則與網頁的核可完全相同（同一個函式），品質檢查擋下的照樣不能核可。
 
 ### 授權伺服器的設計
 

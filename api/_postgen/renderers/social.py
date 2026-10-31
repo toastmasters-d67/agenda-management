@@ -10,8 +10,13 @@ PostGenerator 只產 Facebook 文案；EntrepreneurAgenda 的社群發文要三�
   hashtag；放不下時先丟鉤子，事實行永遠保留。
 
 事實行一律從 `req` 取（與 FB renderer 同一組函式），不從 FB 文字裡解析。
+
+字數上限讀 `lib/socialPlatforms.json`——前端的字數計數器讀的是同一份。
 """
 from __future__ import annotations
+
+import json
+from pathlib import Path
 
 from api._postgen.core.config import Settings
 from api._postgen.domain.canonical_content import CanonicalContent
@@ -20,8 +25,11 @@ from api._postgen.renderers.facebook import _dedupe_tags, _squash
 from api._postgen.schemas.enums import PostType
 from api._postgen.schemas.post_request import PostRequest
 
-IG_LIMIT = 2200
-THREADS_LIMIT = 500
+_SPECS = {p["key"]: p for p in json.loads(
+    (Path(__file__).resolve().parents[3] / "lib" / "socialPlatforms.json")
+    .read_text(encoding="utf-8"))["platforms"]}
+IG_LIMIT = _SPECS["instagram"]["max"]
+THREADS_LIMIT = _SPECS["threads"]["max"]
 IG_LINK_LINE = "報名連結在個人簡介"
 
 

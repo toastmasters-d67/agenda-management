@@ -2242,7 +2242,9 @@ def put_pathways(req: PathwayCatalogRequest, user: dict = Depends(require_system
 # this shape — a post is stored the same way whether it is ever published or
 # only copied out by hand.
 
-SOCIAL_PLATFORMS = ("facebook", "instagram", "threads")
+# The platforms, from the same file the composer reads (lib/socialPlatforms.json).
+with open(os.path.join(os.path.dirname(__file__), "..", "lib", "socialPlatforms.json"), encoding="utf-8") as _f:
+    SOCIAL_PLATFORMS = tuple(p["key"] for p in json.load(_f)["platforms"])
 
 # Only what the copywriter needs to know. The UI keeps its own copy of these
 # (lib/socialPlatforms.js) for the character counters and preview cards.
@@ -2337,7 +2339,7 @@ class SocialGenerateRequest(BaseModel):
     agenda_id: Optional[int] = None
     brief:     str = ""              # free-text steer from the user
     platforms: List[str] = []
-    provider:  str = "anthropic"     # whose account writes it — see COPY_WRITERS
+    provider:  str = "anthropic"     # whose account writes it — see _COPY_PROVIDERS
     model:     str = ""              # one of COPY_MODELS[provider]; blank = cheapest
     kind:      str = "other"         # see _KIND_BRIEF
     # Governed generation (promo / recap with a meeting) saves its result and
@@ -2535,49 +2537,23 @@ def _meeting_brief(cur, agenda_id: int, user: dict) -> str:
     return "\n".join(lines)
 
 
-# Two ways to write the same thing. Both are handed the identical system
-# prompt, user text and JSON schema, and both must return the parsed dict — the
-# endpoint below does not care which one ran. Keeping them as separate
-# functions (rather than branching inside one) is what stops the Anthropic and
-# OpenAI call shapes from bleeding into each other as either SDK moves on.
+# Free-form copy (kind "other", or no meeting) is written through the same
+# model clients as the governed engine (api/_postgen/infrastructure/llm): one
+# place that knows each SDK's call shape, its errors and its truncation and
+# refusal cases. Both providers get the identical system prompt, user text and
+# schema (as a forced tool call) and return the parsed dict.
+_COPY_PROVIDERS = ("anthropic", "openai")
 
-def _copy_via_anthropic(api_key: str, system: str, user_text: str, schema: dict,
-                       model: dict) -> dict:
+
+def _write_copy(provider: str, api_key: str, system: str, user_text: str, schema: dict,
+                model: dict) -> dict:
+    from api._postgen.core.exceptions import LLMError
+    tool = {"name": "emit_social_copy", "description": "回傳這則貼文的文案",
+            "input_schema": schema}
     try:
-        import anthropic
-    except ImportError:
-        raise HTTPException(status_code=503, detail="伺服器缺少 anthropic 套件，請聯絡管理員")
-
-    client = anthropic.Anthropic(api_key=api_key)
-    kwargs = {
-        "model": model["id"],
-        "max_tokens": 16000,
-        "system": system,
-        "messages": [{"role": "user", "content": user_text}],
-        "output_config": {"format": {"type": "json_schema", "schema": schema}},
-    }
-    if model.get("thinking"):
-        kwargs["thinking"] = {"type": "adaptive"}
-        # `medium` rather than the default `high`: this is a short creative
-        # write-up behind a browser request, and the extra latency of a deeper
-        # pass costs more here than it buys.
-        kwargs["output_config"]["effort"] = "medium"
-    try:
-        response = client.messages.create(**kwargs)
-    except anthropic.RateLimitError:
-        raise HTTPException(status_code=429, detail="Claude 忙碌中，請稍後再試")
-    except anthropic.APIStatusError as e:
-        raise HTTPException(status_code=502,
-                            detail=f"Claude 回應異常（{model['id']}，{e.status_code}）")
-    except anthropic.APIConnectionError:
-        raise HTTPException(status_code=502, detail="無法連線至 Claude，請稍後再試")
-
-    if response.stop_reason == "refusal":
-        raise HTTPException(status_code=400,
-                            detail="Claude 拒絕產生這則內容，請調整補充指示後再試")
-
-    text = next((b.text for b in response.content if b.type == "text"), "")
-    return _parse_copy_json(text)
+        return _engine_llm(provider, api_key, model).generate(system, user_text, tool)
+    except LLMError as e:
+        raise HTTPException(status_code=502, detail=f"{e}。{e.hint}")
 
 
 # Model ids move faster than this file does, so the choice is an env var with a
@@ -2591,19 +2567,16 @@ def _copy_via_anthropic(api_key: str, system: str, user_text: str, schema: dict,
 # for the UI, not something this code bills against; check the provider for
 # the live rate.
 #
-# `thinking` records a per-model call difference rather than a preference:
-# Claude Opus 5.5 and Sonnet 5.5 take adaptive thinking and an effort level,
-# while Haiku 4.5 rejects both — sending them to it is a 400. Keeping the flag
-# beside the id is what stops picking a model from producing an invalid
-# request.
+# Copy comes back as a forced tool call (see _write_copy), which the API does
+# not allow together with extended thinking, so no model here runs with it.
 COPY_MODELS = {
     "anthropic": [
         {"id": "claude-haiku-4-5",  "label": "Haiku 4.5",  "note": "最省",
-         "price": "US$1 / $5", "thinking": False},
+         "price": "US$1 / $5"},
         {"id": "claude-sonnet-5-5", "label": "Sonnet 5.5", "note": "均衡",
-         "price": "US$2 / $10", "thinking": True},
+         "price": "US$2 / $10"},
         {"id": "claude-opus-5-5",   "label": "Opus 5.5",   "note": "最強",
-         "price": "US$4 / $20", "thinking": True, "default": True},
+         "price": "US$4 / $20", "default": True},
     ],
     "openai": [
         {"id": "gpt-6-luna",  "label": "GPT-6 Luna",  "note": "最省",
@@ -2643,41 +2616,6 @@ def _copy_model(provider: str, wanted: str) -> dict:
     return _default_model(allowed)
 
 
-def _copy_via_openai(api_key: str, system: str, user_text: str, schema: dict,
-                    model: dict) -> dict:
-    try:
-        from openai import OpenAI
-    except ImportError:
-        raise HTTPException(status_code=503, detail="伺服器缺少 openai 套件，請聯絡管理員")
-
-    try:
-        response = OpenAI(api_key=api_key).chat.completions.create(
-            model=model["id"],
-            messages=[{"role": "system", "content": system},
-                      {"role": "user", "content": user_text}],
-            response_format={
-                "type": "json_schema",
-                "json_schema": {"name": "social_copy", "strict": True, "schema": schema},
-            },
-        )
-    except Exception as e:
-        detail = getattr(e, "message", None) or str(e)
-        raise HTTPException(status_code=502, detail=f"OpenAI 產生文案失敗：{detail}"[:400])
-
-    choice = (response.choices or [None])[0]
-    if choice is None or not getattr(choice.message, "content", None):
-        raise HTTPException(status_code=502, detail="OpenAI 沒有回傳文案")
-    return _parse_copy_json(choice.message.content)
-
-
-def _parse_copy_json(text: str) -> dict:
-    try:
-        return json.loads(text)
-    except ValueError:
-        raise HTTPException(status_code=502, detail="AI 回傳的格式無法解析，請再試一次")
-
-
-COPY_WRITERS = {"anthropic": _copy_via_anthropic, "openai": _copy_via_openai}
 
 
 @app.get("/api/ai-models")
@@ -2713,7 +2651,7 @@ def generate_social_copy(req: SocialGenerateRequest,
     # review and returns that post. Everything else is written freely here.
     if req.kind in _GOVERNED_KINDS and req.agenda_id:
         return {"post": _governed_generate(req, user)}
-    provider = req.provider if req.provider in COPY_WRITERS else "anthropic"
+    provider = req.provider if req.provider in _COPY_PROVIDERS else "anthropic"
 
     # The caller's own connected account is what pays. Anthropic additionally
     # falls back to the server-wide key, so a club that has connected nothing
@@ -2791,8 +2729,8 @@ def generate_social_copy(req: SocialGenerateRequest,
         "additionalProperties": False,
     }
 
-    data = COPY_WRITERS[provider](api_key, system, "\n\n".join(parts), schema,
-                                 _copy_model(provider, req.model))
+    data = _write_copy(provider, api_key, system, "\n\n".join(parts), schema,
+                       _copy_model(provider, req.model))
 
     return {
         "title": data.get("title", ""),
@@ -3088,7 +3026,7 @@ def _governed_generate(req, user: dict) -> dict:
                 raise HTTPException(status_code=403, detail="無權存取其他分會的資料")
             profile = _post_profile(cur, club_id)
 
-    provider = req.provider if req.provider in COPY_WRITERS else "anthropic"
+    provider = req.provider if req.provider in _COPY_PROVIDERS else "anthropic"
     if os.getenv("LLM_FAKE") == "1":
         # Tests and local demos: PostGenerator's fake model, no key, no cost.
         from api._postgen.infrastructure.llm.fake import FakeLLMClient
@@ -3410,24 +3348,21 @@ class PostTemplateRequest(BaseModel):
     enabled: bool = True
 
 
-@app.post("/api/post-templates")
-def create_post_template(req: PostTemplateRequest,
-                         user: dict = Depends(require_club_admin_or_above)):
-    cid = _prefs_scope(user, req.club_id) if req.club_id is not None else _prefs_scope(user, user["club_id"])
-    use = req.use.upper()
+def _add_post_template(cid: int, use: str, local_path: str, store, name: str, style: list,
+                       slots: int, enabled: bool, username: str) -> dict:
+    """
+    Check a .pptx and add it to the club's template library — the one path
+    for both the web upload and MCP's upload_post_template. `store()` puts
+    the file where it will live and returns its URL; it runs only after the
+    check passes, so a refused template leaves nothing behind.
+    """
+    use = (use or "").upper()
     if use not in ("PRE_EVENT", "POST_REVIEW"):
         raise HTTPException(status_code=400, detail="用途必須是 PRE_EVENT（宣傳）或 POST_REVIEW（回顧）")
-    # Only a file uploaded under this club (POST /upload/presign files it
-    # there) — not some other club's file that happens to be in the bucket.
-    if not R2_PUBLIC_URL or not req.file_url.startswith(f"{R2_PUBLIC_URL}/media/clubs/{cid}/"):
-        raise HTTPException(status_code=400, detail="模板檔案必須是上傳到本分會的檔案")
-    path = _download_r2(req.file_url, ".pptx")
-    try:
-        result = check_poster_template(path, use)
-    finally:
-        os.remove(path)
+    result = check_poster_template(local_path, use)
     if result["errors"]:
         raise HTTPException(status_code=400, detail="模板有問題，未存入：" + "；".join(result["errors"]))
+    file_url = store()
     tid = f"club{cid}_{uuid.uuid4().hex[:10]}"
     role_pages = max(result["slides"] - 2, 1) if use == "POST_REVIEW" else None
     with get_db() as conn:
@@ -3436,11 +3371,26 @@ def create_post_template(req: PostTemplateRequest,
                 "INSERT INTO post_templates (id, club_id, use, name, style, file_url,"
                 " role_slots_per_page, role_pages, enabled, created_by)"
                 " VALUES (%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s)",
-                (tid, cid, use, (req.name or "未命名模板")[:100], json.dumps(req.style[:10]),
-                 req.file_url, max(1, min(req.role_slots_per_page, 8)), role_pages,
-                 req.enabled, user["username"]))
+                (tid, cid, use, (name or "未命名模板")[:100], json.dumps([str(x) for x in style][:10]),
+                 file_url, max(1, min(int(slots or 4), 8)), role_pages, enabled, username))
             cur.execute(f"SELECT {_TEMPLATE_COLS} FROM post_templates WHERE id=%s", (tid,))
             return {**_template_row(cur.fetchone()), "warnings": result["warnings"]}
+
+
+@app.post("/api/post-templates")
+def create_post_template(req: PostTemplateRequest,
+                         user: dict = Depends(require_club_admin_or_above)):
+    cid = _prefs_scope(user, req.club_id) if req.club_id is not None else _prefs_scope(user, user["club_id"])
+    # Only a file uploaded under this club (POST /upload/presign files it
+    # there) — not some other club's file that happens to be in the bucket.
+    if not R2_PUBLIC_URL or not req.file_url.startswith(f"{R2_PUBLIC_URL}/media/clubs/{cid}/"):
+        raise HTTPException(status_code=400, detail="模板檔案必須是上傳到本分會的檔案")
+    path = _download_r2(req.file_url, ".pptx")
+    try:
+        return _add_post_template(cid, req.use, path, lambda: req.file_url, req.name, req.style,
+                                  req.role_slots_per_page, req.enabled, user["username"])
+    finally:
+        os.remove(path)
 
 
 def _load_template(cur, template_id: str, user: dict):
@@ -4706,7 +4656,7 @@ MCP_SCOPES = {
     "agendas:write": "建立與修改議程、安排角色（含從角色試算表帶入）",
     "clubs:write":   "修改分會設定與圖片（名稱、版型、地點、QR code、Word 範本；限系統管理員），以及配對電子名牌",
     "ai:generate":   "用你的 AI 帳號產生文案與圖片（會消耗你的 API 額度）",
-    "publish":       "代表分會公開發文到 Facebook／Instagram／Threads",
+    "publish":       "代表分會公開發文到 Facebook／Instagram／Threads，以及核可受控貼文（核可後才能發布）",
 }
 # What a client gets when it asks for nothing in particular. `publish` is
 # absent: it is only ever granted by someone ticking it.
@@ -7152,6 +7102,60 @@ def _tool_list_post_templates(caller, args):
     return _tool_text("\n".join(lines) or "沒有模板", {"templates": rows})
 
 
+def _tool_review_post(caller, args):
+    """
+    The human review gate, from an assistant. Same rules as the web panel
+    (review_social_post): a blocked draft cannot be approved, and every role
+    the AI wrote without notes must be named in `confirmed`. Behind the
+    `publish` scope — approving is what lets a post go out.
+    """
+    _officer_only(caller)
+    req = ReviewRequest(action=args.get("action") or "", confirmed=args.get("confirmed") or [],
+                        note=args.get("note") or "")
+    post = review_social_post(int(args["post_id"]), req, caller)
+    label = {"approved": "已核可，可以發布了", "rejected": "已退回", "pending": "已改回待核可"}
+    return _tool_text(f"貼文 #{post['id']} {label.get(post['reviewState'], post['reviewState'])}",
+                      {"post": post})
+
+
+def _tool_upload_post_template(caller, args):
+    _officer_only(caller)
+    import tempfile
+    cid = _prefs_scope(caller, args.get("club_id") or caller["club_id"])
+    raw = _file_from_args(args, max_bytes=30 * 1024 * 1024)
+    fd, path = tempfile.mkstemp(suffix=".pptx")
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(raw)
+
+    def store():
+        key = f"media/clubs/{cid}/{uuid.uuid4().hex}.pptx"
+        _r2().put_object(Bucket=R2_BUCKET_NAME, Key=key, Body=raw,
+                         ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation")
+        return f"{R2_PUBLIC_URL}/{key}"
+
+    try:
+        row = _add_post_template(cid, args.get("use") or "", path, store, args.get("name") or "",
+                                 args.get("style") or [], args.get("role_slots_per_page") or 4,
+                                 args.get("enabled", True) is not False, caller["username"])
+    finally:
+        os.remove(path)
+    warn = f"（注意：{'；'.join(row['warnings'])}）" if row["warnings"] else ""
+    return _tool_text(f"已加入海報模板「{row['name']}」（{row['id']}）{warn}", row)
+
+
+def _tool_update_post_template(caller, args):
+    _officer_only(caller)
+    fields = {k: args[k] for k in ("name", "style", "enabled") if k in args}
+    row = update_post_template(str(args["template_id"]), fields, caller)
+    return _tool_text(f"已更新模板「{row['name']}」（{'啟用' if row['enabled'] else '停用'}）", row)
+
+
+def _tool_delete_post_template(caller, args):
+    _officer_only(caller)
+    delete_post_template(str(args["template_id"]), caller)
+    return _tool_text(f"已刪除模板 {args['template_id']}", {"ok": True})
+
+
 def _tool_make_post_poster(caller, args):
     _officer_only(caller)
     with get_db() as conn:
@@ -7922,6 +7926,71 @@ MCP_TOOLS = [
                         "idempotentHint": False, "openWorldHint": False},
         "handler": _tool_make_post_poster,
     },
+    {
+        "name": "review_post", "scope": "publish", "title": "核可或退回受控貼文",
+        "description": "受控貼文（例會宣傳／回顧）的人工核可：approve＝核可（之後才能發布與產生海報）、"
+                       "reject＝退回、reopen＝改回待核可。⚠️ 核可代表「人確認過這份文字」："
+                       "呼叫前一定要先用 get_post 把各平台全文與治理註記給使用者看，並取得使用者明確同意，"
+                       "不可以自己決定核可。AI 依職責補寫的角色（governance.aiWrittenHighlights）"
+                       "要逐一請使用者確認，再把姓名放進 confirmed。品質檢查擋下的貼文不能核可。"
+                       "需要「發布」授權。",
+        "inputSchema": {"type": "object", "properties": {
+            "post_id": {"type": "integer"},
+            "action": {"type": "string", "enum": ["approve", "reject", "reopen"]},
+            "confirmed": {"type": "array", "items": {"type": "string"},
+                          "description": "使用者已逐一確認過的 AI 補寫角色姓名（approve 時必須涵蓋全部）"},
+            "note": {"type": "string", "description": "退回或核可的說明（選填）"},
+        }, "required": ["post_id", "action"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True,
+                        "idempotentHint": True, "openWorldHint": False},
+        "handler": _tool_review_post,
+    },
+    {
+        "name": "upload_post_template", "scope": "posts:write", "title": "上傳海報模板",
+        "description": "把設計好的 .pptx 加進分會的海報模板庫。use：PRE_EVENT（宣傳，單頁）或 POST_REVIEW"
+                       "（回顧，封面＋角色頁＋封底）。模板裡用 {{HEADLINE}}、{{DATE}}、{{VENUE}} 這類標記；"
+                       "缺必要標記會被拒收，不認得的只警告。給 file、file_url 或 file_base64 其中一個。限分會管理員以上。",
+        "inputSchema": {"type": "object", "properties": {
+            "club_id": {"type": "integer"},
+            "use": {"type": "string", "enum": ["PRE_EVENT", "POST_REVIEW"]},
+            "name": {"type": "string"},
+            "style": {"type": "array", "items": {"type": "string"},
+                      "description": "風格標籤，AI 產生貼文時依主題語氣挑模板"},
+            "role_slots_per_page": {"type": "integer", "description": "回顧模板每頁幾個角色，預設 4"},
+            "enabled": {"type": "boolean"},
+            "file": {"type": "object", "properties": {"download_url": {"type": "string"},
+                                                      "file_id": {"type": "string"}}},
+            "file_url": {"type": "string"},
+            "file_base64": {"type": "string"},
+        }, "required": ["use"], "additionalProperties": False},
+        "_meta": {"openai/fileParams": ["file"]},
+        "annotations": {"readOnlyHint": False, "destructiveHint": False,
+                        "idempotentHint": False, "openWorldHint": True},
+        "handler": _tool_upload_post_template,
+    },
+    {
+        "name": "update_post_template", "scope": "posts:write", "title": "修改海報模板",
+        "description": "改分會上傳的模板名稱、風格標籤，或啟用／停用。內建模板不能改。限分會管理員以上。",
+        "inputSchema": {"type": "object", "properties": {
+            "template_id": {"type": "string"},
+            "name": {"type": "string"},
+            "style": {"type": "array", "items": {"type": "string"}},
+            "enabled": {"type": "boolean"},
+        }, "required": ["template_id"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True,
+                        "idempotentHint": True, "openWorldHint": False},
+        "handler": _tool_update_post_template,
+    },
+    {
+        "name": "delete_post_template", "scope": "posts:write", "title": "刪除海報模板",
+        "description": "刪除分會上傳的模板（內建模板不能刪）。刪除前請先跟使用者確認。限分會管理員以上。",
+        "inputSchema": {"type": "object", "properties": {
+            "template_id": {"type": "string"},
+        }, "required": ["template_id"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True,
+                        "idempotentHint": True, "openWorldHint": False},
+        "handler": _tool_delete_post_template,
+    },
     # ---- club configuration added after the first MCP release ----
     {
         "name": "set_word_template", "scope": "clubs:write", "title": "設定 Word 匯出範本",
@@ -8052,6 +8121,10 @@ _TOOL_SUMMARY = {
     "update_post_prefs": "修改貼文品牌設定。",
     "list_post_templates": "列出可用的 PPTX 海報模板。",
     "make_post_poster": "為已核可的貼文產生可編輯的 PPTX 海報。",
+    "review_post": "核可或退回受控貼文。核可前要先讓你看過全文並同意。",
+    "upload_post_template": "上傳設計好的 PPTX 海報模板。",
+    "update_post_template": "改海報模板的名稱、風格或啟用狀態。",
+    "delete_post_template": "刪除分會上傳的海報模板。",
     "set_word_template": "上傳分會自己的 Word 議程範本，或改回系統預設。",
     "set_custom_roles": "設定分會自己的角色（角色目錄以外的）。",
     "list_machines": "列出分會的電子名牌與綁定的會員。",
@@ -8069,8 +8142,9 @@ _TOOL_GROUPS = (
     ("社群貼文", ("list_posts", "get_post", "create_post", "update_post", "delete_post",
                   "generate_copy", "add_post_image", "remove_post_image",
                   "generate_post_image", "publish_post")),
-    ("受控貼文", ("start_post", "submit_post", "get_post_prefs", "update_post_prefs",
-                  "list_post_templates", "make_post_poster")),
+    ("受控貼文", ("start_post", "submit_post", "review_post", "get_post_prefs", "update_post_prefs",
+                  "list_post_templates", "upload_post_template", "update_post_template",
+                  "delete_post_template", "make_post_poster")),
     ("電子名牌", ("list_machines", "pair_machine", "update_machine")),
 )
 
