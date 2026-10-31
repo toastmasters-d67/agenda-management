@@ -1672,7 +1672,13 @@ async function buildWordBlob() {
     times: calcTimes(data.speeches), displayMember, formatDate, varietySession, pathwayLabel: speechPathwayLabel,
     durationLabels, signals,
   });
-  return fillWordTemplate(await res.arrayBuffer(), values);
+  let themeImg = null;
+  try {
+    themeImg = await getThemeImgBase64();
+  } catch (e) {
+    console.warn('主題圖片讀取失敗，Word 保留佔位圖:', e);
+  }
+  return fillWordTemplate(await res.arrayBuffer(), values, { 主題圖片: themeImg });
 }
 
 function blobToDataUrl(blob) {

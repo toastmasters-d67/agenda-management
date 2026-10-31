@@ -226,6 +226,7 @@ EntrepreneurAgenda/
 - **填入引擎**：[docxtemplater](https://docxtemplater.com/)（`docxtemplater` + `pizzip`），全在瀏覽器執行，後端不經手 Word 檔內容。
 - **改預設範本**：改 `scripts/build-word-template.mjs` 後執行 `node scripts/build-word-template.mjs`，重新產生 `public/templates/agenda-default.docx` 並一起 commit。
 - **企業家、Chill Hi High 分會的範本**：`scripts/build-word-template-entrepreneur.mjs`、`scripts/build-word-template-chillhihigh.mjs` 依各自版型產生 `scripts/word-templates/` 下的 .docx。這些不由系統內建，是以分會自訂範本的方式上傳（分會設定 → Word 匯出範本）；改版後重新產生再上傳即可。範本裡的 Logo、QR、圖片是內建素材，分會換圖時也要重新產生。
+- **圖片標記**：在 Word 放一張佔位圖片，替代文字設為 `{{主題圖片}}`，下載時換成該次例會上傳的主題圖片（裁成佔位圖的比例）；沒有上傳就保留佔位圖。清單在 `lib/wordExport.js` 的 `WORD_PICTURES`。
 
 ## 角色安排（`/roles`）
 

@@ -3,6 +3,8 @@
 // under `.tmpl-entrepreneur` in agenda.css): header with logo, club names and
 // a theme-image box, theme row, mission box, the agenda table with its time /
 // duration columns, and the Pathways · time rules · QR panel on the right.
+// The theme-image box is a grey placeholder picture with alt text {{主題圖片}}
+// (WORD_PICTURES): the meeting's theme image replaces it when downloaded.
 //
 // It isn't served by the app: the club uploads it as its own template
 // (分會設定 → Word 匯出範本), like any club-made .docx.
@@ -15,6 +17,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import zlib from 'node:zlib';
 import {
   AlignmentType, BorderStyle, Document, ImageRun, Packer, Paragraph, ShadingType,
   Table, TableCell, TableRow, TextRun, VerticalAlign, VerticalMergeType, WidthType,
@@ -65,7 +68,29 @@ const cell = (children, width, o = {}) => new TableCell({
   verticalAlign: o.vAlign || VerticalAlign.CENTER, columnSpan: o.span, verticalMerge: o.merge,
   margins: o.margins || { top: 30, bottom: 30, left: 60, right: 60 },
 });
-const image = (data, w, h) => new ImageRun({ data, type: 'png', transformation: { width: w, height: h } });
+const image = (data, w, h, altText) => new ImageRun({ data, type: 'png', transformation: { width: w, height: h }, altText });
+
+// A one-pixel PNG of `hex`, stretched to fill the theme-image placeholder.
+function solidPng(hex) {
+  const chunk = (type, data) => {
+    const body = Buffer.concat([Buffer.from(type), data]);
+    const len = Buffer.alloc(4); len.writeUInt32BE(data.length);
+    const crc = Buffer.alloc(4); crc.writeUInt32BE(zlib.crc32(body));
+    return Buffer.concat([len, body, crc]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(1, 0); ihdr.writeUInt32BE(1, 4);
+  ihdr[8] = 8; ihdr[9] = 2; // 8-bit RGB
+  const pixel = Buffer.from([0, ...Buffer.from(hex, 'hex')]); // filter byte + RGB
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(pixel)), chunk('IEND', Buffer.alloc(0)),
+  ]);
+}
+// Theme-image box, as on the agenda (38 mm wide, both header rows tall).
+const px = (n) => Math.round(n * 96 / 25.4);
+const THEME_IMG = image(solidPng('888888'), px(38), px(40),
+  { name: '主題圖片', title: '主題圖片', description: '{{主題圖片}}' });
 
 // ---- header: logo | names | theme image, then meta lines under logo / names ----
 const HEAD_W = { logo: mm(26), img: mm(38) };
@@ -88,9 +113,8 @@ const header = new Table({
           para(run('{{分會名稱}}', { size: 34, bold: true }), { align: AlignmentType.CENTER }),
           para(run('{{分會英文名稱}}', { size: 24, bold: true }), { align: AlignmentType.CENTER, before: 20 }),
         ], HEAD_W.names),
-        // Marks can't carry pictures: the theme image is pasted in Word.
-        cell([para(run('Theme Image（可在 Word 貼上主題圖）', { size: 13, color: 'DDDDDD' }), { align: AlignmentType.CENTER })],
-          HEAD_W.img, { fill: '888888', merge: VerticalMergeType.RESTART }),
+        cell([para(THEME_IMG, { align: AlignmentType.CENTER })],
+          HEAD_W.img, { merge: VerticalMergeType.RESTART, margins: { top: 0, bottom: 0, left: 0, right: 0 } }),
       ],
     }),
     new TableRow({
@@ -107,7 +131,7 @@ const header = new Table({
           meta('{{例會時間說明}}{{^例會時間說明}}會議日期為每月第 1 個星期二 (中文) / 第 3 個星期二 (English){{/例會時間說明}}'),
           meta('{{地點}}'),
         ], HEAD_W.names),
-        cell([para(run(''))], HEAD_W.img, { fill: '888888', merge: VerticalMergeType.CONTINUE, borders: RULE }),
+        cell([para(run(''))], HEAD_W.img, { merge: VerticalMergeType.CONTINUE, borders: RULE }),
       ],
     }),
   ],

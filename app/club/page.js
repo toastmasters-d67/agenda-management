@@ -4,7 +4,7 @@ import { useEffect } from 'react';
 import { apiJson } from '@/lib/api';
 import { setAuth, clearAuth, applyRoleUI } from '@/lib/auth';
 import { AGENDA_TEMPLATES, TEMPLATE_OPTIONS, templateAssetDefaults } from '@/lib/agendaTemplates';
-import { WORD_TEMPLATE_FIELD, WORD_FIELDS, WORD_LOOPS, WORD_DEFAULT_TEMPLATE, checkWordTemplate, wordKnownTags } from '@/lib/wordExport';
+import { WORD_TEMPLATE_FIELD, WORD_FIELDS, WORD_LOOPS, WORD_PICTURES, WORD_DEFAULT_TEMPLATE, checkWordTemplate, wordKnownTags } from '@/lib/wordExport';
 import { CUSTOM_ROLES_FIELD, MEETING_ROLES, newCustomRoleId } from '@/lib/meetingRoles';
 import Sidebar from '@/components/Sidebar';
 import './club.css';
@@ -610,6 +610,7 @@ function wordHelpHtml() {
     <p>在 Word 裡輸入 <code>{{標記}}</code>，下載時會換成當次例會的資料。重複的項目（演講、講評員…）把開頭
       <code>{{#演講}}</code> 與結尾 <code>{{/演講}}</code> 放在表格的同一列，該列會依人數重複。建議從「下載預設範本」開始改。</p>
     ${groups}${loops}
+    <div class="word-help-group"><strong>圖片</strong>：在 Word 放一張佔位圖片，替代文字設為標記，下載時換成當次的圖片（裁成佔位圖的大小）<ul>${rows(WORD_PICTURES)}</ul></div>
   </details>`;
 }
 
