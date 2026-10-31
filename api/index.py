@@ -3029,8 +3029,11 @@ def _platform_texts(svc, ctx, cc, fb_text: str, platforms: list) -> dict:
     return {p: {"text": texts[p], "enabled": True} for p in platforms}
 
 
-def _governance_record(resp, req, key_source: str) -> dict:
+def _governance_record(resp, req, key_source: str, cc=None) -> dict:
     return {
+        # The model's content as approved — a poster on another template is
+        # re-planned from this, so its role highlights are the reviewed ones.
+        "content": cc.model_dump(mode="json") if cc is not None else None,
         "postType": resp.post_type,
         "qc": [c.model_dump() for c in resp.qc],
         "complianceNotes": [n.model_dump() for n in resp.compliance_notes],
@@ -3052,7 +3055,8 @@ def _save_governed(cur, post_id: Optional[int], club_id: int, agenda_id: int, ki
         if row[1] != club_id:
             raise HTTPException(status_code=400, detail="這則貼文與那場議程不屬於同一個分會")
         cur.execute(
-            "UPDATE social_posts SET agenda_id=%s, kind=%s, title=%s, body=%s, variants=%s::jsonb,"
+            "UPDATE social_posts SET agenda_id=%s, kind=%s, title=COALESCE(NULLIF(title,''),%s),"
+            " body=%s, variants=%s::jsonb,"
             " governance=%s::jsonb, review_state='pending', reviewed_by=NULL, reviewed_at=NULL,"
             " status='draft', updated_at=NOW() WHERE id=%s",
             (agenda_id, kind, title[:200], body, json.dumps(variants), json.dumps(governance), post_id))
@@ -3118,7 +3122,7 @@ def _store_governed_result(svc, ctx, cc, resp, user, post_id, agenda_id, kind, p
     variants = _platform_texts(svc, ctx, cc, resp.facebook or "", platforms)
     theme = ctx.req.topic.title_zh or ctx.req.topic.title_en
     title = ("宣傳｜" if kind == "promo" else "回顧｜") + (theme or "例會")
-    governance = _governance_record(resp, ctx.req, source)
+    governance = _governance_record(resp, ctx.req, source, cc)
     with get_db() as conn:
         with conn.cursor() as cur:
             new_id = _save_governed(cur, post_id, svc.profile.club_id, agenda_id, kind, title,
@@ -3240,9 +3244,11 @@ def _build_poster(post: dict, club_id: int, req: PosterRequest) -> dict:
     if req.template_id and req.template_id != plan.get("template_id"):
         # Another template: the same content and facts, re-planned for its
         # page count. Nothing is regenerated.
+        if not gov.get("content"):
+            raise HTTPException(status_code=400,
+                                detail="這則貼文產生得比較早，只能用原本的模板；要換模板請重新產生")
         preq = PostRequest.model_validate(gov.get("request") or {})
-        cc = CanonicalContent(post_type=preq.post_type, poster_headline=plan.get("fields", {}).get("HEADLINE", ""),
-                              brand_signature=plan.get("fields", {}).get("BRAND_SIGNATURE", ""))
+        cc = CanonicalContent.model_validate(gov["content"])
         plan = pptx_renderer.build_poster_plan(preq, cc, profile.settings(), [tpl], tpl["id"]) or plan
         if plan.get("dropped_roles"):
             raise HTTPException(status_code=400, detail="這個模板頁數不夠，會漏掉角色："
@@ -3411,6 +3417,10 @@ def create_post_template(req: PostTemplateRequest,
     use = req.use.upper()
     if use not in ("PRE_EVENT", "POST_REVIEW"):
         raise HTTPException(status_code=400, detail="用途必須是 PRE_EVENT（宣傳）或 POST_REVIEW（回顧）")
+    # Only a file uploaded under this club (POST /upload/presign files it
+    # there) — not some other club's file that happens to be in the bucket.
+    if not R2_PUBLIC_URL or not req.file_url.startswith(f"{R2_PUBLIC_URL}/media/clubs/{cid}/"):
+        raise HTTPException(status_code=400, detail="模板檔案必須是上傳到本分會的檔案")
     path = _download_r2(req.file_url, ".pptx")
     try:
         result = check_poster_template(path, use)
@@ -7164,12 +7174,15 @@ def _tool_list_machines(caller, args):
 
 
 def _tool_pair_machine(caller, args):
+    # pair_machine's role check is a FastAPI dependency, which a direct call skips.
+    _officer_only(caller)
     out = pair_machine(MachinePairRequest(**{k: v for k, v in args.items()
                                              if k in MachinePairRequest.model_fields}), caller)
     return _tool_text("已配對，名牌下次更新時會顯示該會員", out)
 
 
 def _tool_update_machine(caller, args):
+    _officer_only(caller)
     fields = {k: v for k, v in args.items() if k in MachineUpdateRequest.model_fields}
     out = update_machine(int(args["machine_id"]), MachineUpdateRequest(**fields), caller)
     return _tool_text(f"已更新機台 #{args['machine_id']}（狀態：{out['status']}）", out)

@@ -223,3 +223,51 @@ def test_poster_after_approval_is_a_filled_pptx(api, club, monkeypatch):
     prs = Presentation(io.BytesIO(data))
     text = "\n".join(sh.text_frame.text for s in prs.slides for sh in s.shapes if sh.has_text_frame)
     assert "庭敏" in text and not re.search(r"\{\{[A-Z0-9_]+\}\}", text)
+
+
+def test_another_poster_template_uses_the_approved_highlights(api, club, monkeypatch):
+    import io
+    from pptx import Presentation
+    index, client = api
+    fake = _FakeR2()
+    monkeypatch.setattr(index, "_r2", lambda: fake)
+    h = club["headers"]["club_admin"]
+    post = generate(client, club, kind="recap")
+    # What the model wrote (and the officer approved) differs from the raw notes.
+    with index.get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT governance FROM social_posts WHERE id=%s", (post["id"],))
+            gov = cur.fetchone()[0]
+            for hl in gov["content"]["role_highlights"]:
+                hl["highlight"] = f"核可過的描述：{hl['name']}"
+            cur.execute("UPDATE social_posts SET governance=%s::jsonb WHERE id=%s", (json.dumps(gov), post["id"]))
+    client.post(f"/api/social-posts/{post['id']}/review",
+                json={"action": "approve", "confirmed": gov["aiWrittenHighlights"]}, headers=h)
+    other = next(t for t in ("recap_skeleton_v1", "recap_yellow_v1")
+                 if t != gov["posterPlan"]["template_id"])
+    r = client.post(f"/api/social-posts/{post['id']}/poster", json={"template_id": other}, headers=h)
+    assert r.status_code == 200, r.text
+    (data, _), = [(v, k) for k, v in fake.objects.items()]
+    text = "\n".join(sh.text_frame.text for s in Presentation(io.BytesIO(data)).slides
+                     for sh in s.shapes if sh.has_text_frame)
+    assert "核可過的描述：Bill" in text
+
+
+def test_a_template_must_be_this_clubs_upload(api, club, monkeypatch):
+    index, client = api
+    monkeypatch.setattr(index, "R2_PUBLIC_URL", "https://r2.example")
+    r = client.post("/api/post-templates", headers=club["headers"]["club_admin"],
+                    json={"club_id": club["id"], "use": "PRE_EVENT",
+                          "file_url": "https://r2.example/media/clubs/999999/x.pptx"})
+    assert r.status_code == 400 and "本分會" in r.json()["detail"]
+
+
+def test_regenerating_keeps_a_title_the_user_wrote(api, club):
+    _, client = api
+    h = club["headers"]["club_admin"]
+    post = generate(client, club)
+    payload = {k: post[k] for k in ("status", "body", "variants", "images", "kind")}
+    client.put(f"/api/social-posts/{post['id']}", headers=h,
+               json={**payload, "agenda_id": post["agendaId"], "title": "我自己的標題"})
+    again = generate(client, club, post_id=post["id"])
+    assert again["title"] == "我自己的標題"

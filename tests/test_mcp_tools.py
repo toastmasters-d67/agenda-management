@@ -175,3 +175,13 @@ def test_catalogue_lists_the_new_tools(index, env):
     r = TestClient(index.app).get("/api/mcp/catalog", headers={"Authorization": f"Bearer {token}"})
     assert r.status_code == 200
     assert "start_post" in json.dumps(r.json(), ensure_ascii=False)
+
+
+def test_members_cannot_use_the_officer_only_machine_tools(index, env):
+    member = {**env["officer"], "role": "club_member"}
+    for name, args in (("pair_machine", {"code": "123456", "username": "x"}),
+                       ("update_machine", {"machine_id": 1, "name": "x"}),
+                       ("list_machines", {})):
+        with pytest.raises(index.HTTPException) as e:
+            call(index, name, member, args)
+        assert e.value.status_code == 403

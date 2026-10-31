@@ -178,6 +178,7 @@ async function onClubChange() {
   const v = document.getElementById('clubPickerSelect').value;
   selectedClubId = v ? parseInt(v, 10) : null;
   current = null;
+  posterTemplates = [];       // another club's templates
   await Promise.all([loadPosts(), loadAgendas(), loadSocialAccounts()]);
   renderEditor();
 }
@@ -814,14 +815,19 @@ async function reviewPost(action) {
 async function makePoster() {
   if (!current?.id) return;
   const template_id = document.getElementById('posterTpl')?.value || '';
+  // Open the tab inside the click: one opened after the await is a popup to
+  // the browser and gets blocked.
+  const tab = window.open('', '_blank');
   toast('正在產生海報…');
   try {
     const out = await apiJson(`/social-posts/${current.id}/poster`, {
       method: 'POST', body: { template_id },
     });
-    window.open(out.url, '_blank', 'noreferrer');
+    if (tab) tab.location.href = out.url;
+    else window.location.href = out.url;
     toast(`已產生「${out.templateName}」海報`);
   } catch (e) {
+    tab?.close();
     toast(e.message || '產生海報失敗', true);
   }
 }
@@ -1140,9 +1146,15 @@ async function runGenerate() {
       },
     });
     if (out.post) {
-      // Governed: the server already saved it, pending review.
+      // Governed: the server already saved it, pending review. Attachments
+      // uploaded this session but not saved yet are not part of what the
+      // server has — keep them, left unsaved, so they are not lost.
+      const unsavedImages = current.images;
       current = normalisePost(out.post);
       snapshot();
+      if (JSON.stringify(unsavedImages) !== JSON.stringify(current.images) && unsavedImages.length) {
+        current.images = unsavedImages;
+      }
       await Promise.all([loadPosts(), loadPosterTemplates()]);
       restoreForm();
       closeGenModal();
