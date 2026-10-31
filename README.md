@@ -51,6 +51,8 @@ EntrepreneurAgenda/
 ├── middleware.js             # 未登入導向 /login；/api、/svc、/.well-known 放行
 ├── next.config.mjs           # 舊 .html 網址轉址、/index → /agenda
 ├── api/index.py              # FastAPI（本地開發 & 正式環境共用）
+├── api/_postgen/             # 受控貼文引擎（整併自 PostGenerator；底線開頭，Vercel 不會當成 function）
+├── tests/                    # pytest：引擎單元測試 + 對測試資料庫的 API／MCP 測試
 ├── requirements.txt          # Python 套件
 ├── package.json              # Node 套件（next / react / jose）
 ├── vercel.json               # /api/* 與 /.well-known/* 交給 api/index.py
@@ -590,6 +592,38 @@ Threads 帳號必須是**公開**的，私人帳號拿不到權杖。
 
 **宣傳缺日期、地址或入場費會被擋下**（`_KIND_REQUIRED`），訊息指名缺哪一個、去哪裡填。缺了還硬產，會得到一則看起來完成、實際上沒人能赴約的邀請。
 
+### 受控生成：宣傳與回顧（整併自 PostGenerator）
+
+`promo`（例會宣傳）與 `recap`（例會回顧）**綁定例會時**，文案改由受控引擎 `api/_postgen` 產生。這套引擎來自 D67 的 [post-generator](https://github.com/toastmasters-d67/post-generator)（作者 Asher，`4085048`），2026-11 整併進來，原系統退役、資料不搬。`other` 與沒綁定例會的貼文照舊走自由生成。
+
+引擎守三條紅線：
+
+1. **事實不經 AI**：日期、時間、地點、交通、費用、報名連結、人名、角色名稱由 renderer 直接從結構化資料印出；模型只寫開場、故事、角色亮點這些「可變段落」。模型在段落裡寫錯日期，資訊欄也不會跟著錯。
+2. **固定元素不可刪改**：品牌定位句、固定 hashtag 逐字帶入。
+3. **缺漏不補完**：必填事實缺了標成「[需由使用者提供]」並擋下；回顧文沒有亮點筆記的角色，AI 只寫中性的職責描述，而且會**指名列出**是哪幾位。
+
+| 步驟 | 在哪裡 |
+|---|---|
+| 事實來源 | 議程（日期、時間、地點、主題、各角色）＋分會設定（入場費、交通、預設地點與時間）＋貼文品牌設定（報名連結）。回顧文的「下次例會」取同分會的下一份議程 |
+| 生成 | `GenerationService`（`api/_postgen/service.py`），品質檢查沒過會重生一次 |
+| 品質檢查 | 事實白名單（QC-01）、活動資訊（QC-03）、角色逐字比對（QC-04）、禁用詞（QC-05）、報名連結（QC-08）。`crit` 就擋下，不能核可 |
+| 各平台版本 | Facebook 是引擎的原生輸出；Instagram（連結改成「在個人簡介」）與 Threads（500 字內、只留標題鉤子與事實行）由 `renderers/social.py` **從同一份內容程式改寫**，不另外叫模型寫——另寫的版本沒有東西在檢查它的事實 |
+| 存檔 | 伺服器直接存成 `social_posts` 一列，`review_state='pending'`，品質檢查結果放 `governance`。**這兩個欄位只有伺服器寫**，瀏覽器送來的一律不收 |
+| 人工核可 | 編輯器的治理面板：幹部確認 AI 補寫的角色後按「核可」。被擋下的不能核可。**核可後改了文字（主文案或任一平台版本）會自動回到待核可**；只換圖片不會 |
+| 發布與海報 | 未核可時發布（網頁與 MCP 的 `publish_post` 都在 `_run_publish_job` 擋）與 PPTX 海報都會被拒絕 |
+
+**PPTX 海報**：設計師做的 `.pptx` 模板，程式只把 `{{HEADLINE}}`、`{{DATE}}`、`{{VENUE}}` 這類標記換成值（`api/_postgen/infrastructure/pptx/template_filler.py`），版面配色完全由模板決定。內建四個模板在 `api/_postgen/assets/templates/pptx/`；分會可以在「貼文品牌設定」上傳自己的（存 R2，表 `post_templates`），上傳時會檢查必要標記（`domain/template_tokens.py`）。回顧模板預留的角色頁不夠時會先合併未填滿的頁，還是不夠就**擋下並列出漏掉的人**。
+
+**貼文品牌設定**（`/social` →「貼文品牌設定」，表 `club_post_prefs`）：報名連結（**必填**，沒有就過不了 QC-08）、品牌定位句、固定 hashtag、禁用詞、品牌語氣、宣傳／回顧各自的補充規則、情緒／長度／emoji 的預設值。分會名一律取自 `clubs`，不讓人打字——打錯會讓貼文署名成別的分會。
+
+整併時對 PostGenerator 的改動（其餘照搬）：
+
+- **多分會化**：原本寫死 Chill Hi High 的星期（一律印「（二）」）、預設時間、報名表單、hashtag 與預設語氣，改成依日期計算或讀分會設定。
+- **本週問句改選填**：多數分會的議程沒有這一欄，照原本列為必填會擋下每一則宣傳。「主題缺英文」的警告（CHH 的雙語定位）拿掉。
+- **找不到 prompt 檔改為報錯**：原本回空字串——整併時目錄層數一變，紅線規則整段安靜地從 prompt 裡消失。
+- **不搬**：帳號／session、SQLite、它自己的 MCP 與 OAuth、金鑰加密（都用 EA 現有的）、「模板庫為空時程式畫圖」的舊路徑、規劃書列為零引用的骨架模組、議程文字解析。
+- 模型呼叫走 EA 的 AI 帳號三層取用（個人 → 分會 → 伺服器），Claude 與 ChatGPT 都能用；測試與本機示範設 `LLM_FAKE=1` 用假模型。
+
 ### 例會資訊從哪裡來
 
 三個欄位散在兩張表，而且其中兩個一度是拼不上的：
@@ -863,7 +897,12 @@ https://<你的網域>/api/mcp
 | `get_post` | `posts:read` | 一則貼文的完整內容（主文案、各平台版本、圖片、發布狀態） |
 | `create_post` | `posts:write` | 建立草稿（`promo` / `recap` / `other`） |
 | `update_post` | `posts:write` | 修改標題、文案、用途、狀態、綁定例會、各平台版本 |
-| `generate_copy` | `ai:generate` | 用 AI 產生文案並存進貼文，**消耗呼叫者（或分會共用）的 AI 額度** |
+| `generate_copy` | `ai:generate` | 用 AI 產生文案並存進貼文，**消耗呼叫者（或分會共用）的 AI 額度**。宣傳／回顧且綁定例會時走受控流程，結果是待核可的貼文 |
+| `start_post` | `posts:write` | 受控貼文兩段式的第一步：回傳寫作規則、這場例會的資料與 `content_schema`，**由呼叫端自己的 AI 寫**，不花分會額度 |
+| `submit_post` | `posts:write` | 交回 `content`；系統套事實與固定句、跑品質檢查，通過才存成待核可的貼文，沒過說明原因、不存 |
+| `get_post_prefs` / `update_post_prefs` | `posts:read` / `posts:write` | 貼文品牌設定（報名連結、定位句、固定 hashtag、禁用詞、語氣、補充規則、預設旋鈕） |
+| `list_post_templates` | `posts:read` | PPTX 海報模板（內建＋分會上傳） |
+| `make_post_poster` | `posts:write` | 已核可的受控貼文 → 可編輯 PPTX，回傳 R2 連結。未核可拒絕 |
 | `publish_post` | `publish` | 發布到 Facebook／Instagram／Threads，**公開且無法透過本系統收回**。已發布過的平台會略過，要再發一則得帶 `republish: true` |
 | `add_post_image` | `posts:write` | 把 AI 客戶端自己做的圖（或任何圖）加到貼文：`image`（ChatGPT 的檔案參數，`_meta["openai/fileParams"]`）、`image_url`（公開 https）或 `image_base64`。存到 R2，15 MB 上限，只收 JPG／PNG／WebP／GIF（看檔頭判斷，不信副檔名） |
 | `remove_post_image` | `posts:write` | 依順序（從 1 開始）移除貼文的一張圖 |
@@ -883,6 +922,10 @@ https://<你的網域>/api/mcp
 | `update_club` | `clubs:write` | 修改分會欄位與版型設定，只改有給的；`settings` 給 `null` 刪除。**限系統管理員**（與 `PUT /api/clubs/{id}` 同規則） |
 | `create_club` | `clubs:write` | 建立分會。限系統管理員 |
 | `set_club_image` | `clubs:write` | 更換 Logo、各 QR code、第二頁圖片。限系統管理員 |
+| `set_word_template` | `clubs:write` | 上傳分會的 Word 議程範本（`file`／`file_url`／`file_base64`），伺服器檢查 `{{標記}}` 與迴圈是否成對，壞的拒收；`clear: true` 改回預設。限系統管理員 |
+| `set_custom_roles` | `clubs:write` | 整份取代分會自訂角色；帶原 `id` 才會保留已排的人。限系統管理員 |
+| `list_machines` | `posts:read` | 電子名牌機台與綁定的會員。分會管理員以上 |
+| `pair_machine` / `update_machine` | `clubs:write` | 用配對碼綁定名牌；改名、換綁、解除綁定、停用。分會管理員以上 |
 | `delete_post` | `posts:write` | 從系統刪除一則貼文（草稿或已發布的都可以），與網頁的刪除相同。只刪系統紀錄，已發到社群平台上的貼文不受影響——本系統不管理發布之後的社群貼文 |
 
 - **所有 scope 都公開宣告**（`scopes_supported` 與 401 挑戰都列出），所以客戶端會一起請求；但同意畫面上 `publish` 預設**不勾**，並標示「公開且無法收回」，要使用者自己勾。客戶端沒指定 scope 時給 `posts:read posts:write agendas:write ai:generate`。
@@ -896,6 +939,7 @@ https://<你的網域>/api/mcp
 - `tools/list` **一律列出全部工具**，並帶 `annotations`（`readOnlyHint` / `destructiveHint` / `openWorldHint`），客戶端（例如 ChatGPT）據此決定哪些呼叫要先問使用者。呼叫沒 scope 的工具會收到 403 + `insufficient_scope` 挑戰，挑戰裡的 scope 是「現有的＋缺的」，客戶端補授權後不會掉掉原本的權限。
 - **說明頁 `/mcp`** 的工具清單直接讀 `MCP_TOOLS`，新增工具會自動出現。新增時順手在 `_TOOL_SUMMARY` 寫一句給人看的說明、在 `_TOOL_GROUPS` 放進分組；需要一般會員或系統管理員權限的，也要更新 `_TOOL_MIN_ROLE`（它只是說明，實際權限仍由各工具裡的 `_officer_only`／`_system_admin_only` 決定）。
 - 工具層級的失敗（找不到貼文、平台未連接、缺欄位）回 `isError: true` 的結果讓模型自行修正，不回 JSON-RPC 錯誤。
+- **人工核可沒有 MCP 工具**，刻意的：核可是人確認 AI 寫的東西，讓 AI 助理自己核可等於沒有這道關卡。助理只會告訴使用者去網頁核可。
 
 ### 授權伺服器的設計
 
@@ -1136,6 +1180,28 @@ GitHub → Settings → Environments → `production` 需要的 secrets：
 
 ---
 
+### PostGenerator 退役（在 VM 上手動做）
+
+PostGenerator 的生成引擎已經在本專案裡（見「受控生成」），它原本的服務可以停掉。資料不搬（2026-11 決定重新開始）。這些步驟動到正式環境，**要人手動做**：
+
+1. **先通知 PostGenerator 的使用者**改用本系統的「社群發文」，並提醒他們 PostGenerator 上的歷史專案不會搬過來。
+2. **最後備份一次**：`docker compose -f /srv/post-generator/docker-compose.yml exec app python -m app.tools.backup`，確認 `/data/backups` 有新檔。
+3. **停服務但先留 volume**：`cd /srv/post-generator && docker compose down`（不要加 `-v`，觀察一段時間再刪）。
+4. **nginx**：`/etc/nginx/sites-enabled/postgen` 的 443 區塊裡，原本屬於 PostGenerator 的 `location /` 改成導到本系統，其餘（`include snippets/club-management*.conf` 與 MCP 的 `/.well-known/...club-management` 那兩條）不動：
+
+   ```nginx
+   location = / { return 302 /club-management; }
+   location /   { return 404; }
+   ```
+
+   `sudo nginx -t && sudo systemctl reload nginx`。PostGenerator 自己的 MCP 連線（`/mcp`）會失效，那是預期的，改連本系統的 `/club-management/api/mcp`。
+5. **GitHub**：`toastmasters-d67/post-generator` 設為 Archived（唯讀），停用它的 Deploy workflow。
+6. 觀察一兩週沒問題後再 `docker volume rm` 掉 PostGenerator 的 volume、刪除 GHCR 上的舊 image。B1s 的記憶體會因此寬鬆一些。
+
+本專案這邊不需要新的環境變數；**正式環境不可以設 `LLM_FAKE`**（設了會用假模型產文案）。
+
+---
+
 ## 本地開發
 
 本機要同時跑兩個行程：FastAPI（:8001）與 Next.js（:3000）。瀏覽器開 `http://localhost:3000`，Next.js 的 `/svc/*` 代理會把請求轉到 `http://localhost:8001/api/*`（可用 `FASTAPI_BASE_URL` 覆寫）。
@@ -1167,6 +1233,22 @@ npm run dev
 |----------|------|
 | Swagger UI | http://localhost:8001/docs |
 | ReDoc | http://localhost:8001/redoc |
+
+### 測試
+
+```powershell
+# 引擎單元測試：不需要資料庫
+python -m pytest -q tests/postgen
+
+# 全部（含 API／MCP）：需要一個「丟了也沒關係」的 PostgreSQL，先跑完 migration
+docker run -d --name ea-test-pg -e POSTGRES_PASSWORD=test -e POSTGRES_DB=agenda -p 127.0.0.1:55432:5432 postgres:16-alpine
+$env:DATABASE_URL = "postgresql://postgres:test@127.0.0.1:55432/agenda"; alembic upgrade head
+$env:TEST_DATABASE_URL = $env:DATABASE_URL; python -m pytest -q tests
+```
+
+- **`TEST_DATABASE_URL` 絕對不要指向正式資料庫**：測試會建立、刪除分會與使用者。本機 `.env` 的 `DATABASE_URL` 通常就是正式庫，所以測試只看 `TEST_DATABASE_URL`，沒設就跳過 API 測試。
+- 測試一律用假模型（`LLM_FAKE=1`），也把 R2 換成假的——本機 `.env` 裡是正式 R2 的憑證。
+- CI（`.github/workflows/ci-cd.yml`）起一個 Postgres service，跑完整 migration 再跑 `pytest`。
 
 ### 本地 .env 設定
 

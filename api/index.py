@@ -7995,8 +7995,9 @@ _TOOL_MIN_ROLE = {
     **{n: "club_member" for n in (
         "whoami", "switch_club", "list_clubs", "get_club", "list_members", "list_meetings",
         "get_meeting", "get_agenda", "export_agenda", "get_roles",
-        "list_posts", "get_post")},
-    **{n: "system_admin" for n in ("update_club", "create_club", "set_club_image")},
+        "list_posts", "get_post", "get_post_prefs", "list_post_templates")},
+    **{n: "system_admin" for n in ("update_club", "create_club", "set_club_image",
+                                   "set_word_template", "set_custom_roles")},
 }
 # What the help page says about each tool. The `description` in MCP_TOOLS is
 # written for the model (ids, argument shapes, when to call it); people need
@@ -8031,11 +8032,23 @@ _TOOL_SUMMARY = {
     "add_post_image": "把圖片加進貼文（AI 助理做的圖、圖片網址或檔案）。",
     "remove_post_image": "從貼文移除一張圖片。",
     "generate_post_image": "用 AI 產生圖片並加進貼文，會用到 OpenAI 額度。",
-    "publish_post": "發布到 Facebook、Instagram、Threads。公開且無法透過本系統收回。",
+    "publish_post": "發布到 Facebook、Instagram、Threads。公開且無法透過本系統收回。受控貼文要先在網頁核可。",
+    "start_post": "用你自己的 AI 寫例會宣傳或回顧：先取得寫作規則與這場例會的資料，不花分會的 API 額度。",
+    "submit_post": "交回寫好的文案；系統套上事實、跑品質檢查，通過就存成待核可的貼文。",
+    "get_post_prefs": "查看分會的貼文品牌設定（報名連結、定位句、固定 hashtag、禁用詞、語氣）。",
+    "update_post_prefs": "修改貼文品牌設定。",
+    "list_post_templates": "列出可用的 PPTX 海報模板。",
+    "make_post_poster": "為已核可的貼文產生可編輯的 PPTX 海報。",
+    "set_word_template": "上傳分會自己的 Word 議程範本，或改回系統預設。",
+    "set_custom_roles": "設定分會自己的角色（角色目錄以外的）。",
+    "list_machines": "列出分會的電子名牌與綁定的會員。",
+    "pair_machine": "用名牌上的配對碼把名牌綁到一位會員。",
+    "update_machine": "改名牌名稱、換綁、解除綁定或停用。",
 }
 _TOOL_GROUPS = (
     ("身分", ("whoami", "switch_club")),
-    ("分會", ("list_clubs", "get_club", "update_club", "create_club", "set_club_image")),
+    ("分會", ("list_clubs", "get_club", "update_club", "create_club", "set_club_image",
+              "set_word_template", "set_custom_roles")),
     ("議程", ("list_meetings", "get_meeting", "get_agenda", "create_agenda", "update_agenda",
               "delete_agenda", "export_agenda", "set_agenda_theme_image",
               "generate_agenda_theme_image")),
@@ -8043,6 +8056,9 @@ _TOOL_GROUPS = (
     ("社群貼文", ("list_posts", "get_post", "create_post", "update_post", "delete_post",
                   "generate_copy", "add_post_image", "remove_post_image",
                   "generate_post_image", "publish_post")),
+    ("受控貼文", ("start_post", "submit_post", "get_post_prefs", "update_post_prefs",
+                  "list_post_templates", "make_post_poster")),
+    ("電子名牌", ("list_machines", "pair_machine", "update_machine")),
 )
 
 
