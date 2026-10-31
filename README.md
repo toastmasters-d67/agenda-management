@@ -225,6 +225,7 @@ EntrepreneurAgenda/
 - **上傳檢查**：選檔當下在瀏覽器檢查。標記寫壞（例如迴圈沒關）會拒收並列出原因；系統不認得的標記只警告（下載時會是空白）。
 - **填入引擎**：[docxtemplater](https://docxtemplater.com/)（`docxtemplater` + `pizzip`），全在瀏覽器執行，後端不經手 Word 檔內容。
 - **改預設範本**：改 `scripts/build-word-template.mjs` 後執行 `node scripts/build-word-template.mjs`，重新產生 `public/templates/agenda-default.docx` 並一起 commit。
+- **企業家、Chill Hi High 分會的範本**：`scripts/build-word-template-entrepreneur.mjs`、`scripts/build-word-template-chillhihigh.mjs` 依各自版型產生 `scripts/word-templates/` 下的 .docx。這些不由系統內建，是以分會自訂範本的方式上傳（分會設定 → Word 匯出範本）；改版後重新產生再上傳即可。範本裡的 Logo、QR、圖片是內建素材，分會換圖時也要重新產生。
 
 ## 角色安排（`/roles`）
 

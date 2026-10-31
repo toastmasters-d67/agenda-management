@@ -1670,6 +1670,7 @@ async function buildWordBlob() {
   const data = collectSaveData();
   const values = buildWordData(data, club, {
     times: calcTimes(data.speeches), displayMember, formatDate, varietySession, pathwayLabel: speechPathwayLabel,
+    durationLabels, signals,
   });
   return fillWordTemplate(await res.arrayBuffer(), values);
 }
