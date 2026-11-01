@@ -1143,9 +1143,12 @@ details[open] summary::before { content: "▼ "; }
 .tmpl-chillhihigh .ch-theme-q { font-weight: 400; margin-top: 3px; font-size: 7.5pt; }
 
 .tmpl-chillhihigh .ch-table { width: 100%; border-collapse: collapse; flex: 1; height: 0; }
+/* --ch-fit (< 1) is set by the template's fit() when a long meeting would run
+   past the sheet: the table and the roles glossary shrink together. */
+.tmpl-chillhihigh .ch-table { font-size: calc(8pt * var(--ch-fit, 1)); }
 .tmpl-chillhihigh .ch-table th,
 .tmpl-chillhihigh .ch-table td {
-  border: 0.5px solid #cbd5e1; padding: 3px 5px; vertical-align: middle;
+  border: 0.5px solid #cbd5e1; padding: calc(3px * var(--ch-fit, 1)) 5px; vertical-align: middle;
 }
 .tmpl-chillhihigh .ch-table thead th {
   background: #f1f5f9; font-size: 7.5pt; text-align: center; color: #334155;
@@ -1186,9 +1189,9 @@ details[open] summary::before { content: "▼ "; }
   border: 0.5px solid #cbd5e1; border-top: none;
 }
 .tmpl-chillhihigh .ch-role {
-  display: flex; gap: 6px; padding: 4px 6px;
+  display: flex; gap: 6px; padding: calc(4px * var(--ch-fit, 1)) 6px;
   border-right: 0.5px solid #e5e7eb; border-bottom: 0.5px solid #e5e7eb;
-  font-size: 6.8pt;
+  font-size: calc(6.8pt * var(--ch-fit, 1));
 }
 .tmpl-chillhihigh .ch-role-t { font-weight: 700; color: #1f2937; flex: 0 0 38%; }
 .tmpl-chillhihigh .ch-role-d { color: #4b5563; flex: 1; }
