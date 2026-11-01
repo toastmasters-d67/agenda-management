@@ -1,4 +1,5 @@
-// Builds scripts/word-templates/entrepreneur.docx — a Word template in the
+// Builds scripts/word-templates/entrepreneur.docx (or, with `en`,
+// entrepreneur-en.docx for English meetings) — a Word template in the
 // Entrepreneur agenda's layout (lib/agendaTemplates.js `entrepreneur`, styles
 // under `.tmpl-entrepreneur` in agenda.css): header with logo, club names and
 // a theme-image box, theme row, mission box, the agenda table with its time /
@@ -9,7 +10,7 @@
 // It isn't served by the app: the club uploads it as its own template
 // (分會設定 → Word 匯出範本), like any club-made .docx.
 //
-//   node scripts/build-word-template-entrepreneur.mjs
+//   node scripts/build-word-template-entrepreneur.mjs [en]
 //
 // Marks are {{…}} (WORD_FIELDS / WORD_LOOPS in lib/wordExport.js). A loop's
 // open and close marks sit in the same table row, so the row repeats; a block's
@@ -30,7 +31,48 @@ import {
 } from 'docx';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const OUT = path.join(root, 'scripts/word-templates/entrepreneur.docx');
+const EN = process.argv[2] === 'en';
+const OUT = path.join(root, `scripts/word-templates/entrepreneur${EN ? '-en' : ''}.docx`);
+
+// The printed labels, as on the web agenda (TRANSLATIONS in app/agenda/page.js).
+const T = EN ? {
+  founded: 'Founded Since:', fee: 'Fee', date: 'Date',
+  schedule: '{{例會時間說明英文}}{{^例會時間說明英文}}Meeting on every 1st (中文) and 3rd (English) Tuesday evening{{/例會時間說明英文}}',
+  themeLabel: 'Meeting  Theme:', meetingNo: 'Meeting No.{{例會次數}}',
+  missionTitle: '— Mission of Toastmasters Club —',
+  missionText: '"We provide a supportive and positive learning experience in which members are empowered to develop communication and leadership skills, resulting in greater self-confidence and personal growth."',
+  thTime: 'Time', thAgenda: 'Agenda (Program)', thTaker: 'Assignment Taker',
+  reception: 'Reception & Social Gathering',
+  opening: ["1' Calling Meeting to Order", "2' Welcome Guests & TME", "3' Toastmaster of The Evening",
+    "2' Timer｜Meeting Rules Explanation", "2' Ah-counter｜Meeting Rules Explanation"],
+  variety: 'Variety Session', prepared: 'Prepared Speech', photo: 'Group Photo', all: 'All Participants',
+  intermission: '— Intermission & Social Time ({{休息分鐘}} min) —', topics: 'Table Topics Session',
+  evaluation: 'Evaluation Session', evaluator: 'Individual Evaluator for Speaker #{{序號}}',
+  timerReport: 'Timer Report', ahReport: 'Ah-counter Report', langEval: 'Language Evaluation',
+  generalEval: 'General Evaluation', evalEval: "Evaluator's Evaluator #{{序號}}",
+  tmeClosing: 'Toastmaster of the Evening', awards: 'Awards Presentation', sharing: 'Sharing & Feedback',
+  pathways: '⏱ Pathways', pathwayName: '{{英文名稱}}', timeRules: 'Time Rules',
+  trRows: ['Prepared Speech', 'Table Topic', 'Evaluator', 'LE&GE'],
+  fb: 'Follow us on FB!', line: 'Connect us with LINE@', adjournment: '— Meeting Adjournment —',
+} : {
+  founded: '成立日期:', fee: '入場費', date: '時間',
+  schedule: '{{例會時間說明}}{{^例會時間說明}}會議日期為每月第 1 個星期二 (中文) / 第 3 個星期二 (English){{/例會時間說明}}',
+  themeLabel: '會議主題：', meetingNo: '第 {{例會次數}} 次例會',
+  missionTitle: '——— 演講會宗旨 ———',
+  missionText: '訓練溝通及領導能力，強調終身學習。參加國際演講協會是增進溝通技巧的最佳方法，除了大幅增加公開演講的自信外，在這裡所學到的領導技巧，更是您邁向成功之路的必備基石。',
+  thTime: '時間', thAgenda: '議程表', thTaker: '角色擔任',
+  reception: '報到 & 交誼',
+  opening: ["1' 宣布例會開始－領導宣讀宣言", "2' 會長致歡迎詞", "3' 總主持人", "2' 計時員", "2' 贅語記錄員"],
+  variety: '多元單元', prepared: '指定演講', photo: '大合照', all: '所有與會者',
+  intermission: '——— 休息 & 交誼時間（{{休息分鐘}} 分鐘）———', topics: '即席問答',
+  evaluation: '講評時間', evaluator: '個別講評員 #{{序號}}',
+  timerReport: '計時員報告', ahReport: '贅語記錄員報告', langEval: '語言講評',
+  generalEval: '總講評', evalEval: '講評員講評 #{{序號}}',
+  tmeClosing: '總主持人', awards: '贈感謝狀', sharing: '會後分享 & 來賓回饋',
+  pathways: '⏱ 學習路徑', pathwayName: '{{名稱}}', timeRules: '時間規則',
+  trRows: ['指定演講', '即席問答', '個別講評', '語言&總講評'],
+  fb: '追蹤我們的 FB！', line: '加入企業家 LINE 群組！', adjournment: '——— 會議圓滿 ———',
+};
 const media = (f) => fs.readFileSync(path.join(root, 'public/media', f));
 const LOGO = media('toastmasters_logo.png');
 const FB_QR = media('Entrepreneur/FacebookQR.png');
@@ -129,14 +171,14 @@ const header = new Table({
       children: [
         metaCell([
           meta('{{分會編號}}{{^分會編號}}No. 4069930{{/分會編號}}'),
-          meta('成立日期:'),
+          meta(T.founded),
           meta('{{成立日}}{{^成立日}}2014.06.29{{/成立日}}'),
           meta(''),
-          meta('入場費 : {{入場費}}'),
+          meta(`${T.fee} : {{入場費}}`),
         ], HEAD_W.logo),
         metaCell([
-          meta('時間 : {{例會日期}} ｜ {{時間}}', { bold: true }),
-          meta('{{例會時間說明}}{{^例會時間說明}}會議日期為每月第 1 個星期二 (中文) / 第 3 個星期二 (English){{/例會時間說明}}'),
+          meta(`${T.date} : {{例會日期}} ｜ {{時間}}`, { bold: true }),
+          meta(T.schedule),
           meta('{{地點}}'),
         ], HEAD_W.names),
         cell([para(run(''))], HEAD_W.img, { merge: VerticalMergeType.CONTINUE, borders: RULE }),
@@ -154,9 +196,9 @@ const themeRow = new Table({
   borders: NO_BORDERS,
   rows: [new TableRow({
     children: [
-      cell([para(run('會議主題：', { size: 15, italic: true }))], THEME_W.label),
+      cell([para(run(T.themeLabel, { size: 15, italic: true }))], THEME_W.label),
       cell([para(run('{{例會主題}}', { size: 34, bold: true, italic: true }), { align: AlignmentType.CENTER })], THEME_W.value),
-      cell([para(run('第 {{例會次數}} 次例會', { size: 14 }), { align: AlignmentType.RIGHT })], THEME_W.no),
+      cell([para(run(T.meetingNo, { size: 14 }), { align: AlignmentType.RIGHT })], THEME_W.no),
     ],
   })],
 });
@@ -168,8 +210,8 @@ const mission = new Table({
   borders: NO_BORDERS,
   rows: [new TableRow({
     children: [cell([
-      para(run('——— 演講會宗旨 ———', { size: 15, bold: true }), { align: AlignmentType.CENTER }),
-      para(run('訓練溝通及領導能力，強調終身學習。參加國際演講協會是增進溝通技巧的最佳方法，除了大幅增加公開演講的自信外，在這裡所學到的領導技巧，更是您邁向成功之路的必備基石。', { size: 14 }),
+      para(run(T.missionTitle, { size: 15, bold: true }), { align: AlignmentType.CENTER }),
+      para(run(T.missionText, { size: 14 }),
         { align: AlignmentType.CENTER, before: 20 }),
     ], WIDTH, { fill: BLUE, margins: { top: 80, bottom: 80, left: 110, right: 110 } })],
   })],
@@ -235,37 +277,37 @@ const agenda = new Table({
     new TableRow({
       tableHeader: true,
       children: [
-        cell([txt('時間', { bold: true, size: 15, align: C })], COL.time, { borders: BOX(GREEN_LINE), fill: GREEN }),
+        cell([txt(T.thTime, { bold: true, size: 15, align: C })], COL.time, { borders: BOX(GREEN_LINE), fill: GREEN }),
         cell([txt('')], DUR2, { borders: BOX(GREEN_LINE), fill: GREEN, span: 2 }),
-        cell([txt('議程表', { bold: true, size: 15, align: C })], COL.agenda, { borders: BOX(GREEN_LINE), fill: GREEN }),
-        cell([txt('角色擔任', { bold: true, size: 15, align: C })], COL.taker, { borders: BOX(GREEN_LINE), fill: GREEN }),
+        cell([txt(T.thAgenda, { bold: true, size: 15, align: C })], COL.agenda, { borders: BOX(GREEN_LINE), fill: GREEN }),
+        cell([txt(T.thTaker, { bold: true, size: 15, align: C })], COL.taker, { borders: BOX(GREEN_LINE), fill: GREEN }),
       ],
     }),
-    single('{{報到時間}}', "{{報到分鐘}}'", '報到 & 交誼', '{{接待}}'),
+    single('{{報到時間}}', "{{報到分鐘}}'", T.reception, '{{接待}}'),
     ...merged('{{開場時間}}', "{{開場分鐘}}'", [
-      ["1' 宣布例會開始－領導宣讀宣言", '{{宣布開會}}'],
-      ["2' 會長致歡迎詞", '{{會長致詞}}'],
-      ["3' 總主持人", '{{總主持人}}'],
-      ["2' 計時員", '{{計時員}}'],
-      ["2' 贅語記錄員", '{{贅語記錄員}}'],
+      [T.opening[0], '{{宣布開會}}'],
+      [T.opening[1], '{{會長致詞}}'],
+      [T.opening[2], '{{總主持人}}'],
+      [T.opening[3], '{{計時員}}'],
+      [T.opening[4], '{{贅語記錄員}}'],
     ]),
     // Shown only when the meeting has a variety session.
-    single('{{#多元單元}}{{時間}}', "{{分鐘}}'", '多元單元', '{{主持人}}{{/多元單元}}', { bold: true, fill: GREEN }),
-    sectionHead('{{演講時間}}', "{{演講分鐘}}'", '指定演講', '{{總主持人}}'),
+    single('{{#多元單元}}{{時間}}', "{{分鐘}}'", T.variety, '{{主持人}}{{/多元單元}}', { bold: true, fill: GREEN }),
+    sectionHead('{{演講時間}}', "{{演講分鐘}}'", T.prepared, '{{總主持人}}'),
     sectionRow('{{#演講}}{{時長}}', '{{講題}}  {{專案}}', '{{講者}}{{/演講}}'),
-    single('{{合照時間}}', "{{合照分鐘}}'", '大合照', '所有與會者'),
-    fullRow('——— 休息 & 交誼時間（{{休息分鐘}} 分鐘）———', { bold: true, italic: true, fill: GREY_ROW }),
-    single('{{即席時間}}', "{{即席分鐘}}'", '即席問答', '{{即席主持人}}', { bold: true, fill: GREEN }),
+    single('{{合照時間}}', "{{合照分鐘}}'", T.photo, T.all),
+    fullRow(T.intermission, { bold: true, italic: true, fill: GREY_ROW }),
+    single('{{即席時間}}', "{{即席分鐘}}'", T.topics, '{{即席主持人}}', { bold: true, fill: GREEN }),
     fullRow('', { borders: { top: NONE, bottom: NONE, left: NONE, right: NONE } }),
-    sectionHead('{{講評時間}}', "{{講評分鐘}}'", '講評時間', '{{總講評}}'),
-    sectionRow('{{#講評員}}{{時長}}', '個別講評員 #{{序號}}', '{{姓名}}{{/講評員}}'),
-    sectionRow('{{計時員報告時長}}', '計時員報告', '{{計時員}}'),
-    sectionRow('{{贅語報告時長}}', '贅語記錄員報告', '{{贅語記錄員}}'),
-    sectionRow('{{語言講評時長}}', '語言講評', '{{語言講評}}'),
-    sectionRow('{{總講評時長}}', '總講評', '{{總講評}}'),
-    sectionRow('{{#講評員講評}}{{時長}}', '講評員講評 #{{序號}}', '{{姓名}}{{/講評員講評}}'),
-    ...merged('{{閉幕時間}}', "{{閉幕分鐘}}'", [['總主持人', '{{總主持人}}'], ['贈感謝狀', '{{頒獎人}}']]),
-    single('{{分享時間}}', "{{分享分鐘}}'", '會後分享 & 來賓回饋', '{{分享回饋}}'),
+    sectionHead('{{講評時間}}', "{{講評分鐘}}'", T.evaluation, '{{總講評}}'),
+    sectionRow('{{#講評員}}{{時長}}', T.evaluator, '{{姓名}}{{/講評員}}'),
+    sectionRow('{{計時員報告時長}}', T.timerReport, '{{計時員}}'),
+    sectionRow('{{贅語報告時長}}', T.ahReport, '{{贅語記錄員}}'),
+    sectionRow('{{語言講評時長}}', T.langEval, '{{語言講評}}'),
+    sectionRow('{{總講評時長}}', T.generalEval, '{{總講評}}'),
+    sectionRow('{{#講評員講評}}{{時長}}', T.evalEval, '{{姓名}}{{/講評員講評}}'),
+    ...merged('{{閉幕時間}}', "{{閉幕分鐘}}'", [[T.tmeClosing, '{{總主持人}}'], [T.awards, '{{頒獎人}}']]),
+    single('{{分享時間}}', "{{分享分鐘}}'", T.sharing, '{{分享回饋}}'),
   ],
 });
 
@@ -280,7 +322,7 @@ const pathways = new Table({
     children: [
       cell([para(run('{{#學習路徑}}{{代碼}}｜', { size: 18, bold: true, color: '444444' }), { align: AlignmentType.RIGHT })], PW.code,
         { margins: { top: 10, bottom: 10, left: 0, right: 0 } }),
-      cell([para(run('{{名稱}}{{/學習路徑}}', { size: 17, italic: true, color: '444444' }))], PW.name,
+      cell([para(run(`${T.pathwayName}{{/學習路徑}}`, { size: 17, italic: true, color: '444444' }))], PW.name,
         { margins: { top: 10, bottom: 10, left: 0, right: 0 } }),
     ],
   })],
@@ -297,10 +339,10 @@ const timeRules = new Table({
   columnWidths: TR_W,
   rows: [
     trRow('', 'min', 'ok', 'max'),
-    trRow('指定演講', '5', '6', '7'),
-    trRow('即席問答', '1', '1.5', '2'),
-    trRow('個別講評', '2', '2.5', '3'),
-    trRow('語言&總講評', '3', '4', '5'),
+    trRow(T.trRows[0], '5', '6', '7'),
+    trRow(T.trRows[1], '1', '1.5', '2'),
+    trRow(T.trRows[2], '2', '2.5', '3'),
+    trRow(T.trRows[3], '3', '4', '5'),
   ],
 });
 
@@ -310,12 +352,12 @@ const qr = (data, label) => [
 ];
 
 const panel = [
-  para(run('⏱ 學習路徑', { size: 15, bold: true }), { align: C, after: 60 }),
+  para(run(T.pathways, { size: 15, bold: true }), { align: C, after: 60 }),
   pathways,
-  para(run('時間規則', { size: 20, bold: true }), { align: C, before: 200, after: 60 }),
+  para(run(T.timeRules, { size: 20, bold: true }), { align: C, before: 200, after: 60 }),
   timeRules,
-  ...qr(FB_QR, '追蹤我們的 FB！'),
-  ...qr(LINE_QR, '加入企業家 LINE 群組！'),
+  ...qr(FB_QR, T.fb),
+  ...qr(LINE_QR, T.line),
 ];
 
 // The agenda and the panel side by side; the panel's top lines up with the
@@ -341,7 +383,7 @@ const footer = new Table({
   columnWidths: [WIDTH],
   borders: NO_BORDERS,
   rows: [new TableRow({
-    children: [cell([para(run('——— 會議圓滿 ———', { size: 17, bold: true }), { align: C })], WIDTH,
+    children: [cell([para(run(T.adjournment, { size: 17, bold: true }), { align: C })], WIDTH,
       { fill: BLUE, margins: { top: 80, bottom: 80, left: 60, right: 60 } })],
   })],
 });
@@ -361,7 +403,9 @@ const doc = new Document({
 // How tall the agenda table may be, in mm: what is left of the A4 page once the
 // header, theme row, mission box and footer are placed, less a margin so a
 // long meeting still keeps to one page in Word and in LibreOffice (the PDF).
-const AGENDA_FILL_MM = 148;
+// English: rows estimate taller than Word draws them (Latin text wraps less
+// than the estimate assumes), so a larger value reaches the same page bottom.
+const AGENDA_FILL_MM = EN ? 160 : 148;
 
 fs.mkdirSync(path.dirname(OUT), { recursive: true });
 fs.writeFileSync(OUT, markFillTable(await Packer.toBuffer(doc), '{{報到時間}}', AGENDA_FILL_MM));
