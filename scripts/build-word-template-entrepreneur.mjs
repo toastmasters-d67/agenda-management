@@ -14,10 +14,16 @@
 // Marks are {{…}} (WORD_FIELDS / WORD_LOOPS in lib/wordExport.js). A loop's
 // open and close marks sit in the same table row, so the row repeats; a block's
 // time cell is merged down over its rows, loop rows included.
+//
+// The agenda table is marked {{填滿:AGENDA_FILL_MM}} (its alt-text title):
+// when a meeting is downloaded, that height is shared out over the rows it
+// actually has (lib/wordFit.js), so the page is full whether there are two
+// speeches or four — like the web agenda, which stretches to the page.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import zlib from 'node:zlib';
+import { createRequire } from 'node:module';
 import {
   AlignmentType, BorderStyle, Document, ImageRun, Packer, Paragraph, ShadingType,
   Table, TableCell, TableRow, TextRun, VerticalAlign, VerticalMergeType, WidthType,
@@ -345,10 +351,33 @@ const doc = new Document({
   styles: { default: { document: { run: { font: FONT, size: 16 } } } },
   sections: [{
     properties: { page: { size: { width: PAGE_W, height: 16838 }, margin: { top: MARGIN_Y, bottom: MARGIN_Y, left: MARGIN_X, right: MARGIN_X } } },
-    children: [header, gap(2), themeRow, gap(2), mission, gap(3), body, gap(3), footer],
+    // Word ends a document with a paragraph after the last table; left at the
+    // default size it alone can push a full agenda onto a second page.
+    children: [header, gap(2), themeRow, gap(2), mission, gap(3), body, gap(3), footer,
+      para(run('', { size: 2 }), { line: 20 })],
   }],
 });
 
+// How tall the agenda table may be, in mm: what is left of the A4 page once the
+// header, theme row, mission box and footer are placed, less a margin so a
+// long meeting still keeps to one page in Word and in LibreOffice (the PDF).
+const AGENDA_FILL_MM = 148;
+
+// The `docx` package cannot set a table's alt-text title, so it goes into the
+// XML here: on the table whose header reads 議程表.
+function markAgendaTable(buf) {
+  const PizZip = createRequire(import.meta.url)('pizzip');
+  const zip = new PizZip(buf);
+  let xml = zip.file('word/document.xml').asText();
+  const at = xml.indexOf('>議程表<');
+  const start = xml.lastIndexOf('<w:tbl>', at);
+  const tblPrEnd = xml.indexOf('</w:tblPr>', start);
+  if (at === -1 || start === -1 || tblPrEnd === -1) throw new Error('agenda table not found');
+  xml = `${xml.slice(0, tblPrEnd)}<w:tblCaption w:val="{{填滿:${AGENDA_FILL_MM}}}"/>${xml.slice(tblPrEnd)}`;
+  zip.file('word/document.xml', xml);
+  return zip.generate({ type: 'nodebuffer' });
+}
+
 fs.mkdirSync(path.dirname(OUT), { recursive: true });
-fs.writeFileSync(OUT, await Packer.toBuffer(doc));
+fs.writeFileSync(OUT, markAgendaTable(await Packer.toBuffer(doc)));
 console.log('wrote', path.relative(root, OUT));

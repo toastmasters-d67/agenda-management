@@ -614,6 +614,9 @@ function wordHelpHtml() {
       <code>{{#演講}}</code> 與結尾 <code>{{/演講}}</code> 放在表格的同一列，該列會依人數重複。建議從「下載預設範本」開始改。</p>
     ${groups}${loops}
     <div class="word-help-group"><strong>圖片</strong>：在 Word 放一張佔位圖片，替代文字設為標記，下載時換成當次的圖片（裁成佔位圖的大小）<ul>${rows(WORD_PICTURES)}</ul></div>
+    <div class="word-help-group"><strong>填滿頁面</strong>：議程表格的「替代文字 → 標題」設為
+      <code>{{填滿:150}}</code>（單位 mm），下載時會依這場的列數把表格拉高到這個高度，演講多寡都填滿 A4；
+      已經夠高的場次不會再拉長。數字請量「頁面剩下多少可以給表格」再減一點緩衝。</div>
   </details>`;
 }
 
