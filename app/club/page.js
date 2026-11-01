@@ -624,7 +624,11 @@ function setWordStatus(key, note) {
   const st = document.getElementById(`stat_${key}`);
   if (!st) return;
   if (pendingFiles[key]) st.textContent = `已選擇「${pendingFiles[key].name}」，儲存時上傳`;
-  else st.textContent = modalImgUrls[key] ? '已上傳分會範本（PDF、JPG 也用這個版型）' : '未上傳';
+  // The uploaded file itself is downloadable here — 下載預設範本 is the system's, not the club's.
+  else if (modalImgUrls[key]) {
+    st.innerHTML = `已上傳分會範本（PDF、JPG 也用這個版型）
+      <a href="${escAttr(modalImgUrls[key])}" download target="_blank" rel="noopener">下載目前範本</a>`;
+  } else st.textContent = '未上傳';
   // Nothing to remove when nothing is uploaded or staged.
   const clear = document.getElementById(`clear_${key}`);
   if (clear) clear.disabled = !modalImgUrls[key] && !pendingFiles[key];
