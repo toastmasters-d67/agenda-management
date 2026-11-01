@@ -233,7 +233,7 @@ EntrepreneurAgenda/
 - **填入引擎**：[docxtemplater](https://docxtemplater.com/)（`docxtemplater` + `pizzip`），全在瀏覽器執行，後端不經手 Word 檔內容。
 - **改預設範本**：改 `scripts/build-word-template.mjs` 後執行 `node scripts/build-word-template.mjs`，重新產生 `public/templates/agenda-default.docx` 並一起 commit。
 - **企業家、Chill Hi High 分會的範本**：`scripts/build-word-template-entrepreneur.mjs`、`scripts/build-word-template-chillhihigh.mjs` 依各自版型產生 `scripts/word-templates/` 下的 .docx。這些不由系統內建，是以分會自訂範本的方式上傳（分會設定 → Word 匯出範本）；改版後重新產生再上傳即可。範本裡的 Logo、QR、圖片是內建素材，分會換圖時也要重新產生。
-- **填滿頁面**：網頁議程會把表格拉到 A4 底部，Word 沒有這種功能。範本把議程表格的替代文字標題設為 `{{填滿:mm}}`，下載時（`lib/wordFit.js`）先依每列的字數、字級與欄寬估出它本來的高度，再把剩下的空間分給其他列（設為最小列高，文字多的列照樣長高），讓表格總高剛好是這個值；本來就超過的場次不動。估算的行高係數對 Word 校正過（Noto Sans CJK TC + Arial）。企業家範本用 148 mm：實測 1～3 篇演講在 Word 裡都填到頁尾。LibreOffice（VM 上的 PDF／JPG）每列本來就比 Word 高，所以留白會比 Word 多一些；4 篇演講、4 位講評員加長講題的極端場次，LibreOffice 會排到第二頁（這一場本來就沒有被拉高）。
+- **填滿頁面**：網頁議程會把表格拉到 A4 底部，Word 沒有這種功能。範本把議程表格的替代文字標題設為 `{{填滿:mm}}`，下載時（`lib/wordFit.js`）先依每列的字數、字級與欄寬估出它本來的高度，再把剩下的空間分給其他列（設為最小列高，文字多的列照樣長高），讓表格總高剛好是這個值；本來就超過的場次不動。估算的行高係數對 Word 校正過（Noto Sans CJK TC + Arial）。三個內建範本都有標：標準版 210 mm、企業家 148 mm、Chill Hi High 165 mm（第一頁；第二頁是主視覺與角色說明），由產生器呼叫共用的 `scripts/mark-fill-table.mjs` 寫進去，實測一般場次與滿場在 Word 裡都填到頁尾且不換頁。LibreOffice（VM 上的 PDF／JPG）每列本來就比 Word 高，所以留白會比 Word 多一些；4 篇演講、4 位講評員加長講題的極端場次，LibreOffice 會排到第二頁（這一場本來就沒有被拉高）。
 - **圖片標記**：在 Word 放一張佔位圖片，替代文字設為 `{{主題圖片}}`，下載時換成該次例會上傳的主題圖片（裁成佔位圖的比例）；沒有上傳就保留佔位圖。清單在 `lib/wordExport.js` 的 `WORD_PICTURES`。
 
 ## 角色安排（`/roles`）

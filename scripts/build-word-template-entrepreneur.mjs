@@ -23,7 +23,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import zlib from 'node:zlib';
-import { createRequire } from 'node:module';
+import { markFillTable } from './mark-fill-table.mjs';
 import {
   AlignmentType, BorderStyle, Document, ImageRun, Packer, Paragraph, ShadingType,
   Table, TableCell, TableRow, TextRun, VerticalAlign, VerticalMergeType, WidthType,
@@ -363,21 +363,6 @@ const doc = new Document({
 // long meeting still keeps to one page in Word and in LibreOffice (the PDF).
 const AGENDA_FILL_MM = 148;
 
-// The `docx` package cannot set a table's alt-text title, so it goes into the
-// XML here: on the table whose header reads 議程表.
-function markAgendaTable(buf) {
-  const PizZip = createRequire(import.meta.url)('pizzip');
-  const zip = new PizZip(buf);
-  let xml = zip.file('word/document.xml').asText();
-  const at = xml.indexOf('>議程表<');
-  const start = xml.lastIndexOf('<w:tbl>', at);
-  const tblPrEnd = xml.indexOf('</w:tblPr>', start);
-  if (at === -1 || start === -1 || tblPrEnd === -1) throw new Error('agenda table not found');
-  xml = `${xml.slice(0, tblPrEnd)}<w:tblCaption w:val="{{填滿:${AGENDA_FILL_MM}}}"/>${xml.slice(tblPrEnd)}`;
-  zip.file('word/document.xml', xml);
-  return zip.generate({ type: 'nodebuffer' });
-}
-
 fs.mkdirSync(path.dirname(OUT), { recursive: true });
-fs.writeFileSync(OUT, markAgendaTable(await Packer.toBuffer(doc)));
+fs.writeFileSync(OUT, markFillTable(await Packer.toBuffer(doc), '{{報到時間}}', AGENDA_FILL_MM));
 console.log('wrote', path.relative(root, OUT));
