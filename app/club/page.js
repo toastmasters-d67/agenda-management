@@ -4,7 +4,7 @@ import { useEffect } from 'react';
 import { apiJson } from '@/lib/api';
 import { setAuth, clearAuth, applyRoleUI } from '@/lib/auth';
 import { AGENDA_TEMPLATES, TEMPLATE_OPTIONS, templateAssetDefaults } from '@/lib/agendaTemplates';
-import { WORD_TEMPLATE_FIELD, WORD_FIELDS, WORD_LOOPS, WORD_PICTURES, WORD_DEFAULT_TEMPLATE, checkWordTemplate, wordKnownTags } from '@/lib/wordExport';
+import { WORD_TEMPLATE_FIELDS, WORD_FIELDS, WORD_LOOPS, WORD_PICTURES, WORD_DEFAULT_TEMPLATE, checkWordTemplate, wordKnownTags } from '@/lib/wordExport';
 import { CUSTOM_ROLES_FIELD, MEETING_ROLES, newCustomRoleId } from '@/lib/meetingRoles';
 import Sidebar from '@/components/Sidebar';
 import './club.css';
@@ -455,16 +455,19 @@ function fieldHtml(f) {
     </div>`;
   }
   if (f.type === 'word') {
+    const scene = f.lang === 'en' ? '英文場' : '中文場';
     return `<div class="modal-field">
       <label>${f.label}</label>
+      <p class="word-tpl-rule">有上傳時，${scene}下載 Word、PDF、JPG 都用這份範本的版型；
+        沒有上傳時，PDF、JPG 跟著網頁議程的版型${f.lang === 'en' ? '，Word 用中文場範本或系統預設範本' : '，Word 用系統預設範本'}。</p>
       <div class="word-tpl-status" id="stat_${f.key}"></div>
       <div class="word-tpl-actions">
         <input type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onchange="window.__clubUploadWord(this, '${f.key}')">
-        <button type="button" class="btn-mini-c" onclick="window.__clubClearWord('${f.key}')">改回預設範本</button>
-        <a class="btn-mini-c" href="${WORD_DEFAULT_TEMPLATE}" download="議程預設範本.docx">下載預設範本</a>
+        <button type="button" class="btn-mini-c" id="clear_${f.key}" onclick="window.__clubClearWord('${f.key}')">移除範本</button>
+        ${f.help ? `<a class="btn-mini-c" href="${WORD_DEFAULT_TEMPLATE}" download="議程預設範本.docx">下載預設範本</a>` : ''}
       </div>
       <div class="word-tpl-msg" id="msg_${f.key}"></div>
-      ${wordHelpHtml()}
+      ${f.help ? wordHelpHtml() : ''}
     </div>`;
   }
   if (f.type === 'color') {
@@ -499,7 +502,7 @@ function buildFieldsHtml(fields) {
 }
 // A template's own fields plus the club-level ones (own roles, Word template).
 function templateFields(tk) {
-  return [...((AGENDA_TEMPLATES[tk] || {}).settings || []), CUSTOM_ROLES_FIELD, WORD_TEMPLATE_FIELD];
+  return [...((AGENDA_TEMPLATES[tk] || {}).settings || []), CUSTOM_ROLES_FIELD, ...WORD_TEMPLATE_FIELDS];
 }
 function renderTemplateFields(tk) {
   const fields = templateFields(tk);
@@ -611,6 +614,9 @@ function wordHelpHtml() {
       <code>{{#演講}}</code> 與結尾 <code>{{/演講}}</code> 放在表格的同一列，該列會依人數重複。建議從「下載預設範本」開始改。</p>
     ${groups}${loops}
     <div class="word-help-group"><strong>圖片</strong>：在 Word 放一張佔位圖片，替代文字設為標記，下載時換成當次的圖片（裁成佔位圖的大小）<ul>${rows(WORD_PICTURES)}</ul></div>
+    <div class="word-help-group"><strong>填滿頁面</strong>：議程表格的「替代文字 → 標題」設為
+      <code>{{填滿:150}}</code>（單位 mm），下載時會依這場的列數把表格拉高到這個高度，演講多寡都填滿 A4；
+      已經夠高的場次不會再拉長。數字請量「頁面剩下多少可以給表格」再減一點緩衝。</div>
   </details>`;
 }
 
@@ -618,7 +624,14 @@ function setWordStatus(key, note) {
   const st = document.getElementById(`stat_${key}`);
   if (!st) return;
   if (pendingFiles[key]) st.textContent = `已選擇「${pendingFiles[key].name}」，儲存時上傳`;
-  else st.textContent = modalImgUrls[key] ? '使用分會自訂範本' : '使用系統預設範本';
+  // The uploaded file itself is downloadable here — 下載預設範本 is the system's, not the club's.
+  else if (modalImgUrls[key]) {
+    st.innerHTML = `已上傳分會範本（PDF、JPG 也用這個版型）
+      <a href="${escAttr(modalImgUrls[key])}" download target="_blank" rel="noopener">下載目前範本</a>`;
+  } else st.textContent = '未上傳';
+  // Nothing to remove when nothing is uploaded or staged.
+  const clear = document.getElementById(`clear_${key}`);
+  if (clear) clear.disabled = !modalImgUrls[key] && !pendingFiles[key];
   const msg = document.getElementById(`msg_${key}`);
   if (msg) msg.innerHTML = note || '';
 }
@@ -645,7 +658,7 @@ function clearClubWord(key) {
   delete pendingFiles[key];
   modalImgUrls[key] = null;
   document.querySelectorAll(`#modal input[type=file][onchange*="${key}"]`).forEach((el) => { el.value = ''; });
-  setWordStatus(key, '儲存後改用系統預設範本');
+  setWordStatus(key, '儲存後移除：PDF、JPG 改回網頁版型，檔案也會一併刪除');
 }
 
 // Stage a chosen image locally (preview only). Actual R2 upload happens in

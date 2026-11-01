@@ -27,7 +27,8 @@ import {
 } from '@/lib/pathways';
 import './agenda.css';
 import { withBase } from '@/lib/basePath';
-import { WORD_DEFAULT_TEMPLATE, buildWordData, fillWordTemplate, wordTemplateErrors } from '@/lib/wordExport';
+import { WORD_DEFAULT_TEMPLATE, buildWordData, fillWordTemplate, wordTemplateErrors,
+         wordLayoutUrl, wordDownloadUrl } from '@/lib/wordExport';
 import SearchableSelect from '@/components/SearchableSelect';
 
 // ================================================================
@@ -975,6 +976,9 @@ function updatePreview() {
   requestAnimationFrame(() => { equalizeRowHeights(); applyPreviewScale(); });
   refreshAutoHints();
   setSaveStatus('unsaved');
+  // The club or the language may have changed which layout PDF / JPG use.
+  updateExportNote();
+  if (wordRenderAvailable === null && wordLayoutUrl(club, lang)) canRenderWord();
 }
 
 // Resolve the active club (branding + template) for rendering.
@@ -1616,8 +1620,79 @@ function pdfOptions() {
   };
 }
 
+// ---- PDF / JPG in the club's Word layout ----
+// A club that uploaded a Word template for this meeting's language gets its
+// PDF and JPG in that layout: the page fills the template exactly as 下載
+// Word does and the server lays it out (/api/word-render, LibreOffice — only
+// on the Azure VM). Without a template, or where the server cannot render,
+// PDF and JPG are captured from the web agenda as before.
+
+let wordRenderAvailable = null;     // null = not asked yet
+
+async function canRenderWord() {
+  if (wordRenderAvailable === null) {
+    try {
+      wordRenderAvailable = !!(await apiJson('/word-render')).available;
+    } catch {
+      wordRenderAvailable = false;
+    }
+    updateExportNote();
+  }
+  return wordRenderAvailable;
+}
+
+/** The uploaded template that sets this meeting's PDF / JPG layout, or null. */
+async function wordLayoutFor() {
+  const url = wordLayoutUrl(getActiveClub(), lang);
+  return url && (await canRenderWord()) ? url : null;
+}
+
+/** { pdf?, jpg? } data URLs from the Word layout. */
+async function renderWordLayout(url, formats) {
+  const docx = await blobToDataUrl(await buildWordBlob(url));
+  return apiJson('/word-render', { method: 'POST', body: { docx, formats } });
+}
+
+/**
+ * Run `viaWord` when this meeting has a Word layout; if that fails, say so
+ * (when someone is looking) and fall back to the web layout rather than
+ * failing the download.
+ */
+async function withWordLayout(viaWord, viaWeb, { quiet = false } = {}) {
+  const url = await wordLayoutFor();
+  if (!url) return viaWeb();
+  try {
+    return await viaWord(url);
+  } catch (e) {
+    const why = e && e.message ? e.message : String(e);
+    console.warn('Word 版型轉檔失敗，改用網頁版型:', e);
+    if (!quiet) alert(`這個分會的 Word 版型轉檔失敗，這次改用網頁版型。\n原因：${why}`);
+    return viaWeb();
+  }
+}
+
+/** What the settings menu says PDF / JPG will look like. */
+function updateExportNote() {
+  const el = document.getElementById('exportLayoutNote');
+  if (!el) return;
+  const url = wordLayoutUrl(getActiveClub(), lang);
+  if (!url) {
+    el.textContent = 'PDF／JPG 使用網頁版型';
+  } else if (wordRenderAvailable === false) {
+    el.textContent = 'PDF／JPG 使用網頁版型（這個網址不支援 Word 版型轉檔）';
+  } else {
+    el.textContent = `PDF／JPG 使用分會的${lang === 'en' ? '英文場' : '中文場'} Word 版型`;
+  }
+}
+
 /** The whole agenda as one PDF, as a data URL. */
 async function capturePDF() {
+  return withWordLayout(
+    async (url) => (await renderWordLayout(url, ['pdf'])).pdf,
+    captureWebPDF, { quiet: true });
+}
+
+async function captureWebPDF() {
   const element = document.getElementById('agendaPages');
   const restore = await prepareCapture(element, { forPdf: true });
   try {
@@ -1633,6 +1708,12 @@ async function capturePDF() {
  * separate page-1/page-2 images, not one tall image spanning both.
  */
 async function captureJPGs() {
+  return withWordLayout(
+    async (url) => (await renderWordLayout(url, ['jpg'])).jpg,
+    captureWebJPGs, { quiet: true });
+}
+
+async function captureWebJPGs() {
   const element = document.getElementById('agendaPages');
   const pageEls = [...element.querySelectorAll('.agenda-page')];
   const restore = await prepareCapture(element);
@@ -1651,17 +1732,36 @@ async function captureJPGs() {
 }
 
 async function downloadPDF() {
-  const element = document.getElementById('agendaPages');
-  const restore = await prepareCapture(element, { forPdf: true });
-  window.html2pdf().set(pdfOptions()).from(element).save().then(restore);
+  const viaWeb = async () => {
+    const element = document.getElementById('agendaPages');
+    const restore = await prepareCapture(element, { forPdf: true });
+    await window.html2pdf().set(pdfOptions()).from(element).save();
+    restore();
+  };
+  showLoading();
+  try {
+    await withWordLayout(async (url) => {
+      const { pdf } = await renderWordLayout(url, ['pdf']);
+      saveDataUrl(pdf, `${exportBaseName()}.pdf`);
+    }, viaWeb);
+  } finally {
+    hideLoading();
+  }
 }
 
-// Editable Word copy: the club's uploaded template, or the bundled default,
-// filled with this meeting (lib/wordExport.js).
-// Shared by the 下載 Word button and the server-side export (MCP).
-async function buildWordBlob() {
+function saveDataUrl(href, filename) {
+  const link = document.createElement('a');
+  link.download = filename;
+  link.href = href;
+  link.click();
+}
+
+// Editable Word copy: the club's uploaded template for this meeting's language
+// (or its Chinese one, or the bundled default), filled with this meeting
+// (lib/wordExport.js). Shared by the 下載 Word button, the server-side export
+// (MCP) and — with the layout template passed in — PDF / JPG in Word layout.
+async function buildWordBlob(tplUrl = wordDownloadUrl(getActiveClub(), lang)) {
   const club = getActiveClub();
-  const tplUrl = club && club.settings && club.settings.word_template_url;
   const res = tplUrl
     ? await apiFetch(`/image-proxy?url=${encodeURIComponent(tplUrl)}`)
     : await fetch(WORD_DEFAULT_TEMPLATE);
@@ -1717,13 +1817,15 @@ async function downloadWord() {
 
 async function downloadJPG() {
   const name = exportBaseName();
-  const pages = await captureJPGs();
-  pages.forEach((href, i) => {
-    const link = document.createElement('a');
-    link.download = `${name}${pages.length > 1 ? `_p${i + 1}` : ''}.jpg`;
-    link.href = href;
-    link.click();
-  });
+  showLoading();
+  let pages;
+  try {
+    pages = await withWordLayout(
+      async (url) => (await renderWordLayout(url, ['jpg'])).jpg, captureWebJPGs);
+  } finally {
+    hideLoading();
+  }
+  pages.forEach((href, i) => saveDataUrl(href, `${name}${pages.length > 1 ? `_p${i + 1}` : ''}.jpg`));
 }
 
 // ================================================================
@@ -2859,6 +2961,7 @@ export default function AgendaIndexPage() {
                   <button className="settings-menu-item" onClick={downloadPDF}>下載 PDF</button>
                   <button className="settings-menu-item" onClick={downloadJPG}>下載 JPG</button>
                   <button className="settings-menu-item" onClick={downloadWord}>下載 Word</button>
+                  <div className="settings-menu-note" id="exportLayoutNote"></div>
                 </div>
               </div>
               <div className="toolbar-sep"></div>

@@ -221,13 +221,19 @@ EntrepreneurAgenda/
 
 議程頁「設定」選單的「下載 Word」會產生一份可在 Word 裡修改的議程，給版面與分會習慣不完全相符、需要下載後自行調整的情況。
 
-- **範本來源**：分會在「版型」設定的「Word 匯出範本」區上傳的 .docx（存在 `clubs.settings.word_template_url`，檔案放 R2，透過 `/api/image-proxy` 讀取）；沒上傳就用內建的 `public/templates/agenda-default.docx`（仿標準版）。Word 範本屬於分會，不分議程版型。
+- **範本來源**：分會在「版型」設定的「Word 匯出範本」區上傳的 .docx，**中文場、英文場各一份**（`clubs.settings.word_template_url`／`word_template_url_en`，檔案放 R2，透過 `/api/image-proxy` 讀取）。下載 Word 依序用：該場語言的範本 → 中文場範本 → 內建的 `public/templates/agenda-default.docx`（仿標準版）。Word 範本屬於分會，不分議程版型。
+- **移除範本**：「移除範本」按下並儲存後，設定清掉、R2 上的檔案也一併刪除（替換新範本時舊檔同樣刪除；只刪本分會目錄下的檔案）。MCP 用 `set_word_template` 的 `clear: true`。
+- **PDF／JPG 也跟著 Word 版型**：分會**有上傳該場語言的範本**時，議程頁的「下載 PDF／JPG」與 MCP 的 `export_agenda` 都改用 Word 版型——瀏覽器照「下載 Word」同一套程式填好 .docx，送到 `/api/word-render`，伺服器用 LibreOffice 排版成 PDF、poppler 切成每頁一張 JPG。沒有該語言的範本（例如只上傳中文場、這場是英文場）就照舊截網頁議程。設定選單的下載按鈕下方會寫出這次用的是哪一種。
+  - **只在 Azure VM**：`Dockerfile.api` 裝了 LibreOffice、思源黑體（Noto CJK）、Noto Color Emoji、Liberation（代替 Arial），映像約 740 MB。Vercel 沒有這些，`GET /api/word-render` 回 `available: false`，PDF／JPG 一律用網頁版型。
+  - **字型**：Windows 的微軟正黑體、新細明體、標楷體不能放進伺服器（授權），`deploy/fonts/99-agenda-fonts.conf` 把它們對應到思源黑體／思源宋體。企業家與 Chill Hi High 的範本直接用 `Noto Sans CJK TC`，PDF 才會與 Word 一致；分會自己做的範本建議也用它。
+  - **轉檔失敗**時退回網頁版型並告知原因，不讓下載整個失敗；同一時間只跑一個 LibreOffice（1 vCPU 的 VM），一份約 1 秒。
 - **標記**：範本裡寫 `{{例會主題}}`、`{{總主持人}}` 這類中文標記，下載時換成當次例會資料。完整清單在 `lib/wordExport.js` 的 `WORD_FIELDS` / `WORD_LOOPS`，分會設定視窗的「可用的標記」也是從這份清單產生。
 - **重複的列**：`{{#演講}}`…`{{/演講}}`（還有 `講評員`、`講評員講評`、`多元單元`）的開頭與結尾放在表格同一列，該列依人數重複；清單是空的時整列消失。
 - **上傳檢查**：選檔當下在瀏覽器檢查。標記寫壞（例如迴圈沒關）會拒收並列出原因；系統不認得的標記只警告（下載時會是空白）。
 - **填入引擎**：[docxtemplater](https://docxtemplater.com/)（`docxtemplater` + `pizzip`），全在瀏覽器執行，後端不經手 Word 檔內容。
 - **改預設範本**：改 `scripts/build-word-template.mjs` 後執行 `node scripts/build-word-template.mjs`，重新產生 `public/templates/agenda-default.docx` 並一起 commit。
-- **企業家、Chill Hi High 分會的範本**：`scripts/build-word-template-entrepreneur.mjs`、`scripts/build-word-template-chillhihigh.mjs` 依各自版型產生 `scripts/word-templates/` 下的 .docx。這些不由系統內建，是以分會自訂範本的方式上傳（分會設定 → Word 匯出範本）；改版後重新產生再上傳即可。範本裡的 Logo、QR、圖片是內建素材，分會換圖時也要重新產生。
+- **企業家、Chill Hi High 分會的範本**：`scripts/build-word-template-entrepreneur.mjs`、`scripts/build-word-template-chillhihigh.mjs` 依各自版型產生 `scripts/word-templates/` 下的 .docx；企業家另有英文場版本（加參數 `en` → `entrepreneur-en.docx`，文字同網頁英文議程，用 `{{例會時間說明英文}}` 與學習路徑的 `{{英文名稱}}`，填滿高度 160 mm）。這些不由系統內建，是以分會自訂範本的方式上傳（分會設定 → Word 匯出範本）；改版後重新產生再上傳即可。範本裡的 Logo、QR、圖片是內建素材，分會換圖時也要重新產生。
+- **填滿頁面**：網頁議程會把表格拉到 A4 底部，Word 沒有這種功能。範本把議程表格的替代文字標題設為 `{{填滿:mm}}`，下載時（`lib/wordFit.js`）先依每列的字數、字級與欄寬估出它本來的高度，再把剩下的空間分給其他列（設為最小列高，文字多的列照樣長高），讓表格總高剛好是這個值；本來就超過的場次不動。估算的行高係數對 Word 校正過（Noto Sans CJK TC + Arial）。三個內建範本都有標：標準版 210 mm、企業家 148 mm、Chill Hi High 165 mm（第一頁；第二頁是主視覺與角色說明），由產生器呼叫共用的 `scripts/mark-fill-table.mjs` 寫進去，實測一般場次與滿場在 Word 裡都填到頁尾且不換頁。LibreOffice（VM 上的 PDF／JPG）每列本來就比 Word 高，所以留白會比 Word 多一些；4 篇演講、4 位講評員加長講題的極端場次，LibreOffice 會排到第二頁（這一場本來就沒有被拉高）。
 - **圖片標記**：在 Word 放一張佔位圖片，替代文字設為 `{{主題圖片}}`，下載時換成該次例會上傳的主題圖片（裁成佔位圖的比例）；沒有上傳就保留佔位圖。清單在 `lib/wordExport.js` 的 `WORD_PICTURES`。
 
 ## 角色安排（`/roles`）

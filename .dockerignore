@@ -10,4 +10,6 @@ __pycache__
 *.pyc
 data.json
 deploy
+# …except the fontconfig aliases the API image installs (Dockerfile.api).
+!deploy/fonts/
 README.md

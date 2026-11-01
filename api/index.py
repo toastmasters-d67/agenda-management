@@ -1075,6 +1075,8 @@ def update_club(club_id: int, req: ClubRequest, user: dict = Depends(require_sys
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
+                cur.execute("SELECT settings FROM clubs WHERE id=%s", (club_id,))
+                before = parse_jsonb((cur.fetchone() or [None])[0])
                 cur.execute(
                     "UPDATE clubs SET"
                     " name=%s, name_zh=%s, name_en=%s, charter_no=%s, founded_date=%s, fee=%s,"
@@ -1092,7 +1094,33 @@ def update_club(club_id: int, req: ClubRequest, user: dict = Depends(require_sys
                     raise HTTPException(status_code=404, detail="找不到此分會")
     except psycopg2.errors.UniqueViolation:
         raise HTTPException(status_code=400, detail="分會名稱已存在")
+    _drop_replaced_word_templates(club_id, before, req.settings or {})
     return {"ok": True}
+
+
+# The club's uploaded Word templates: Chinese and English meetings each have
+# their own. A club that uploaded one gets PDF / JPG in that layout too (see
+# /api/word-render); removing it puts PDF / JPG back on the web layout.
+WORD_TEMPLATE_KEYS = ("word_template_url", "word_template_url_en")
+
+
+def _delete_club_file(club_id: int, url: Optional[str]):
+    """Delete one of this club's R2 files. Anything else — another club's, or
+    not in our bucket — is left alone. Best effort: the setting is already gone."""
+    prefix = f"{R2_PUBLIC_URL}/media/clubs/{club_id}/"
+    if not url or not R2_PUBLIC_URL or not url.startswith(prefix):
+        return
+    try:
+        _r2().delete_object(Bucket=R2_BUCKET_NAME, Key=url[len(R2_PUBLIC_URL) + 1:])
+    except Exception:
+        pass
+
+
+def _drop_replaced_word_templates(club_id: int, before: dict, after: dict):
+    for key in WORD_TEMPLATE_KEYS:
+        old = (before or {}).get(key)
+        if old and old != (after or {}).get(key):
+            _delete_club_file(club_id, old)
 
 
 @app.delete("/api/clubs/{club_id}")
@@ -1941,6 +1969,102 @@ def presign_upload(req: PresignRequest, user: dict = Depends(require_club_admin_
     )
     public_url = f"{R2_PUBLIC_URL}/{key}"
     return {"uploadUrl": upload_url, "publicUrl": public_url}
+
+
+# ------------------------------------------------------------------ word render
+# A club that uploaded its own Word template gets its PDF and JPG in that
+# layout, not the web one. The browser fills the template (the same
+# lib/wordExport.js the 下載 Word button uses, so the files agree to the
+# letter) and sends the .docx here; LibreOffice lays it out and poppler cuts
+# the pages into JPGs.
+#
+# Only where LibreOffice is installed: the Azure VM's API image (Dockerfile.api).
+# Elsewhere (Vercel) `available` is false and the page keeps the web layout.
+
+_WORD_RENDER_LOCK = __import__("threading").Lock()   # one LibreOffice at a time on a 1-vCPU VM
+_WORD_RENDER_MAX = 20 * 1024 * 1024
+_WORD_RENDER_TIMEOUT = 90
+
+
+def _soffice() -> Optional[str]:
+    import shutil
+    return shutil.which("soffice") or shutil.which("libreoffice")
+
+
+@app.get("/api/word-render")
+def word_render_status(user: dict = Depends(get_current_user)):
+    import shutil
+    return {"available": bool(_soffice() and shutil.which("pdftoppm"))}
+
+
+class WordRenderRequest(BaseModel):
+    docx: str                          # base64, or a data: URL
+    formats: List[str] = ["pdf"]       # pdf and/or jpg
+    dpi: int = 150
+
+
+@app.post("/api/word-render")
+def word_render(req: WordRenderRequest, user: dict = Depends(get_current_user)):
+    import base64
+    import shutil
+    import subprocess
+    import tempfile
+
+    soffice = _soffice()
+    if not soffice or not shutil.which("pdftoppm"):
+        raise HTTPException(status_code=503, detail="這個環境沒有 Word 轉檔功能")
+    formats = [f for f in req.formats if f in ("pdf", "jpg")] or ["pdf"]
+    b64 = req.docx[req.docx.find(",") + 1:] if req.docx.startswith("data:") else req.docx
+    try:
+        raw = base64.b64decode(b64)
+    except Exception:
+        raise HTTPException(status_code=400, detail="docx 不是有效的 base64")
+    if len(raw) > _WORD_RENDER_MAX:
+        raise HTTPException(status_code=400, detail="Word 檔太大")
+    if raw[:2] != b"PK":
+        raise HTTPException(status_code=400, detail="這不是 Word（.docx）檔")
+
+    with tempfile.TemporaryDirectory(prefix="wordrender_") as tmp:
+        src = os.path.join(tmp, "agenda.docx")
+        with open(src, "wb") as fh:
+            fh.write(raw)
+        # Own profile directory: LibreOffice refuses to start when another
+        # instance holds the default one, and the API user's home may be read-only.
+        profile = "file:///" + os.path.join(tmp, "profile").replace("\\", "/").lstrip("/")
+        with _WORD_RENDER_LOCK:
+            try:
+                subprocess.run([soffice, f"-env:UserInstallation={profile}", "--headless",
+                                "--convert-to", "pdf", "--outdir", tmp, src],
+                               check=True, timeout=_WORD_RENDER_TIMEOUT,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except subprocess.TimeoutExpired:
+                raise HTTPException(status_code=504, detail="Word 轉檔逾時")
+            except subprocess.CalledProcessError:
+                raise HTTPException(status_code=502, detail="Word 轉檔失敗")
+        pdf_path = os.path.join(tmp, "agenda.pdf")
+        if not os.path.exists(pdf_path):
+            raise HTTPException(status_code=502, detail="Word 轉檔失敗")
+        out = {}
+        if "pdf" in formats:
+            with open(pdf_path, "rb") as fh:
+                out["pdf"] = "data:application/pdf;base64," + base64.b64encode(fh.read()).decode()
+        if "jpg" in formats:
+            dpi = max(72, min(int(req.dpi or 150), 300))
+            try:
+                subprocess.run(["pdftoppm", "-r", str(dpi), "-jpeg", "-jpegopt", "quality=92",
+                                pdf_path, os.path.join(tmp, "page")],
+                               check=True, timeout=_WORD_RENDER_TIMEOUT,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+                raise HTTPException(status_code=502, detail="PDF 轉 JPG 失敗")
+            pages = sorted((f for f in os.listdir(tmp) if f.startswith("page") and f.endswith(".jpg")),
+                           key=lambda f: int(re.sub(r"\D", "", f) or 0))
+            jpgs = []
+            for name in pages:
+                with open(os.path.join(tmp, name), "rb") as fh:
+                    jpgs.append("data:image/jpeg;base64," + base64.b64encode(fh.read()).decode())
+            out["jpg"] = jpgs
+    return out
 
 
 # ------------------------------------------------------------------ image proxy
@@ -6758,7 +6882,8 @@ _CLUB_FLAG_SETTINGS = {
     "show_info": "左欄顯示例會時間地點（標準版）", "show_mission": "左欄顯示分會使命（標準版）",
 }
 # Shown by get_club but set through their own tools.
-_CLUB_TOOL_SETTINGS = {"word_template_url": "set_word_template", "custom_roles": "set_custom_roles"}
+_CLUB_TOOL_SETTINGS = {"word_template_url": "set_word_template", "word_template_url_en": "set_word_template",
+                       "custom_roles": "set_custom_roles"}
 _TEMPLATE_KEYS = ("standard", "entrepreneur", "chillhihigh", "china")
 
 
@@ -6987,28 +7112,43 @@ def _file_from_args(args: dict, max_bytes: int = 15 * 1024 * 1024) -> bytes:
 def _tool_set_word_template(caller, args):
     _system_admin_only(caller)
     cid = int(args["club_id"])
+    lang = args.get("lang") or "zh"
+    if lang not in ("zh", "en"):
+        return _tool_text("lang 只能是 zh（中文場）或 en（英文場）", is_error=True)
+    key = "word_template_url_en" if lang == "en" else "word_template_url"
+    label = "英文場" if lang == "en" else "中文場"
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT settings->>%s FROM clubs WHERE id=%s", (key, cid))
+            row = cur.fetchone()
+    if row is None:
+        return _tool_text("找不到此分會", is_error=True)
+    old_url = row[0]
     if args.get("clear"):
         with get_db() as conn:
             with conn.cursor() as cur:
-                _club_write(cur, cid, {}, {"word_template_url": None})
-        return _tool_text(f"分會 #{cid} 已改回系統預設的 Word 範本", {"clubId": cid, "url": None})
+                _club_write(cur, cid, {}, {key: None})
+        _delete_club_file(cid, old_url)
+        return _tool_text(f"分會 #{cid} 已移除{label} Word 範本：下載 Word 改用系統預設範本，"
+                          f"{label}的 PDF／JPG 改回網頁版型", {"clubId": cid, "lang": lang, "url": None})
     raw = _file_from_args(args)
     errors = check_word_template(raw)
     if errors:
         return _tool_text("範本有錯，沒有存入：\n" + "\n".join(errors), {"errors": errors}, is_error=True)
-    key = f"media/clubs/{cid}/{uuid.uuid4().hex}.docx"
+    obj_key = f"media/clubs/{cid}/{uuid.uuid4().hex}.docx"
     try:
-        _r2().put_object(Bucket=R2_BUCKET_NAME, Key=key, Body=raw, ContentType=_DOCX_TYPE)
+        _r2().put_object(Bucket=R2_BUCKET_NAME, Key=obj_key, Body=raw, ContentType=_DOCX_TYPE)
     except HTTPException:
         raise
     except Exception:
         raise HTTPException(status_code=502, detail="範本上傳雲端失敗，請稍後再試")
-    url = f"{R2_PUBLIC_URL}/{key}"
+    url = f"{R2_PUBLIC_URL}/{obj_key}"
     with get_db() as conn:
         with conn.cursor() as cur:
-            _club_write(cur, cid, {}, {"word_template_url": url})
-    return _tool_text(f"已設定分會 #{cid} 的 Word 範本：{url}。之後下載 Word（網頁或 export_agenda）都會用它。",
-                      {"clubId": cid, "url": url})
+            _club_write(cur, cid, {}, {key: url})
+    _delete_club_file(cid, old_url)
+    return _tool_text(f"已設定分會 #{cid} 的{label} Word 範本：{url}。之後{label}下載 Word、PDF、JPG"
+                      "（網頁或 export_agenda）都會用這個版型。", {"clubId": cid, "lang": lang, "url": url})
 
 
 # ---- the club's own meeting roles (clubs.settings.custom_roles) ----
@@ -8039,7 +8179,8 @@ MCP_TOOLS = [
     # ---- club configuration added after the first MCP release ----
     {
         "name": "set_word_template", "scope": "clubs:write", "title": "設定 Word 匯出範本",
-        "description": "上傳分會自己的 Word（.docx）範本，之後下載議程 Word 都會用它；clear=true 改回系統預設範本。"
+        "description": "上傳分會自己的 Word（.docx）範本（中文場、英文場各一份，lang 指定），之後該場次下載 Word、"
+                       "PDF、JPG 都用這個版型；clear=true 移除範本，PDF／JPG 回到網頁版型。"
                        "給 file（檔案）、file_url 或 file_base64 其中一個。標記寫壞（{{ 沒關、迴圈沒收尾）會被拒收。"
                        "可用的標記見網頁「分會管理 → Word 匯出範本 → 可用的標記」。限系統管理員。",
         "inputSchema": {"type": "object", "properties": {
@@ -8048,7 +8189,9 @@ MCP_TOOLS = [
                      "properties": {"download_url": {"type": "string"}, "file_id": {"type": "string"}}},
             "file_url": {"type": "string"},
             "file_base64": {"type": "string"},
-            "clear": {"type": "boolean", "description": "true = 改回系統預設範本"},
+            "lang": {"type": "string", "enum": ["zh", "en"],
+                     "description": "zh＝中文場（預設）、en＝英文場。各場次的 PDF／JPG 也跟著這份範本的版型"},
+            "clear": {"type": "boolean", "description": "true = 移除範本（Word 改用系統預設，PDF／JPG 改回網頁版型）"},
         }, "required": ["club_id"], "additionalProperties": False},
         "_meta": {"openai/fileParams": ["file"]},
         "annotations": {"readOnlyHint": False, "destructiveHint": True,
@@ -8170,7 +8313,7 @@ _TOOL_SUMMARY = {
     "upload_post_template": "上傳設計好的 PPTX 海報模板。",
     "update_post_template": "改海報模板的名稱、風格或啟用狀態。",
     "delete_post_template": "刪除分會上傳的海報模板。",
-    "set_word_template": "上傳分會自己的 Word 議程範本，或改回系統預設。",
+    "set_word_template": "上傳或移除分會的 Word 議程範本（中文場、英文場各一份）；有範本時 PDF、JPG 也用它的版型。",
     "set_custom_roles": "設定分會自己的角色（角色目錄以外的）。",
     "list_machines": "列出分會的電子名牌與綁定的會員。",
     "pair_machine": "用名牌上的配對碼把名牌綁到一位會員。",

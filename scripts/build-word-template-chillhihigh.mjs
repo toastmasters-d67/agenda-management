@@ -19,8 +19,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { markFillTable } from './mark-fill-table.mjs';
 import {
-  AlignmentType, BorderStyle, Document, ImageRun, Packer, PageBreak, Paragraph, ShadingType,
+  AlignmentType, BorderStyle, Document, ImageRun, Packer, Paragraph, ShadingType,
   Table, TableCell, TableRow, TextRun, VerticalAlign, VerticalMergeType, WidthType,
 } from 'docx';
 
@@ -43,14 +44,16 @@ const HEAD_BG = 'F1F5F9';
 const SECTION_BG = 'FDF1D6';
 const BAND_BG = 'E5E7EB';
 const SIG = { g: ['DCFCE7', '15803D'], y: ['FEF9C3', 'A16207'], r: ['FEE2E2', 'B91C1C'] };
-const FONT = { ascii: 'Arial', hAnsi: 'Arial', eastAsia: 'Microsoft JhengHei' };
+// Noto Sans CJK TC: the font the server lays PDF / JPG out with (/api/word-render),
+// so they match this file. A PC without it shows its own substitute in Word.
+const FONT = { ascii: 'Arial', hAnsi: 'Arial', eastAsia: 'Noto Sans CJK TC' };
 
 // A4 portrait, 8 mm margins → 194 mm, the agenda page's width.
 const mm = (n) => Math.round(n * 56.693);
 const PAGE_W = 11906;
 const MARGIN = mm(8);
 const WIDTH = PAGE_W - MARGIN * 2;
-const COL = { time: mm(12), dur: mm(13), host: mm(38), sig: mm(11) };
+const COL = { time: mm(12), dur: mm(13), host: mm(37), sig: mm(12.5) };
 COL.ag = WIDTH - COL.time - COL.dur - COL.host - COL.sig * 3;
 const C = AlignmentType.CENTER;
 
@@ -66,6 +69,7 @@ const run = (text, o = {}) => new TextRun({
 const para = (children, o = {}) => new Paragraph({
   children: Array.isArray(children) ? children : [children],
   alignment: o.align, spacing: { before: o.before || 0, after: o.after || 0, line: o.line },
+  pageBreakBefore: o.pageBreakBefore,
 });
 const cell = (children, width, o = {}) => new TableCell({
   children, width: { size: width, type: WidthType.DXA }, borders: o.borders || NO_BORDERS,
@@ -247,8 +251,10 @@ const qrRow = table(QRS.map(() => QR_W), [new TableRow({
 
 const gap = (pt) => para(run('', { size: 2 }), { after: pt * 20 });
 const page2 = [
-  new Paragraph({ children: [new PageBreak()] }),
-  para(fit(HERO, 194, 75), { align: C }),
+  // The promo page starts with its picture (page break before it), not with a
+  // paragraph holding a page break: on a full page 1 that paragraph would
+  // itself move to page 2 and break again, leaving page 2 blank.
+  para(fit(HERO, 194, 75), { align: C, pageBreakBefore: true }),
   gap(6),
   // Each line only when the club has set it.
   ...when('近期例會',
@@ -271,5 +277,9 @@ const doc = new Document({
 });
 
 fs.mkdirSync(path.dirname(OUT), { recursive: true });
-fs.writeFileSync(OUT, await Packer.toBuffer(doc));
+// How tall page 1's agenda table may be, in mm: it is marked {{填滿:…}} so a
+// downloaded meeting's rows share that height and page 1 reaches its bottom
+// (lib/wordFit.js), with a margin so a long meeting keeps page 2 on page 2.
+const AGENDA_FILL_MM = 165;
+fs.writeFileSync(OUT, markFillTable(await Packer.toBuffer(doc), '{{報到時間}}', AGENDA_FILL_MM));
 console.log('wrote', path.relative(root, OUT));

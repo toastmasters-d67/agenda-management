@@ -11,6 +11,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { markFillTable } from './mark-fill-table.mjs';
 import {
   AlignmentType, BorderStyle, Document, ImageRun, Packer, Paragraph, ShadingType,
   Table, TableCell, TableRow, TextRun, VerticalAlign, WidthType,
@@ -145,10 +146,16 @@ const doc = new Document({
   styles: { default: { document: { run: { font: FONT, size: 18 } } } },
   sections: [{
     properties: { page: { size: { width: PAGE_W, height: 16838 }, margin: { top: MARGIN, bottom: MARGIN, left: MARGIN, right: MARGIN } } },
-    children: [banner, para(run(''), { after: 0 }), body],
+    // Word ends a document with a paragraph after the last table; kept tiny so
+    // it alone cannot push a full agenda onto a second page.
+    children: [banner, para(run(''), { after: 0 }), body, para(run('', { size: 2 }))],
   }],
 });
 
 fs.mkdirSync(path.dirname(OUT), { recursive: true });
-fs.writeFileSync(OUT, await Packer.toBuffer(doc));
+// How tall the agenda table may be, in mm: it is marked {{填滿:…}} so a
+// downloaded meeting's rows share that height and reach the page bottom
+// (lib/wordFit.js), with a margin so a long meeting keeps to one page.
+const AGENDA_FILL_MM = 210;
+fs.writeFileSync(OUT, markFillTable(await Packer.toBuffer(doc), '{{報到時間}}', AGENDA_FILL_MM));
 console.log('wrote', path.relative(root, OUT));
