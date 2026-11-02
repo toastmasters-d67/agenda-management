@@ -253,6 +253,51 @@ def test_another_poster_template_uses_the_approved_highlights(api, club, monkeyp
     assert "核可過的描述：Bill" in text
 
 
+def test_poster_photos_come_from_the_posts_own_images(api, club, monkeypatch):
+    import io
+    from PIL import Image
+    from pptx import Presentation
+    from pptx.enum.shapes import MSO_SHAPE_TYPE
+    index, client = api
+    buf = io.BytesIO()
+    Image.new("RGB", (40, 30), "red").save(buf, "JPEG")
+    jpeg = buf.getvalue()
+
+    class R2(_FakeR2):
+        def get_object(self, Bucket, Key):
+            return {"Body": io.BytesIO(jpeg)}
+    fake = R2()
+    monkeypatch.setattr(index, "_r2", lambda: fake)
+    monkeypatch.setattr(index, "R2_PUBLIC_URL", "https://r2.example")
+    h = club["headers"]["club_admin"]
+    post = generate(client, club, kind="recap")
+    client.post(f"/api/social-posts/{post['id']}/review",
+                json={"action": "approve", "confirmed": post["governance"]["aiWrittenHighlights"]},
+                headers=h)
+    group, face = "https://r2.example/media/g.jpg", "https://r2.example/media/t.jpg"
+    payload = {k: post[k] for k in ("title", "status", "body", "variants", "kind")}
+    client.put(f"/api/social-posts/{post['id']}",
+               json={**payload, "agenda_id": post["agendaId"],
+                     "images": [{"url": group}, {"url": face}]}, headers=h)
+
+    r = client.post(f"/api/social-posts/{post['id']}/poster", headers=h,
+                    json={"photos": {"PHOTO_GROUP": "https://elsewhere.example/x.jpg"}})
+    assert r.status_code == 400
+
+    r = client.post(f"/api/social-posts/{post['id']}/poster", headers=h,
+                    json={"photos": {"PHOTO_GROUP": group}, "role_photos": {"庭敏": face}})
+    assert r.status_code == 200, r.text
+    (data,) = fake.objects.values()
+    slides = list(Presentation(io.BytesIO(data)).slides)
+    pics = [[sh for sh in s.shapes if sh.shape_type == MSO_SHAPE_TYPE.PICTURE] for s in slides]
+    assert pics[0] and pics[-1]                          # group photo on cover and closing
+    speaker = next(i for i, s in enumerate(slides)
+                   if any(sh.has_text_frame and "庭敏" in sh.text_frame.text for sh in s.shapes))
+    assert len(pics[speaker]) == 1                       # only 庭敏 has a portrait
+    r = client.get(f"/api/social-posts/{post['id']}", headers=h)
+    assert r.json()["governance"]["posterPhotos"]["rolePhotos"] == {"庭敏": face}
+
+
 def test_a_template_must_be_this_clubs_upload(api, club, monkeypatch):
     index, client = api
     monkeypatch.setattr(index, "R2_PUBLIC_URL", "https://r2.example")

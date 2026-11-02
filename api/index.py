@@ -3261,7 +3261,8 @@ def _require_approved(post: dict):
 
 class PosterRequest(BaseModel):
     template_id: str = ""
-    photos: Dict[str, str] = {}               # PHOTO_* → 這則貼文自己的附圖網址
+    photos: Dict[str, str] = {}               # PHOTO_HOST／PHOTO_GROUP → 這則貼文自己的附圖網址
+    role_photos: Dict[str, str] = {}          # 角色姓名 → 這則貼文自己的附圖網址
 
 
 def _download_r2(url: str, suffix: str) -> str:
@@ -3316,17 +3317,28 @@ def _build_poster(post: dict, club_id: int, req: PosterRequest) -> dict:
         if plan.get("dropped_roles"):
             raise HTTPException(status_code=400, detail="這個模板頁數不夠，會漏掉角色："
                                                         + "、".join(plan["dropped_roles"]))
-    own = {img.get("url") for img in post["images"] if isinstance(img, dict)}
+    own = {m["url"] for m in _media_list(post["images"]) if m["kind"] == "image"}
+    photos = {k: v for k, v in (req.photos or {}).items()
+              if v and k in ("PHOTO_HOST", "PHOTO_GROUP")}
+    role_photos = {k: v for k, v in (req.role_photos or {}).items() if k and v}
+    if any(v not in own for v in [*photos.values(), *role_photos.values()]):
+        raise HTTPException(status_code=400,
+                            detail="海報照片只能用這則貼文自己附的圖片（影片不行），請先在「圖片／影片」加上")
     temp_files = []
+    downloaded = {}
 
     def resolve_photo(ref):
         if ref not in own:          # only this post's own attachments
             return None
-        path = _download_r2(ref, os.path.splitext(ref)[1] or ".jpg")
-        temp_files.append(path)
-        return path
+        if ref not in downloaded:   # one photo can fill several frames
+            downloaded[ref] = _download_r2(ref, os.path.splitext(ref)[1] or ".jpg")
+            temp_files.append(downloaded[ref])
+        return downloaded[ref]
 
-    plan["photos"] = {k: v for k, v in (req.photos or {}).items() if k.startswith("PHOTO_")}
+    plan["photos"] = photos
+    plan["role_photos"] = pptx_renderer.role_photos_by_name(
+        plan.get("role_pages") or [], role_photos,
+        int(tpl.get("role_slots_per_page") or 4))
     src = _template_local_path(tpl)
     try:
         data = fill_template(src, plan, resolve_photo=resolve_photo)
@@ -3339,7 +3351,15 @@ def _build_poster(post: dict, club_id: int, req: PosterRequest) -> dict:
     key = f"media/clubs/{club_id}/social/poster_{post['id']}_{uuid.uuid4().hex[:8]}.pptx"
     _r2().put_object(Bucket=R2_BUCKET_NAME, Key=key, Body=data,
                      ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation")
-    return {"url": f"{R2_PUBLIC_URL}/{key}", "template": tpl["id"], "templateName": tpl["name"]}
+    # Remember which photo went where, so the next poster starts from the same
+    # picks. Not content: updated_at stays, and regenerating the post drops it.
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE social_posts SET governance = COALESCE(governance, '{}'::jsonb)"
+                        " || jsonb_build_object('posterPhotos', %s::jsonb) WHERE id=%s",
+                        (json.dumps({"photos": photos, "rolePhotos": role_photos}), post["id"]))
+    return {"url": f"{R2_PUBLIC_URL}/{key}", "template": tpl["id"], "templateName": tpl["name"],
+            "photos": photos, "rolePhotos": role_photos}
 
 
 @app.post("/api/social-posts/{post_id}/poster")
@@ -7345,7 +7365,9 @@ def _tool_make_post_poster(caller, args):
     with get_db() as conn:
         with conn.cursor() as cur:
             post = _social_row(_load_social_post(cur, int(args["post_id"]), caller))
-    out = _build_poster(post, post["clubId"], PosterRequest(template_id=args.get("template_id") or ""))
+    out = _build_poster(post, post["clubId"], PosterRequest(
+        template_id=args.get("template_id") or "",
+        photos=args.get("photos") or {}, role_photos=args.get("role_photos") or {}))
     return _tool_text(f"已產生「{out['templateName']}」海報（可編輯 PPTX）：{out['url']}", out)
 
 
@@ -8103,10 +8125,20 @@ MCP_TOOLS = [
     {
         "name": "make_post_poster", "scope": "posts:write", "title": "產生 PPTX 海報",
         "description": "依已核可的受控貼文產生可編輯的 PPTX 海報，回傳下載連結。不重新呼叫 AI。"
-                       "貼文還沒核可會被拒絕。template_id 可換別的模板（list_post_templates）。",
+                       "貼文還沒核可會被拒絕。template_id 可換別的模板（list_post_templates）。"
+                       "照片只能用這則貼文自己附的圖片網址（get_post 的 images；沒有就先 add_post_image）："
+                       "photos 放主持人照（PHOTO_HOST，宣傳）或團體照（PHOTO_GROUP，回顧），"
+                       "role_photos 依角色姓名放人像（回顧，姓名同 get_post 的 governance.request.roles）。"
+                       "沒指定的照片框保留佔位。",
         "inputSchema": {"type": "object", "properties": {
             "post_id": {"type": "integer"},
             "template_id": {"type": "string"},
+            "photos": {"type": "object", "description": "照片框 → 圖片網址",
+                       "properties": {"PHOTO_HOST": {"type": "string"},
+                                      "PHOTO_GROUP": {"type": "string"}},
+                       "additionalProperties": False},
+            "role_photos": {"type": "object", "description": "角色姓名 → 圖片網址",
+                            "additionalProperties": {"type": "string"}},
         }, "required": ["post_id"], "additionalProperties": False},
         "annotations": {"readOnlyHint": False, "destructiveHint": False,
                         "idempotentHint": False, "openWorldHint": False},

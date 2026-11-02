@@ -777,8 +777,9 @@ function renderGovernance() {
       <select id="posterTpl" class="ed-select">${tplOpts}</select>
       <button class="btn-mini" onclick="window.__socialPoster()" ${state === 'approved' ? '' : 'disabled'}>產生並下載</button>
       <span class="ai-bar-hint">${state === 'approved'
-        ? '可在 PowerPoint 裡再編輯；照片框會保留佔位。' : '核可後才能產生海報。'}</span>
-    </div>` : ''}
+        ? '可在 PowerPoint 裡再編輯；沒選照片的框會保留佔位。' : '核可後才能產生海報。'}</span>
+    </div>
+    ${renderPosterPhotos(plan.use, g)}` : ''}
   </div>`;
 }
 
@@ -812,16 +813,106 @@ async function reviewPost(action) {
   }
 }
 
+// Which attached image goes into which poster photo frame, per post. Seeded
+// from the picks the server remembered with the last poster; kept out of
+// `current` so choosing a photo never marks the post as unsaved.
+const posterPicks = {};
+
+function posterPicksFor(post) {
+  if (!posterPicks[post.id]) {
+    const saved = post.governance?.posterPhotos || {};
+    posterPicks[post.id] = { photos: { ...(saved.photos || {}) },
+                             rolePhotos: { ...(saved.rolePhotos || {}) } };
+  }
+  return posterPicks[post.id];
+}
+
+function renderPosterPhotos(use, g) {
+  const images = current.images
+    .map((m, i) => ({ url: m.url, n: i + 1, m }))
+    .filter(({ m }) => mediaKind(m) === 'image');
+  const picks = posterPicksFor(current);
+  const select = (attrs, value) => {
+    const chosen = images.some((im) => im.url === value) ? value : '';
+    return `<span class="pp-photo-pick">
+      <select class="ed-select" ${attrs} onchange="window.__socialPosterPick(this)">
+        <option value="">不放照片</option>${images.map((im) =>
+          `<option value="${esc(im.url)}" ${im.url === chosen ? 'selected' : ''}>第 ${im.n} 張</option>`).join('')}
+      </select>${chosen ? `<img src="${esc(chosen)}" alt="">` : '<span class="pp-photo-none"></span>'}</span>`;
+  };
+  const head = `<div class="gov-photos-t">海報照片
+    <span class="ai-bar-hint">從這則貼文「圖片／影片」裡的圖挑，編號同上面的順序。${
+      images.length ? '' : '目前還沒有圖片，先在上面加圖。'}</span></div>`;
+  if (!images.length) return `<div class="gov-photos">${head}</div>`;
+
+  if (use === 'PRE_EVENT') {
+    return `<div class="gov-photos">${head}
+      <div class="gov-photo-row"><span>主持人照</span>${
+        select('data-slot="PHOTO_HOST"', picks.photos.PHOTO_HOST)}</div></div>`;
+  }
+  const names = [...new Set((g.request?.roles || []).map((r) => r.name).filter(Boolean))];
+  const typesOf = (n) => (g.request?.roles || []).filter((r) => r.name === n)
+    .map((r) => r.roleType).join('、');
+  return `<div class="gov-photos">${head}
+    <div class="gov-photo-row"><span>團體照（封面／封底）</span>${
+      select('data-slot="PHOTO_GROUP"', picks.photos.PHOTO_GROUP)}</div>
+    ${names.length ? `<details class="gov-photo-roles" ${
+      Object.keys(picks.rolePhotos).length ? 'open' : ''}>
+      <summary>角色人像（${names.length} 位）</summary>
+      ${names.map((n) => `<div class="gov-photo-row"><span>${esc(n)}
+        <small>${esc(typesOf(n))}</small></span>${
+        select(`data-role="${esc(n)}"`, picks.rolePhotos[n])}</div>`).join('')}
+    </details>` : ''}
+  </div>`;
+}
+
+function pickPosterPhoto(el) {
+  if (!current?.id) return;
+  const picks = posterPicksFor(current);
+  const { slot, role } = el.dataset;
+  const bucket = slot ? picks.photos : picks.rolePhotos;
+  const key = slot || role;
+  if (el.value) bucket[key] = el.value;
+  else delete bucket[key];
+  const thumb = el.nextElementSibling;
+  if (el.value) {
+    const img = document.createElement('img');
+    img.src = el.value;
+    img.alt = '';
+    thumb.replaceWith(img);
+  } else {
+    const none = document.createElement('span');
+    none.className = 'pp-photo-none';
+    thumb.replaceWith(none);
+  }
+}
+
+/** Only picks that are still attached images — one removed since is dropped. */
+function activePosterPicks() {
+  const urls = new Set(current.images.filter((m) => mediaKind(m) === 'image').map((m) => m.url));
+  const keep = (obj) => Object.fromEntries(Object.entries(obj).filter(([, u]) => urls.has(u)));
+  const picks = posterPicksFor(current);
+  return { photos: keep(picks.photos), role_photos: keep(picks.rolePhotos) };
+}
+
 async function makePoster() {
   if (!current?.id) return;
   const template_id = document.getElementById('posterTpl')?.value || '';
+  const { photos, role_photos } = activePosterPicks();
+  // The server fills frames from the saved images; a just-added one is not
+  // there until 儲存.
+  const saved = new Set((JSON.parse(baseline || '{}').images || []).map((m) => m.url));
+  if ([...Object.values(photos), ...Object.values(role_photos)].some((u) => !saved.has(u))) {
+    toast('選的照片有還沒儲存的，請先按儲存再產生海報', true);
+    return;
+  }
   // Open the tab inside the click: one opened after the await is a popup to
   // the browser and gets blocked.
   const tab = window.open('', '_blank');
   toast('正在產生海報…');
   try {
     const out = await apiJson(`/social-posts/${current.id}/poster`, {
-      method: 'POST', body: { template_id },
+      method: 'POST', body: { template_id, photos, role_photos },
     });
     if (tab) tab.location.href = out.url;
     else window.location.href = out.url;
@@ -2130,6 +2221,7 @@ export default function SocialPage() {
     window.__socialDropCred    = dropCred;
     window.__socialReview      = reviewPost;
     window.__socialPoster      = makePoster;
+    window.__socialPosterPick  = pickPosterPhoto;
     window.__socialOpenPrefs   = openPrefsModal;
     window.__pp                = ppHandlers;   // 貼文品牌設定 dialog
     setSaveDisabled = setSaveDisabledState;
@@ -2160,7 +2252,7 @@ export default function SocialPage() {
        '__socialFillAll', '__socialCopy', '__socialUpload', '__socialRemoveImage',
        '__socialDelete', '__socialOpenGen', '__socialOpenImg', '__socialOpenPublish',
        '__socialSaveCred', '__socialDropCred', '__socialReview', '__socialPoster',
-       '__socialOpenPrefs', '__pp'].forEach((k) => { delete window[k]; });
+       '__socialPosterPick', '__socialOpenPrefs', '__pp'].forEach((k) => { delete window[k]; });
       setSaveDisabled = null;
       setSaveLabel = null;
       if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
