@@ -3079,7 +3079,8 @@ def _engine_llm(provider: str, api_key: str, model: dict):
         from api._postgen.infrastructure.llm.openai_client import OpenAIClient
         return OpenAIClient(Secret(api_key), model["id"])
     from api._postgen.infrastructure.llm.client import AnthropicClient
-    return AnthropicClient(Secret(api_key), model["id"], max_tokens=8000)
+    # Sonnet／Opus 5.5 一律先思考，思考也算在 max_tokens 裡；8000 對角色多的回顧太緊。
+    return AnthropicClient(Secret(api_key), model["id"], max_tokens=16000)
 
 
 def _platform_texts(svc, ctx, cc, fb_text: str, platforms: list) -> dict:
