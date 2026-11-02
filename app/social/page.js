@@ -470,6 +470,14 @@ function renderImages() {
       <div class="img-pending-t" id="elapsed_${j.jobId}">0 秒</div>
     </div>`).join('');
   tickElapsed();
+  refreshPosterPhotos();
+}
+
+/** The poster photo menus list the attached images, so they follow the strip. */
+function refreshPosterPhotos() {
+  const box = document.getElementById('govPhotos');
+  const plan = current?.governance?.posterPlan;
+  if (box && plan) box.innerHTML = renderPosterPhotos(plan.use, current.governance);
 }
 
 /** One shared ticker for every in-flight tile; stops when none are left. */
@@ -779,7 +787,7 @@ function renderGovernance() {
       <span class="ai-bar-hint">${state === 'approved'
         ? '可在 PowerPoint 裡再編輯；沒選照片的框會保留佔位。' : '核可後才能產生海報。'}</span>
     </div>
-    ${renderPosterPhotos(plan.use, g)}` : ''}
+    <div id="govPhotos">${renderPosterPhotos(plan.use, g)}</div>` : ''}
   </div>`;
 }
 
@@ -840,9 +848,12 @@ function renderPosterPhotos(use, g) {
           `<option value="${esc(im.url)}" ${im.url === chosen ? 'selected' : ''}>第 ${im.n} 張</option>`).join('')}
       </select>${chosen ? `<img src="${esc(chosen)}" alt="">` : '<span class="pp-photo-none"></span>'}</span>`;
   };
+  const jump = `<a href="#imgStrip" class="gov-photos-jump" onclick="event.preventDefault();
+    document.getElementById('imgStrip')?.scrollIntoView({ behavior: 'smooth', block: 'center' })">下方「圖片／影片」</a>`;
   const head = `<div class="gov-photos-t">海報照片
-    <span class="ai-bar-hint">從這則貼文「圖片／影片」裡的圖挑，編號同上面的順序。${
-      images.length ? '' : '目前還沒有圖片，先在上面加圖。'}</span></div>`;
+    <span class="ai-bar-hint">${images.length
+      ? `從${jump}裡的圖挑，編號同那裡的順序。`
+      : `還沒有圖片。請到${jump}按「上傳圖片／影片」，加完按儲存，這裡就會出現選單。`}</span></div>`;
   if (!images.length) return `<div class="gov-photos">${head}</div>`;
 
   if (use === 'PRE_EVENT') {
