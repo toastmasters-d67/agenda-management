@@ -253,7 +253,7 @@ def test_another_poster_template_uses_the_approved_highlights(api, club, monkeyp
     assert "核可過的描述：Bill" in text
 
 
-def test_poster_photos_come_from_the_posts_own_images(api, club, monkeypatch):
+def test_poster_photos_are_the_clubs_own_uploads(api, club, monkeypatch):
     import io
     from PIL import Image
     from pptx import Presentation
@@ -274,15 +274,23 @@ def test_poster_photos_come_from_the_posts_own_images(api, club, monkeypatch):
     client.post(f"/api/social-posts/{post['id']}/review",
                 json={"action": "approve", "confirmed": post["governance"]["aiWrittenHighlights"]},
                 headers=h)
-    group, face = "https://r2.example/media/g.jpg", "https://r2.example/media/t.jpg"
-    payload = {k: post[k] for k in ("title", "status", "body", "variants", "kind")}
-    client.put(f"/api/social-posts/{post['id']}",
-               json={**payload, "agenda_id": post["agendaId"],
-                     "images": [{"url": group}, {"url": face}]}, headers=h)
+    own = f"https://r2.example/media/clubs/{club['id']}/"
+    group, face = own + "g.jpg", own + "t.jpg"
+    for bad in ("https://elsewhere.example/x.jpg", "https://r2.example/media/clubs/999999/x.jpg",
+                own + "clip.mp4"):
+        r = client.post(f"/api/social-posts/{post['id']}/poster", headers=h,
+                        json={"photos": {"PHOTO_GROUP": bad}})
+        assert r.status_code == 400, bad
 
-    r = client.post(f"/api/social-posts/{post['id']}/poster", headers=h,
-                    json={"photos": {"PHOTO_GROUP": "https://elsewhere.example/x.jpg"}})
-    assert r.status_code == 400
+    # Saved as soon as uploaded, without touching the post's own images.
+    r = client.put(f"/api/social-posts/{post['id']}/poster-photos", headers=h,
+                   json={"photos": {"PHOTO_GROUP": group}, "role_photos": {"庭敏": face}})
+    assert r.status_code == 200, r.text
+    r = client.put(f"/api/social-posts/{post['id']}/poster-photos", headers=club["headers"]["member"],
+                   json={"photos": {}})
+    assert r.status_code == 403
+    r = client.get(f"/api/social-posts/{post['id']}", headers=h)
+    assert r.json()["images"] == [] and r.json()["governance"]["posterPhotos"]["photos"] == {"PHOTO_GROUP": group}
 
     r = client.post(f"/api/social-posts/{post['id']}/poster", headers=h,
                     json={"photos": {"PHOTO_GROUP": group}, "role_photos": {"庭敏": face}})

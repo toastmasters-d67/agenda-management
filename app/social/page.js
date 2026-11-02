@@ -470,10 +470,8 @@ function renderImages() {
       <div class="img-pending-t" id="elapsed_${j.jobId}">0 秒</div>
     </div>`).join('');
   tickElapsed();
-  refreshPosterPhotos();
 }
 
-/** The poster photo menus list the attached images, so they follow the strip. */
 function refreshPosterPhotos() {
   const box = document.getElementById('govPhotos');
   const plan = current?.governance?.posterPlan;
@@ -827,10 +825,12 @@ async function reviewPost(action) {
   }
 }
 
-// Which attached image goes into which poster photo frame, per post. Seeded
-// from the picks the server remembered with the last poster; kept out of
-// `current` so choosing a photo never marks the post as unsaved.
+// The poster's own photos, per post: uploaded straight into a frame, never
+// added to 圖片／影片 (those are what gets published). The server keeps them
+// in the post's governance; they stay out of `current` so a photo never marks
+// the post as unsaved.
 const posterPicks = {};
+const POSTER_PHOTO_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
 
 function posterPicksFor(post) {
   if (!posterPicks[post.id]) {
@@ -842,25 +842,18 @@ function posterPicksFor(post) {
 }
 
 function renderPosterPhotos(use, g) {
-  const images = current.images
-    .map((m, i) => ({ url: m.url, n: i + 1, m }))
-    .filter(({ m }) => mediaKind(m) === 'image');
   const picks = posterPicksFor(current);
-  const select = (attrs, value) => {
-    const chosen = images.some((im) => im.url === value) ? value : '';
-    return `<span class="pp-photo-pick">
-      <select class="ed-select" ${attrs} onchange="window.__socialPosterPick(this)">
-        <option value="">不放照片</option>${images.map((im) =>
-          `<option value="${esc(im.url)}" ${im.url === chosen ? 'selected' : ''}>第 ${im.n} 張</option>`).join('')}
-      </select>${chosen ? `<img src="${esc(chosen)}" alt="">` : '<span class="pp-photo-none"></span>'}</span>`;
-  };
-  const jump = `<a href="#imgStrip" class="gov-photos-jump" onclick="event.preventDefault();
-    document.getElementById('imgStrip')?.scrollIntoView({ behavior: 'smooth', block: 'center' })">下方「圖片／影片」</a>`;
+  const select = (attrs, url) => `<span class="pp-photo-pick">
+      ${url ? `<a href="${esc(url)}" target="_blank" rel="noopener" title="看原圖"><img src="${esc(url)}" alt=""></a>`
+            : '<span class="pp-photo-none"></span>'}
+      <label class="btn-mini btn-file">${url ? '換一張' : '上傳照片'}
+        <input type="file" accept="${POSTER_PHOTO_TYPES.join(',')}" ${attrs}
+               onchange="window.__socialPosterPick(this)"></label>
+      ${url ? `<button type="button" class="btn-mini" ${attrs}
+               onclick="window.__socialPosterPick(this)">移除</button>` : ''}
+    </span>`;
   const head = `<div class="gov-photos-t">海報照片
-    <span class="ai-bar-hint">${images.length
-      ? `從${jump}裡的圖挑，編號同那裡的順序。`
-      : `還沒有圖片。請到${jump}按「上傳圖片／影片」，加完按儲存，這裡就會出現選單。`}</span></div>`;
-  if (!images.length) return `<div class="gov-photos">${head}</div>`;
+    <span class="ai-bar-hint">只放進 PPTX 海報，不會加到貼文的「圖片／影片」、也不會發布出去。上傳後自動存好。</span></div>`;
 
   if (use === 'PRE_EVENT') {
     return `<div class="gov-photos">${head}
@@ -883,46 +876,55 @@ function renderPosterPhotos(use, g) {
   </div>`;
 }
 
-function pickPosterPhoto(el) {
+/** Upload into one frame (a file input) or clear it (the 移除 button). */
+async function pickPosterPhoto(el) {
   if (!current?.id) return;
-  const picks = posterPicksFor(current);
+  const post = current;
   const { slot, role } = el.dataset;
-  const bucket = slot ? picks.photos : picks.rolePhotos;
-  const key = slot || role;
-  if (el.value) bucket[key] = el.value;
-  else delete bucket[key];
-  const thumb = el.nextElementSibling;
-  if (el.value) {
-    const img = document.createElement('img');
-    img.src = el.value;
-    img.alt = '';
-    thumb.replaceWith(img);
-  } else {
-    const none = document.createElement('span');
-    none.className = 'pp-photo-none';
-    thumb.replaceWith(none);
+  const file = el.files?.[0];
+  if (el.files) el.value = '';
+  if (el.files && !file) return;
+  if (file && !POSTER_PHOTO_TYPES.includes(file.type)) {
+    toast('海報照片請用 JPG、PNG、WebP 或 GIF', true);
+    return;
   }
-}
-
-/** Only picks that are still attached images — one removed since is dropped. */
-function activePosterPicks() {
-  const urls = new Set(current.images.filter((m) => mediaKind(m) === 'image').map((m) => m.url));
-  const keep = (obj) => Object.fromEntries(Object.entries(obj).filter(([, u]) => urls.has(u)));
-  const picks = posterPicksFor(current);
-  return { photos: keep(picks.photos), role_photos: keep(picks.rolePhotos) };
+  const restore = file ? busyButton(el.closest('.btn-file'), '上傳中…') : () => {};
+  try {
+    let url = '';
+    if (file) {
+      const { uploadUrl, publicUrl } = await apiJson('/upload/presign', {
+        method: 'POST',
+        body: { filename: file.name, content_type: file.type, club_id: post.clubId },
+      });
+      const res = await fetch(uploadUrl, {
+        method: 'PUT', headers: { 'Content-Type': file.type }, body: file,
+      });
+      if (!res.ok) throw new Error('上傳至雲端失敗');
+      url = publicUrl;
+    }
+    const picks = posterPicksFor(post);
+    const next = { photos: { ...picks.photos }, rolePhotos: { ...picks.rolePhotos } };
+    const bucket = slot ? next.photos : next.rolePhotos;
+    if (url) bucket[slot || role] = url;
+    else delete bucket[slot || role];
+    const saved = await apiJson(`/social-posts/${post.id}/poster-photos`, {
+      method: 'PUT', body: { photos: next.photos, role_photos: next.rolePhotos },
+    });
+    posterPicks[post.id] = { photos: saved.photos, rolePhotos: saved.rolePhotos };
+    if (current === post) refreshPosterPhotos();
+  } catch (e) {
+    toast(e.message || '海報照片上傳失敗', true);
+  } finally {
+    restore();
+  }
 }
 
 async function makePoster() {
   if (!current?.id) return;
   const template_id = document.getElementById('posterTpl')?.value || '';
-  const { photos, role_photos } = activePosterPicks();
-  // The server fills frames from the saved images; a just-added one is not
-  // there until 儲存.
-  const saved = new Set((JSON.parse(baseline || '{}').images || []).map((m) => m.url));
-  if ([...Object.values(photos), ...Object.values(role_photos)].some((u) => !saved.has(u))) {
-    toast('選的照片有還沒儲存的，請先按儲存再產生海報', true);
-    return;
-  }
+  const picks = posterPicksFor(current);
+  const photos = picks.photos;
+  const role_photos = picks.rolePhotos;
   // Open the tab inside the click: one opened after the await is a popup to
   // the browser and gets blocked.
   const tab = window.open('', '_blank');

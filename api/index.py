@@ -3285,6 +3285,34 @@ def _template_local_path(tpl: dict) -> str:
     return str(pptx_registry.template_path(tpl))
 
 
+_PHOTO_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".gif")
+
+
+def _is_club_photo(club_id: int, url: str) -> bool:
+    """這個分會上傳到本系統 R2 的圖片。海報照片只收這種——別處的網址不下載。"""
+    prefix = f"{R2_PUBLIC_URL}/media/clubs/{club_id}/"
+    return (bool(R2_PUBLIC_URL) and isinstance(url, str) and url.startswith(prefix)
+            and ".." not in url and url.split("?", 1)[0].lower().endswith(_PHOTO_EXTS))
+
+
+def _poster_photo_picks(club_id: int, photos: dict, role_photos: dict) -> tuple[dict, dict]:
+    photos = {k: v for k, v in (photos or {}).items() if v and k in ("PHOTO_HOST", "PHOTO_GROUP")}
+    role_photos = {k: v for k, v in (role_photos or {}).items() if k and v}
+    if not all(_is_club_photo(club_id, v) for v in [*photos.values(), *role_photos.values()]):
+        raise HTTPException(status_code=400,
+                            detail="海報照片要是本分會上傳到系統的圖片（jpg、png、webp、gif）")
+    return photos, role_photos
+
+
+def _save_poster_photos(post_id: int, photos: dict, role_photos: dict) -> None:
+    """記下哪張照片放哪個框。不算內容：不動 updated_at，重新生成貼文時會清掉。"""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE social_posts SET governance = COALESCE(governance, '{}'::jsonb)"
+                        " || jsonb_build_object('posterPhotos', %s::jsonb) WHERE id=%s",
+                        (json.dumps({"photos": photos, "rolePhotos": role_photos}), post_id))
+
+
 def _build_poster(post: dict, club_id: int, req: PosterRequest) -> dict:
     """依存好的海報計畫填模板 → 上傳 R2 → 回傳網址。不重新呼叫模型。"""
     from api._postgen.infrastructure.pptx.template_filler import fill_template
@@ -3317,18 +3345,12 @@ def _build_poster(post: dict, club_id: int, req: PosterRequest) -> dict:
         if plan.get("dropped_roles"):
             raise HTTPException(status_code=400, detail="這個模板頁數不夠，會漏掉角色："
                                                         + "、".join(plan["dropped_roles"]))
-    own = {m["url"] for m in _media_list(post["images"]) if m["kind"] == "image"}
-    photos = {k: v for k, v in (req.photos or {}).items()
-              if v and k in ("PHOTO_HOST", "PHOTO_GROUP")}
-    role_photos = {k: v for k, v in (req.role_photos or {}).items() if k and v}
-    if any(v not in own for v in [*photos.values(), *role_photos.values()]):
-        raise HTTPException(status_code=400,
-                            detail="海報照片只能用這則貼文自己附的圖片（影片不行），請先在「圖片／影片」加上")
+    photos, role_photos = _poster_photo_picks(club_id, req.photos, req.role_photos)
     temp_files = []
     downloaded = {}
 
     def resolve_photo(ref):
-        if ref not in own:          # only this post's own attachments
+        if not _is_club_photo(club_id, ref):
             return None
         if ref not in downloaded:   # one photo can fill several frames
             downloaded[ref] = _download_r2(ref, os.path.splitext(ref)[1] or ".jpg")
@@ -3351,13 +3373,7 @@ def _build_poster(post: dict, club_id: int, req: PosterRequest) -> dict:
     key = f"media/clubs/{club_id}/social/poster_{post['id']}_{uuid.uuid4().hex[:8]}.pptx"
     _r2().put_object(Bucket=R2_BUCKET_NAME, Key=key, Body=data,
                      ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation")
-    # Remember which photo went where, so the next poster starts from the same
-    # picks. Not content: updated_at stays, and regenerating the post drops it.
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("UPDATE social_posts SET governance = COALESCE(governance, '{}'::jsonb)"
-                        " || jsonb_build_object('posterPhotos', %s::jsonb) WHERE id=%s",
-                        (json.dumps({"photos": photos, "rolePhotos": role_photos}), post["id"]))
+    _save_poster_photos(post["id"], photos, role_photos)
     return {"url": f"{R2_PUBLIC_URL}/{key}", "template": tpl["id"], "templateName": tpl["name"],
             "photos": photos, "rolePhotos": role_photos}
 
@@ -3369,6 +3385,18 @@ def make_post_poster(post_id: int, req: PosterRequest,
         with conn.cursor() as cur:
             post = _social_row(_load_social_post(cur, post_id, user))
     return _build_poster(post, post["clubId"], req)
+
+
+@app.put("/api/social-posts/{post_id}/poster-photos")
+def save_post_poster_photos(post_id: int, req: PosterRequest,
+                            user: dict = Depends(require_club_admin_or_above)):
+    """海報照片一上傳就記下來，不必等產生海報（也不必按貼文的儲存）。"""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            post = _social_row(_load_social_post(cur, post_id, user))
+    photos, role_photos = _poster_photo_picks(post["clubId"], req.photos, req.role_photos)
+    _save_poster_photos(post_id, photos, role_photos)
+    return {"photos": photos, "rolePhotos": role_photos}
 
 
 # ---- club post prefs ----
@@ -8126,7 +8154,7 @@ MCP_TOOLS = [
         "name": "make_post_poster", "scope": "posts:write", "title": "產生 PPTX 海報",
         "description": "依已核可的受控貼文產生可編輯的 PPTX 海報，回傳下載連結。不重新呼叫 AI。"
                        "貼文還沒核可會被拒絕。template_id 可換別的模板（list_post_templates）。"
-                       "照片只能用這則貼文自己附的圖片網址（get_post 的 images；沒有就先 add_post_image）："
+                       "照片要是本分會上傳到系統的圖片網址（例如 get_post 的 images）："
                        "photos 放主持人照（PHOTO_HOST，宣傳）或團體照（PHOTO_GROUP，回顧），"
                        "role_photos 依角色姓名放人像（回顧，姓名同 get_post 的 governance.request.roles）。"
                        "沒指定的照片框保留佔位。",

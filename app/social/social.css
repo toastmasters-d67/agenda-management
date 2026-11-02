@@ -533,7 +533,6 @@ body {
 .gov-photos { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
 .gov-photos-t { font-size: 12px; font-weight: 600; color: #0f172a; display: flex; gap: 8px; flex-wrap: wrap; align-items: baseline; }
 .gov-photos-t .ai-bar-hint { font-weight: 400; }
-.gov-photos-jump { color: #004165; text-decoration: underline; cursor: pointer; }
 .gov-photo-row {
   display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; font-size: 12px;
 }
