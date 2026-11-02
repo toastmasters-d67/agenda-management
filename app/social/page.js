@@ -772,7 +772,13 @@ function renderGovernance() {
       <ul class="gov-notes">${quiet.map((n) => `<li class="note-info">${esc(n.text)}</li>`).join('')}</ul>
     </details>` : ''}
     ${aiNames.length && state !== 'approved' ? `<div class="gov-ai">
-      <div class="gov-ai-t">這些角色沒有亮點筆記，描述是 AI 依角色職責補寫的（不是本人實際表現）。請逐一看過，再勾選確認：</div>
+      <div class="gov-ai-t">這些角色沒有亮點筆記，描述是 AI 依角色職責補寫的（不是本人實際表現）。請逐一看過，再勾選確認：
+        <button type="button" class="btn-mini gov-ai-all" onclick="(() => {
+          const boxes = [...document.querySelectorAll('.gov-ai-cb')];
+          const on = !boxes.every((b) => b.checked);
+          boxes.forEach((b) => { b.checked = on; });
+          this.textContent = on ? '全部取消' : '全部勾選';
+        })()">全部勾選</button></div>
       ${aiNames.map((n) => `<label class="gov-ai-item"><input type="checkbox" class="gov-ai-cb" value="${esc(n)}"> ${esc(n)}</label>`).join('')}
     </div>` : ''}
     ${officer ? `<div class="gov-actions">
