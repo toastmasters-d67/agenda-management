@@ -58,7 +58,7 @@ def test_new_tools_are_registered_with_valid_scopes(index):
     names = {t["name"] for t in index.MCP_TOOLS}
     for n in ("start_post", "submit_post", "get_post_prefs", "update_post_prefs", "list_post_templates",
               "make_post_poster", "set_word_template", "set_custom_roles", "list_machines",
-              "pair_machine", "update_machine"):
+              "pair_machine", "update_machine", "set_post_poster_photo", "download_post_template"):
         assert n in names
     assert all(t["scope"] in (None, *index.MCP_SCOPES) for t in index.MCP_TOOLS)
 
@@ -238,6 +238,79 @@ def test_poster_template_tools(index, env, monkeypatch):
     call(index, "delete_post_template", env["officer"], {"template_id": row["id"]})
     names = [t["id"] for t in call(index, "list_post_templates", env["officer"], {})["structuredContent"]["templates"]]
     assert row["id"] not in names
+
+
+class _FakeR2Reads(_FakeR2):
+    def get_object(self, Bucket, Key):
+        return {"Body": io.BytesIO(self.objects[Key][0])}
+
+
+def _jpeg_b64():
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", (40, 30), "blue").save(buf, "JPEG")
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def test_poster_photos_through_mcp(index, env, monkeypatch):
+    from pptx import Presentation
+    from pptx.enum.shapes import MSO_SHAPE_TYPE
+    fake = _FakeR2Reads()
+    monkeypatch.setattr(index, "_r2", lambda: fake)
+    monkeypatch.setattr(index, "R2_PUBLIC_URL", "https://r2.example")
+    created = call(index, "create_post", env["officer"], {"club_id": env["cid"], "kind": "recap",
+                                                          "agenda_id": env["aid"]})
+    pid = created["structuredContent"]["postId"]
+    call(index, "generate_copy", env["officer"], {"post_id": pid})
+    gov = call(index, "get_post", env["officer"], {"post_id": pid})["structuredContent"]["governance"]
+    call(index, "review_post", env["officer"], {"post_id": pid, "action": "approve",
+                                                "confirmed": gov["aiWrittenHighlights"]})
+
+    bad = call(index, "set_post_poster_photo", env["officer"],
+               {"post_id": pid, "role": "冒名者", "image_base64": _jpeg_b64()})
+    assert bad["isError"] and "Cat" in bad["content"][0]["text"]
+    assert not fake.objects                                  # refused before uploading
+    for args in ({"slot": "PHOTO_GROUP"}, {"role": "Cat"}):
+        out = call(index, "set_post_poster_photo", env["officer"],
+                   {"post_id": pid, "image_base64": _jpeg_b64(), **args})
+        assert not out["isError"], out["content"][0]["text"]
+    post = call(index, "get_post", env["officer"], {"post_id": pid})["structuredContent"]
+    assert post["images"] == []                              # never attached to the post itself
+    assert set(post["governance"]["posterPhotos"]["rolePhotos"]) == {"Cat"}
+    assert all("/poster-photos/" in k for k in fake.objects)
+
+    # No photos given: the saved ones are used, and kept.
+    out = call(index, "make_post_poster", env["officer"], {"post_id": pid})
+    assert not out["isError"] and "2 張照片" in out["content"][0]["text"]
+    data = next(b for k, (b, _) in fake.objects.items() if k.endswith(".pptx"))
+    slides = list(Presentation(io.BytesIO(data)).slides)
+    pics = [sum(sh.shape_type == MSO_SHAPE_TYPE.PICTURE for sh in s.shapes) for s in slides]
+    assert pics[0] == 1 and pics[-1] == 1 and sum(pics) == 3
+    gov = call(index, "get_post", env["officer"], {"post_id": pid})["structuredContent"]["governance"]
+    assert set(gov["posterPhotos"]["rolePhotos"]) == {"Cat"}
+
+    out = call(index, "set_post_poster_photo", env["officer"], {"post_id": pid, "role": "Cat", "clear": True})
+    assert out["structuredContent"]["rolePhotos"] == {}
+    with pytest.raises(index.HTTPException):                 # someone else's file
+        call(index, "make_post_poster", env["officer"],
+             {"post_id": pid, "photos": {"PHOTO_GROUP": "https://elsewhere.example/a.jpg"}})
+
+
+def test_download_post_template_and_copy_model_check(index, env, monkeypatch):
+    fake = _FakeR2()
+    monkeypatch.setattr(index, "_r2", lambda: fake)
+    out = call(index, "download_post_template", env["officer"], {"template_id": "recap_yellow_v1"})
+    assert not out["isError"] and out["structuredContent"]["url"].endswith("recap_yellow_v1.pptx")
+    ((key, (body, _)),) = fake.objects.items()
+    assert key.startswith(f"media/clubs/{env['cid']}/templates/") and body[:2] == b"PK"
+    assert call(index, "download_post_template", env["officer"], {"template_id": "nope"})["isError"]
+
+    created = call(index, "create_post", env["officer"], {"club_id": env["cid"], "kind": "promo",
+                                                          "agenda_id": env["aid"]})
+    out = call(index, "generate_copy", env["officer"],
+               {"post_id": created["structuredContent"]["postId"], "provider": "openai",
+                "model": "claude-sonnet-5-5"})
+    assert out["isError"] and "gpt-6-luna" in out["content"][0]["text"]
 
 
 def test_free_copy_goes_through_the_engine_clients(index, monkeypatch):

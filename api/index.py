@@ -3261,8 +3261,9 @@ def _require_approved(post: dict):
 
 class PosterRequest(BaseModel):
     template_id: str = ""
-    photos: Dict[str, str] = {}               # PHOTO_HOST／PHOTO_GROUP → 這則貼文自己的附圖網址
-    role_photos: Dict[str, str] = {}          # 角色姓名 → 這則貼文自己的附圖網址
+    # None = 沒給，沿用這則貼文已存的海報照片；{} = 全部不放。
+    photos: Optional[Dict[str, str]] = None   # PHOTO_HOST／PHOTO_GROUP → 本分會上傳的圖片網址
+    role_photos: Optional[Dict[str, str]] = None  # 角色姓名 → 本分會上傳的圖片網址
 
 
 def _download_r2(url: str, suffix: str) -> str:
@@ -3345,7 +3346,11 @@ def _build_poster(post: dict, club_id: int, req: PosterRequest) -> dict:
         if plan.get("dropped_roles"):
             raise HTTPException(status_code=400, detail="這個模板頁數不夠，會漏掉角色："
                                                         + "、".join(plan["dropped_roles"]))
-    photos, role_photos = _poster_photo_picks(club_id, req.photos, req.role_photos)
+    saved = gov.get("posterPhotos") or {}
+    photos, role_photos = _poster_photo_picks(
+        club_id,
+        saved.get("photos") if req.photos is None else req.photos,
+        saved.get("rolePhotos") if req.role_photos is None else req.role_photos)
     temp_files = []
     downloaded = {}
 
@@ -3394,7 +3399,11 @@ def save_post_poster_photos(post_id: int, req: PosterRequest,
     with get_db() as conn:
         with conn.cursor() as cur:
             post = _social_row(_load_social_post(cur, post_id, user))
-    photos, role_photos = _poster_photo_picks(post["clubId"], req.photos, req.role_photos)
+    saved = post["governance"].get("posterPhotos") or {}
+    photos, role_photos = _poster_photo_picks(
+        post["clubId"],
+        saved.get("photos") if req.photos is None else req.photos,
+        saved.get("rolePhotos") if req.role_photos is None else req.role_photos)
     _save_poster_photos(post_id, photos, role_photos)
     return {"photos": photos, "rolePhotos": role_photos}
 
@@ -5893,12 +5902,19 @@ def _tool_generate_copy(caller, args):
     with get_db() as conn:
         with conn.cursor() as cur:
             row = _social_row(_load_social_post(cur, post_id, caller))
+    provider = args.get("provider") or "anthropic"
+    model = args.get("model") or ""
+    if model and model not in {m["id"] for m in COPY_MODELS.get(provider) or []}:
+        # _copy_model would quietly fall back to the default — and bill a
+        # different model than the one asked for.
+        return _tool_text(f"{provider} 沒有模型 {model}。可用：" + "、".join(
+            m["id"] for m in COPY_MODELS.get(provider) or []), is_error=True)
     req = SocialGenerateRequest(
         club_id=row["clubId"], agenda_id=row["agendaId"], kind=row["kind"],
         brief=args.get("brief") or "",
         platforms=[p for p in (args.get("platforms") or []) if p in SOCIAL_PLATFORMS],
-        provider=args.get("provider") or "anthropic",
-        model=args.get("model") or "",
+        provider=provider,
+        model=model,
         post_id=post_id,
         options={"host_highlight": args.get("host_highlight") or "",
                  "role_notes": args.get("role_notes") or {},
@@ -7395,8 +7411,69 @@ def _tool_make_post_poster(caller, args):
             post = _social_row(_load_social_post(cur, int(args["post_id"]), caller))
     out = _build_poster(post, post["clubId"], PosterRequest(
         template_id=args.get("template_id") or "",
-        photos=args.get("photos") or {}, role_photos=args.get("role_photos") or {}))
-    return _tool_text(f"已產生「{out['templateName']}」海報（可編輯 PPTX）：{out['url']}", out)
+        photos=args.get("photos"), role_photos=args.get("role_photos")))
+    placed = len(out["photos"]) + len(out["rolePhotos"])
+    return _tool_text(f"已產生「{out['templateName']}」海報（可編輯 PPTX，放了 {placed} 張照片）：{out['url']}",
+                      out)
+
+
+def _tool_set_post_poster_photo(caller, args):
+    """One poster frame at a time — the web page's 上傳照片 / 移除 buttons."""
+    _officer_only(caller)
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            post = _social_row(_load_social_post(cur, int(args["post_id"]), caller))
+    slot, role = args.get("slot") or "", (args.get("role") or "").strip()
+    if bool(slot) == bool(role):
+        return _tool_text("slot（PHOTO_HOST／PHOTO_GROUP）與 role（角色姓名）要給其中一個", is_error=True)
+    if slot and slot not in ("PHOTO_HOST", "PHOTO_GROUP"):
+        return _tool_text("slot 只能是 PHOTO_HOST（宣傳的主持人照）或 PHOTO_GROUP（回顧的團體照）",
+                          is_error=True)
+    roles = {r.get("name") for r in ((post["governance"].get("request") or {}).get("roles") or [])}
+    if role and role not in roles:
+        return _tool_text("這則貼文的回顧角色裡沒有「" + role + "」。可用的姓名："
+                          + ("、".join(sorted(n for n in roles if n)) or "（沒有角色；角色人像只用在回顧）"),
+                          is_error=True)
+    saved = post["governance"].get("posterPhotos") or {}
+    photos, role_photos = dict(saved.get("photos") or {}), dict(saved.get("rolePhotos") or {})
+    bucket, key = (photos, slot) if slot else (role_photos, role)
+    if args.get("clear"):
+        bucket.pop(key, None)
+        url = ""
+    else:
+        raw, ctype = _image_from_args(args)
+        url = _store_image(raw, ctype, f"media/clubs/{post['clubId']}/poster-photos")
+        bucket[key] = url
+    _save_poster_photos(post["id"], photos, role_photos)
+    what = {"PHOTO_HOST": "主持人照", "PHOTO_GROUP": "團體照"}.get(slot) or f"{role} 的人像"
+    return _tool_text(f"已{'移除' if not url else '設定'}貼文 #{post['id']} 海報的{what}"
+                      "（只用在 PPTX 海報，不會加到貼文圖片、也不會發布）。用 make_post_poster 產生海報。",
+                      {"postId": post["id"], "photos": photos, "rolePhotos": role_photos})
+
+
+def _tool_download_post_template(caller, args):
+    """A template's .pptx as a link — to start a new design from a built-in one."""
+    rows = list_post_templates(args.get("club_id") or caller["club_id"], caller)
+    tpl = next((t for t in rows if t["id"] == args.get("template_id")), None)
+    if not tpl:
+        return _tool_text("找不到這個模板（用 list_post_templates 查 id）", is_error=True)
+    from api._postgen.modules.template_selector import pptx_registry
+    if tpl["source"] == "builtin":
+        builtin = next(t for t in pptx_registry.list_templates([]) if t["id"] == tpl["id"])
+        with open(pptx_registry.template_path(builtin), "rb") as fh:
+            data = fh.read()
+        cid = args.get("club_id") or caller["club_id"]
+        key = f"media/clubs/{cid}/templates/{uuid.uuid4().hex[:12]}/{tpl['id']}.pptx"
+        _r2().put_object(Bucket=R2_BUCKET_NAME, Key=key, Body=data, ContentType=(
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation"))
+        url = f"{R2_PUBLIC_URL}/{key}"
+    else:
+        url = tpl.get("fileUrl") or ""
+    if not url:
+        return _tool_text("這個模板沒有檔案可以下載", is_error=True)
+    return _tool_text(f"「{tpl['name']}」的 PPTX（任何拿到連結的人都能開啟）：{url}\n"
+                      "改版面與配色時，{{標記}} 與照片框名稱（PHOTO_*）請保留原樣。",
+                      {"templateId": tpl["id"], "url": url})
 
 
 # ---- badges (machines) ----
@@ -7702,7 +7779,10 @@ MCP_TOOLS = [
     },
     {
         "name": "get_post", "scope": "posts:read", "title": "取得貼文",
-        "description": "取得一則貼文的完整內容：主文案、各平台版本、圖片、已發布到哪些平台。",
+        "description": "取得一則貼文的完整內容：主文案、各平台版本、圖片、已發布到哪些平台。"
+                       "受控貼文（例會宣傳／回顧）另有 reviewState（待核可／已核可／已退回）與 governance："
+                       "品質檢查、AI 補寫的角色（aiWrittenHighlights）、回顧角色名單（request.roles）、"
+                       "海報照片（posterPhotos）。",
         "inputSchema": {"type": "object", "properties": {
             "post_id": {"type": "integer"},
         }, "required": ["post_id"], "additionalProperties": False},
@@ -7754,7 +7834,11 @@ MCP_TOOLS = [
             "platforms": {"type": "array", "items": {"type": "string"},
                           "description": "要產生哪些平台，預設全部"},
             "provider": {"type": "string", "enum": ["anthropic", "openai"]},
-            "model": {"type": "string", "description": "留空用預設模型"},
+            "model": {"type": "string",
+                      "enum": [m["id"] for ms in COPY_MODELS.values() for m in ms],
+                      "description": "留空用該家的預設模型。要與 provider 同一家：" + "；".join(
+                          f"{p}：" + "、".join(f"{m['id']}（{m['note']}，{m['price']}）" for m in ms)
+                          for p, ms in COPY_MODELS.items())},
             **_GOVERNED_OPTION_PROPS,
         }, "required": ["post_id"], "additionalProperties": False},
         "annotations": {"readOnlyHint": False, "destructiveHint": True,
@@ -7840,7 +7924,9 @@ MCP_TOOLS = [
         "name": "export_agenda", "scope": "posts:read", "title": "下載議程 PDF／JPG／Word",
         "description": "把議程輸出成 PDF、JPG 和／或可編輯的 Word（docx），與網頁「下載」按鈕相同的檔案，"
                        "回傳下載連結。多頁版型的 JPG 每頁一張。Word 用分會上傳的 Word 範本（沒有就用系統預設範本），"
-                       "適合要下載後自己再改版面的人。約需 10～30 秒。連結是公開的，拿到的人都能開。",
+                       "適合要下載後自己再改版面的人。分會上傳了該場次（中文場／英文場）的 Word 範本時，"
+                       "PDF、JPG 也用 Word 版型（主機不支援轉檔時改用網頁版型）。"
+                       "約需 10～30 秒。連結是公開的，拿到的人都能開。",
         "inputSchema": {"type": "object", "properties": {
             "agenda_id": {"type": "integer"},
             "formats": {"type": "array", "items": {"type": "string", "enum": ["pdf", "jpg", "docx"]},
@@ -8142,7 +8228,8 @@ MCP_TOOLS = [
     },
     {
         "name": "list_post_templates", "scope": "posts:read", "title": "列出海報模板",
-        "description": "宣傳／回顧貼文可用的 PPTX 海報模板（內建 + 分會上傳）。",
+        "description": "宣傳／回顧貼文可用的 PPTX 海報模板（內建 + 分會上傳）。"
+                       "要拿某個模板的檔案來改，用 download_post_template。",
         "inputSchema": {"type": "object", "properties": {
             "club_id": {"type": "integer"},
         }, "additionalProperties": False},
@@ -8154,10 +8241,12 @@ MCP_TOOLS = [
         "name": "make_post_poster", "scope": "posts:write", "title": "產生 PPTX 海報",
         "description": "依已核可的受控貼文產生可編輯的 PPTX 海報，回傳下載連結。不重新呼叫 AI。"
                        "貼文還沒核可會被拒絕。template_id 可換別的模板（list_post_templates）。"
-                       "照片要是本分會上傳到系統的圖片網址（例如 get_post 的 images）："
+                       "照片：不給 photos／role_photos 就用這則貼文已存的海報照片"
+                       "（網頁上傳的、或 set_post_poster_photo 設的，見 get_post 的 governance.posterPhotos）。"
+                       "要這次另外指定，給本分會上傳到系統的圖片網址："
                        "photos 放主持人照（PHOTO_HOST，宣傳）或團體照（PHOTO_GROUP，回顧），"
-                       "role_photos 依角色姓名放人像（回顧，姓名同 get_post 的 governance.request.roles）。"
-                       "沒指定的照片框保留佔位。",
+                       "role_photos 依角色姓名放人像（回顧，姓名同 get_post 的 governance.request.roles）；"
+                       "給了就會取代已存的那一組。沒照片的框保留佔位。",
         "inputSchema": {"type": "object", "properties": {
             "post_id": {"type": "integer"},
             "template_id": {"type": "string"},
@@ -8171,6 +8260,41 @@ MCP_TOOLS = [
         "annotations": {"readOnlyHint": False, "destructiveHint": False,
                         "idempotentHint": False, "openWorldHint": False},
         "handler": _tool_make_post_poster,
+    },
+    {
+        "name": "set_post_poster_photo", "scope": "posts:write", "title": "設定海報照片",
+        "description": "替受控貼文（例會宣傳／回顧）的 PPTX 海報放一張照片，或移除（clear=true）。"
+                       "照片只用在海報，不會加到貼文圖片、也不會發布；和網頁「海報照片」的上傳按鈕同一份。"
+                       "slot：PHOTO_HOST（宣傳的主持人照）或 PHOTO_GROUP（回顧的團體照，封面與封底）；"
+                       "或 role：回顧角色的姓名（get_post 的 governance.request.roles），放在該角色的人像框。"
+                       "slot 與 role 給其中一個。圖片給 image（檔案）、image_url 或 image_base64 其中一個"
+                       "（JPG、PNG、WebP、GIF，15 MB 內）。設好後用 make_post_poster 產生。限分會管理員以上。",
+        "inputSchema": {"type": "object", "properties": {
+            "post_id": {"type": "integer"},
+            "slot": {"type": "string", "enum": ["PHOTO_HOST", "PHOTO_GROUP"]},
+            "role": {"type": "string", "description": "回顧角色的姓名"},
+            "image": {"type": "object", "description": "圖片檔案（支援檔案參數的客戶端使用）",
+                      "properties": {"download_url": {"type": "string"}, "file_id": {"type": "string"},
+                                     "name": {"type": "string"}}},
+            "image_url": {"type": "string", "description": "公開可下載的 https 圖片網址"},
+            "image_base64": {"type": "string", "description": "圖片內容的 base64（可含 data: 前綴）"},
+            "clear": {"type": "boolean", "description": "true = 移除這個框的照片"},
+        }, "required": ["post_id"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": False,
+                        "idempotentHint": True, "openWorldHint": True},
+        "handler": _tool_set_post_poster_photo,
+    },
+    {
+        "name": "download_post_template", "scope": "posts:read", "title": "下載海報模板檔",
+        "description": "取得一個 PPTX 海報模板（內建或分會上傳）的檔案連結，當成設計新模板的起點。"
+                       "改好後用 upload_post_template 上傳。template_id 用 list_post_templates 查。連結是公開的。",
+        "inputSchema": {"type": "object", "properties": {
+            "template_id": {"type": "string"},
+            "club_id": {"type": "integer"},
+        }, "required": ["template_id"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": True, "destructiveHint": False,
+                        "idempotentHint": True, "openWorldHint": False},
+        "handler": _tool_download_post_template,
     },
     {
         "name": "review_post", "scope": "publish", "title": "核可或退回受控貼文",
@@ -8243,7 +8367,10 @@ MCP_TOOLS = [
         "description": "上傳分會自己的 Word（.docx）範本（中文場、英文場各一份，lang 指定），之後該場次下載 Word、"
                        "PDF、JPG 都用這個版型；clear=true 移除範本，PDF／JPG 回到網頁版型。"
                        "給 file（檔案）、file_url 或 file_base64 其中一個。標記寫壞（{{ 沒關、迴圈沒收尾）會被拒收。"
-                       "可用的標記見網頁「分會管理 → Word 匯出範本 → 可用的標記」。限系統管理員。",
+                       "可用的標記見網頁「分會管理 → Word 匯出範本 → 可用的標記」；"
+                       "表格的替代文字標題設為 {{填滿:148}} 這種寫法，下載時會把表格拉高到該毫米數、填滿頁面。"
+                       "目前上傳的範本網址在 get_club 的 settings.word_template_url（英文場是 word_template_url_en）。"
+                       "限系統管理員。",
         "inputSchema": {"type": "object", "properties": {
             "club_id": {"type": "integer"},
             "file": {"type": "object", "description": "範本檔案（支援檔案參數的客戶端使用）",
@@ -8370,6 +8497,8 @@ _TOOL_SUMMARY = {
     "update_post_prefs": "修改貼文品牌設定。",
     "list_post_templates": "列出可用的 PPTX 海報模板。",
     "make_post_poster": "為已核可的貼文產生可編輯的 PPTX 海報。",
+    "set_post_poster_photo": "替海報放主持人照、團體照或角色人像（不會被發布）。",
+    "download_post_template": "下載海報模板的 PPTX，當設計新模板的起點。",
     "review_post": "核可或退回受控貼文。核可前要先讓你看過全文並同意。",
     "upload_post_template": "上傳設計好的 PPTX 海報模板。",
     "update_post_template": "改海報模板的名稱、風格或啟用狀態。",
@@ -8393,7 +8522,8 @@ _TOOL_GROUPS = (
                   "generate_post_image", "publish_post")),
     ("受控貼文", ("start_post", "submit_post", "review_post", "get_post_prefs", "update_post_prefs",
                   "list_post_templates", "upload_post_template", "update_post_template",
-                  "delete_post_template", "make_post_poster")),
+                  "delete_post_template", "download_post_template", "set_post_poster_photo",
+                  "make_post_poster")),
     ("電子名牌", ("list_machines", "pair_machine", "update_machine")),
 )
 
