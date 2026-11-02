@@ -1799,20 +1799,72 @@ async function captureWord() {
   }
 }
 
+// 下載 Word shows the file first: the .docx is filled once, the server lays
+// that same file out as page images (/api/word-render, LibreOffice — the VM
+// only), and 確定下載 saves it. Where the server cannot lay it out, the dialog
+// says so and still offers the download.
+let wordPreviewBlob = null;
+
 async function downloadWord() {
   showLoading();
+  let blob;
   try {
-    const blob = await buildWordBlob();
-    const link = document.createElement('a');
-    link.download = `${exportBaseName()}.docx`;
-    link.href = URL.createObjectURL(blob);
-    link.click();
-    setTimeout(() => URL.revokeObjectURL(link.href), 10000);
+    blob = await buildWordBlob();
   } catch (e) {
+    hideLoading();
     alert(`Word 匯出失敗：${wordTemplateErrors(e).join('；')}`);
+    return;
+  }
+  let pages = [];
+  let note = '';
+  try {
+    if (await canRenderWord()) {
+      pages = (await apiJson('/word-render', {
+        method: 'POST', body: { docx: await blobToDataUrl(blob), formats: ['jpg'] },
+      })).jpg || [];
+    } else {
+      note = '這個網址無法預覽 Word（主機沒有轉檔程式），可以直接下載後用 Word 開啟確認。';
+    }
+  } catch (e) {
+    note = `預覽產生失敗（${e && e.message ? e.message : e}），仍可以直接下載。`;
   } finally {
     hideLoading();
   }
+  wordPreviewBlob = blob;
+  const body = document.getElementById('wordPreviewBody');
+  body.innerHTML = '';
+  if (note) {
+    const p = document.createElement('p');
+    p.className = 'word-preview-note';
+    p.textContent = note;
+    body.appendChild(p);
+  }
+  pages.forEach((src, i) => {
+    const img = document.createElement('img');
+    img.src = src;
+    img.alt = `第 ${i + 1} 頁`;
+    img.className = 'word-preview-page';
+    body.appendChild(img);
+  });
+  document.getElementById('wordPreviewMeta').textContent =
+    `${exportBaseName()}.docx${pages.length ? ` · 共 ${pages.length} 頁` : ''}`;
+  document.getElementById('wordPreviewModal').style.display = 'flex';
+}
+
+function closeWordPreview() {
+  document.getElementById('wordPreviewModal').style.display = 'none';
+  document.getElementById('wordPreviewBody').innerHTML = '';
+  wordPreviewBlob = null;
+}
+
+function confirmWordDownload() {
+  if (!wordPreviewBlob) return;
+  const link = document.createElement('a');
+  link.download = `${exportBaseName()}.docx`;
+  link.href = URL.createObjectURL(wordPreviewBlob);
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(link.href), 10000);
+  closeWordPreview();
 }
 
 async function downloadJPG() {
@@ -3011,6 +3063,20 @@ export default function AgendaIndexPage() {
           <div className="modal-actions">
             <button className="modal-btn modal-btn-cancel" onClick={cancelClubTemplateSwitch}>取消</button>
             <button className="modal-btn modal-btn-confirm" onClick={confirmClubTemplateSwitch}>確定切換</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="wordPreviewModal" className="modal-overlay" style={{ display: 'none' }} onClick={(e) => { if (e.target === e.currentTarget) closeWordPreview(); }}>
+        <div className="modal-box modal-box-preview">
+          <div className="modal-header">
+            <h3>Word 預覽 <span id="wordPreviewMeta" className="word-preview-meta"></span></h3>
+            <button className="modal-close" onClick={closeWordPreview}>✕</button>
+          </div>
+          <div id="wordPreviewBody" className="modal-body word-preview-body"></div>
+          <div className="modal-actions">
+            <button className="modal-btn modal-btn-cancel" onClick={closeWordPreview}>取消</button>
+            <button className="modal-btn modal-btn-confirm" onClick={confirmWordDownload}>確定下載</button>
           </div>
         </div>
       </div>
