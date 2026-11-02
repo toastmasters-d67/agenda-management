@@ -18,6 +18,11 @@ logger = logging.getLogger(__name__)
 #: Anthropic 錯誤原文最多轉出幾個字。那一句通常很短；上限擋的是意外。
 API_DETAIL_MAX = 200
 
+#: 不接受強制指定工具（`tool_choice` 的 `tool`／`any`）的模型，送了會回 400。
+#: 2026-11-03 選 Sonnet 5.5 生成貼文就是撞到這個。
+FORCED_TOOL_UNSUPPORTED = frozenset({"claude-sonnet-5-5", "claude-opus-5-5",
+                                     "claude-fable-5-1"})
+
 
 def _api_detail(exc: Exception) -> str:
     """Anthropic 自己寫在錯誤回應裡的那一句（`body["error"]["message"]`）。
@@ -76,6 +81,15 @@ def _as_llm_error(exc: Exception, model: str) -> LLMError:
         return LLMError("呼叫 Claude API 逾時", "請稍後重試；角色很多時可分次生成。")
     if isinstance(exc, anthropic.APIConnectionError):
         return LLMError("無法連線至 Claude API", "請檢查網路或代理設定。")
+    if isinstance(exc, anthropic.BadRequestError):
+        # 400 是請求本身不被接受（參數、模型不支援的功能…），重試沒用；
+        # 原因只寫在 Anthropic 回的那一句裡。
+        detail = _api_detail(exc)
+        logger.warning("Anthropic 拒絕請求（400，模型 %s）：%s", model, detail)
+        return LLMError(
+            "Claude API 不接受這次的請求（HTTP 400）",
+            (f"Anthropic 的回覆：「{detail}」。" if detail else "")
+            + "可以先換一個模型試試；持續發生請把這段訊息提供給管理員。")
     if isinstance(exc, anthropic.APIStatusError):
         return LLMError(
             "Claude API 回應錯誤（HTTP " + str(exc.status_code) + "）",
@@ -128,6 +142,14 @@ class AnthropicClient:
 
     def generate(self, system: str, user: str | list[dict], tool: dict) -> dict:
         # user 可為字串或 content block 陣列（影像／PDF）；Messages API 兩者皆收，此處純傳遞。
+        if self.model in FORCED_TOOL_UNSUPPORTED:
+            # 這些模型強制指定工具會回 400：改成 auto，由 system 指示一定要呼叫。
+            # 沒呼叫的話，下面的「未回傳結構化結果」會擋下來。
+            system = (system + "\n\n請務必呼叫工具 " + tool["name"]
+                      + " 回傳結果，不要只用文字回覆。")
+            tool_choice = {"type": "auto"}
+        else:
+            tool_choice = {"type": "tool", "name": tool["name"]}
         try:
             resp = self._client.messages.create(
                 model=self.model,
@@ -135,7 +157,7 @@ class AnthropicClient:
                 system=system,
                 messages=[{"role": "user", "content": user}],
                 tools=[tool],
-                tool_choice={"type": "tool", "name": tool["name"]},
+                tool_choice=tool_choice,
             )
         except Exception as exc:                          # noqa: BLE001
             raise _as_llm_error(exc, self.model) from exc

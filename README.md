@@ -900,15 +900,17 @@ https://<你的網域>/api/mcp
 | `list_meetings` | `posts:read` | 列出分會例會（最近的在前），回傳 `agendaId`，每筆標明所屬分會 |
 | `get_meeting` | `posts:read` | 一場例會的日期、時間、地址、入場費、主題；缺宣傳必填欄位會指出 |
 | `list_posts` | `posts:read` | 列出貼文草稿與已發布貼文 |
-| `get_post` | `posts:read` | 一則貼文的完整內容（主文案、各平台版本、圖片、發布狀態） |
+| `get_post` | `posts:read` | 一則貼文的完整內容（主文案、各平台版本、圖片、發布狀態）；受控貼文另有核可狀態與 `governance`（品質檢查、AI 補寫角色、回顧角色名單、海報照片） |
 | `create_post` | `posts:write` | 建立草稿（`promo` / `recap` / `other`） |
 | `update_post` | `posts:write` | 修改標題、文案、用途、狀態、綁定例會、各平台版本 |
-| `generate_copy` | `ai:generate` | 用 AI 產生文案並存進貼文，**消耗呼叫者（或分會共用）的 AI 額度**。宣傳／回顧且綁定例會時走受控流程，結果是待核可的貼文 |
+| `generate_copy` | `ai:generate` | 用 AI 產生文案並存進貼文，**消耗呼叫者（或分會共用）的 AI 額度**。宣傳／回顧且綁定例會時走受控流程，結果是待核可的貼文。`model` 只收 `COPY_MODELS` 裡該 `provider` 的模型，給錯直接拒絕（不會默默換成預設模型計費） |
 | `start_post` | `posts:write` | 受控貼文兩段式的第一步：回傳寫作規則、這場例會的資料與 `content_schema`，**由呼叫端自己的 AI 寫**，不花分會額度 |
 | `submit_post` | `posts:write` | 交回 `content`；系統套事實與固定句、跑品質檢查，通過才存成待核可的貼文，沒過說明原因、不存 |
 | `get_post_prefs` / `update_post_prefs` | `posts:read` / `posts:write` | 貼文品牌設定（報名連結、定位句、固定 hashtag、禁用詞、語氣、補充規則、預設旋鈕） |
 | `list_post_templates` | `posts:read` | PPTX 海報模板（內建＋分會上傳） |
-| `make_post_poster` | `posts:write` | 已核可的受控貼文 → 可編輯 PPTX，回傳 R2 連結。未核可拒絕 |
+| `download_post_template` | `posts:read` | 一個海報模板的 `.pptx` 連結（內建的先複製到 R2），當設計新模板的起點 |
+| `set_post_poster_photo` | `posts:write` | 替海報的一個照片框放照片或移除：`slot`（`PHOTO_HOST` 主持人照／`PHOTO_GROUP` 團體照）或 `role`（回顧角色姓名）。圖片來源同 `add_post_image`，存到 R2 的 `poster-photos/`，記在 `governance.posterPhotos`，**不加進貼文圖片、不會發布**。與網頁「海報照片」的上傳按鈕是同一份 |
+| `make_post_poster` | `posts:write` | 已核可的受控貼文 → 可編輯 PPTX，回傳 R2 連結。未核可拒絕。不給 `photos`／`role_photos` 就用已存的海報照片；給了就取代。照片只收本分會上傳到 R2 的圖片 |
 | `review_post` | `publish` | 核可／退回／改回待核可。與網頁同規則：擋下的不能核可、AI 補寫的角色要列在 `confirmed`。見下方說明 |
 | `upload_post_template` / `update_post_template` / `delete_post_template` | `posts:write` | 上傳 `.pptx` 海報模板（與網頁同一個檢查，缺必要標記拒收，先檢查再存 R2）；改名稱、風格、啟用；刪除。內建模板不能改 |
 | `publish_post` | `publish` | 發布到 Facebook／Instagram／Threads，**公開且無法透過本系統收回**。已發布過的平台會略過，要再發一則得帶 `republish: true` |
@@ -930,7 +932,7 @@ https://<你的網域>/api/mcp
 | `update_club` | `clubs:write` | 修改分會欄位與版型設定，只改有給的；`settings` 給 `null` 刪除。**限系統管理員**（與 `PUT /api/clubs/{id}` 同規則） |
 | `create_club` | `clubs:write` | 建立分會。限系統管理員 |
 | `set_club_image` | `clubs:write` | 更換 Logo、各 QR code、第二頁圖片。限系統管理員 |
-| `set_word_template` | `clubs:write` | 上傳分會的 Word 議程範本（`file`／`file_url`／`file_base64`），伺服器檢查 `{{標記}}` 與迴圈是否成對，壞的拒收；`clear: true` 改回預設。限系統管理員 |
+| `set_word_template` | `clubs:write` | 上傳分會的 Word 議程範本（`file`／`file_url`／`file_base64`），伺服器檢查 `{{標記}}` 與迴圈是否成對，壞的拒收；`lang` 選中文場／英文場；`clear: true` 改回預設。目前的範本網址在 `get_club` 的 `settings.word_template_url(_en)`。限系統管理員 |
 | `set_custom_roles` | `clubs:write` | 整份取代分會自訂角色；帶原 `id` 才會保留已排的人。限系統管理員 |
 | `list_machines` | `posts:read` | 電子名牌機台與綁定的會員。分會管理員以上 |
 | `pair_machine` / `update_machine` | `clubs:write` | 用配對碼綁定名牌；改名、換綁、解除綁定、停用。分會管理員以上 |
@@ -977,7 +979,7 @@ https://<你的網域>/api/mcp
 議程表是在瀏覽器裡畫的（各分會版型、列高平均、html2canvas），網頁的「下載 JPG／PDF」是截那個畫面。伺服器端不另寫一套 renderer，而是**用無頭 Chromium 開同一個 `/agenda` 頁面，請頁面做與按鈕完全相同的截圖**：
 
 1. MCP 工具（Python）檢查權限，產生 R2 的 presigned PUT 網址（PDF 一個、Word 一個、JPG 最多 4 頁），再簽一把**5 分鐘的登入 token**（呼叫者本人）。
-2. 呼叫 Next 的 `POST /svc/agenda-export`（`app/svc/agenda-export/route.js`，Node runtime）。它驗 token（`JWT_SECRET`）、用 `@sparticuz/chromium` + `puppeteer-core` 以這個身分開 `/agenda?id=…`，等 `window.__agendaExport.ready`，呼叫頁面上的 `jpg()`／`pdf()`／`docx()`（與下載按鈕共用 `captureJPGs`／`capturePDF`／`buildWordBlob`；Word 一樣先用分會上傳的 Word 範本，沒有才用預設範本）。
+2. 呼叫 Next 的 `POST /svc/agenda-export`（`app/svc/agenda-export/route.js`，Node runtime）。它驗 token（`JWT_SECRET`）、用 `@sparticuz/chromium` + `puppeteer-core` 以這個身分開 `/agenda?id=…`，等 `window.__agendaExport.ready`，呼叫頁面上的 `jpg()`／`pdf()`／`docx()`（與下載按鈕共用 `captureJPGs`／`capturePDF`／`buildWordBlob`；Word 一樣先用分會上傳的 Word 範本，沒有才用預設範本。分會上傳了該場次的 Word 範本時，PDF／JPG 也和按鈕一樣走 Word 版型（`/api/word-render`），主機沒有 LibreOffice 時退回網頁版型）。
 3. 檔案直接 PUT 到 R2，不經過兩邊 function 的回應大小上限；工具回傳公開連結（路徑含亂數，拿到連結的人都能開）。
 
 注意：

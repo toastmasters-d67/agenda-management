@@ -144,6 +144,24 @@ def build_poster_plan(req: PostRequest, cc: CanonicalContent, settings: Settings
     ).model_dump()
 
 
+def role_photos_by_name(role_pages: list[dict], by_name: dict[str, str], slots: int) -> list[dict]:
+    """角色姓名 → 照片，換算成每頁的 PHOTO_ROLE_n（與 role_pages 等長）。
+
+    依姓名而不是頁碼對照：換模板時頁面會重排、合併，姓名不會變。
+    同一人擔任兩個角色時，兩格放同一張。
+    """
+    out = []
+    for page in role_pages:
+        page_photo = {}
+        for i in range(1, slots + 1):
+            head = page.get(f"ROLE_{i}_HEAD") or ""
+            photo = by_name.get(head.split(" · ")[-1].strip()) if head else None
+            if photo:
+                page_photo[f"PHOTO_ROLE_{i}"] = photo
+        out.append(page_photo)
+    return out
+
+
 def _page_names(page: dict, slots: int) -> list[str]:
     """從 ROLE_n_HEAD（「emoji 角色 · 姓名」）取回姓名。"""
     out = []

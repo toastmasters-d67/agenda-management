@@ -253,6 +253,59 @@ def test_another_poster_template_uses_the_approved_highlights(api, club, monkeyp
     assert "核可過的描述：Bill" in text
 
 
+def test_poster_photos_are_the_clubs_own_uploads(api, club, monkeypatch):
+    import io
+    from PIL import Image
+    from pptx import Presentation
+    from pptx.enum.shapes import MSO_SHAPE_TYPE
+    index, client = api
+    buf = io.BytesIO()
+    Image.new("RGB", (40, 30), "red").save(buf, "JPEG")
+    jpeg = buf.getvalue()
+
+    class R2(_FakeR2):
+        def get_object(self, Bucket, Key):
+            return {"Body": io.BytesIO(jpeg)}
+    fake = R2()
+    monkeypatch.setattr(index, "_r2", lambda: fake)
+    monkeypatch.setattr(index, "R2_PUBLIC_URL", "https://r2.example")
+    h = club["headers"]["club_admin"]
+    post = generate(client, club, kind="recap")
+    client.post(f"/api/social-posts/{post['id']}/review",
+                json={"action": "approve", "confirmed": post["governance"]["aiWrittenHighlights"]},
+                headers=h)
+    own = f"https://r2.example/media/clubs/{club['id']}/"
+    group, face = own + "g.jpg", own + "t.jpg"
+    for bad in ("https://elsewhere.example/x.jpg", "https://r2.example/media/clubs/999999/x.jpg",
+                own + "clip.mp4"):
+        r = client.post(f"/api/social-posts/{post['id']}/poster", headers=h,
+                        json={"photos": {"PHOTO_GROUP": bad}})
+        assert r.status_code == 400, bad
+
+    # Saved as soon as uploaded, without touching the post's own images.
+    r = client.put(f"/api/social-posts/{post['id']}/poster-photos", headers=h,
+                   json={"photos": {"PHOTO_GROUP": group}, "role_photos": {"庭敏": face}})
+    assert r.status_code == 200, r.text
+    r = client.put(f"/api/social-posts/{post['id']}/poster-photos", headers=club["headers"]["member"],
+                   json={"photos": {}})
+    assert r.status_code == 403
+    r = client.get(f"/api/social-posts/{post['id']}", headers=h)
+    assert r.json()["images"] == [] and r.json()["governance"]["posterPhotos"]["photos"] == {"PHOTO_GROUP": group}
+
+    r = client.post(f"/api/social-posts/{post['id']}/poster", headers=h,
+                    json={"photos": {"PHOTO_GROUP": group}, "role_photos": {"庭敏": face}})
+    assert r.status_code == 200, r.text
+    (data,) = fake.objects.values()
+    slides = list(Presentation(io.BytesIO(data)).slides)
+    pics = [[sh for sh in s.shapes if sh.shape_type == MSO_SHAPE_TYPE.PICTURE] for s in slides]
+    assert pics[0] and pics[-1]                          # group photo on cover and closing
+    speaker = next(i for i, s in enumerate(slides)
+                   if any(sh.has_text_frame and "庭敏" in sh.text_frame.text for sh in s.shapes))
+    assert len(pics[speaker]) == 1                       # only 庭敏 has a portrait
+    r = client.get(f"/api/social-posts/{post['id']}", headers=h)
+    assert r.json()["governance"]["posterPhotos"]["rolePhotos"] == {"庭敏": face}
+
+
 def test_a_template_must_be_this_clubs_upload(api, club, monkeypatch):
     index, client = api
     monkeypatch.setattr(index, "R2_PUBLIC_URL", "https://r2.example")
