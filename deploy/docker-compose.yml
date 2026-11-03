@@ -44,6 +44,9 @@ services:
   web:
     image: ghcr.io/toastmasters-d67/agenda-management-web:${IMAGE_TAG:?IMAGE_TAG is required}
     restart: unless-stopped
+    # Chromium's helper processes outlive a failed or crashed browser and are
+    # handed to PID 1; node does not reap them, so they pile up as zombies.
+    init: true
     env_file: .env
     environment:
       FASTAPI_BASE_URL: http://api:8001
