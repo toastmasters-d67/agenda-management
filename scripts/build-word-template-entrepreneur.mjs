@@ -223,7 +223,12 @@ const txt = (text, o = {}) => para(run(text, { size: o.size || 16, bold: o.bold,
 const C = AlignmentType.CENTER;
 const timeCell = (text, merge, fill) => cell([txt(text, { bold: true, size: 18, align: C })], COL.time, { borders: B, merge, fill });
 const durCell = (text, o = {}) => cell([txt(text, { align: C, bold: o.bold })], o.width || COL.dur, { borders: B, span: o.span, merge: o.merge, fill: o.fill });
-const itemCell = (text, o = {}) => cell([txt(text, { bold: o.bold, align: o.bold ? C : undefined })], o.width || COL.agenda, { borders: B, span: o.span, fill: o.fill });
+// `text` may be paragraphs already (a speech: title, then its project).
+const itemCell = (text, o = {}) => cell(Array.isArray(text) ? text : [txt(text, { bold: o.bold, align: o.bold ? C : undefined })],
+  o.width || COL.agenda, { borders: B, span: o.span, fill: o.fill });
+// Paragraphs kept only when `mark` has a value (docxtemplater drops the
+// paragraphs holding the open / close marks).
+const when = (mark, ...paras) => [txt(`{{#${mark}}}`), ...paras, txt(`{{/${mark}}}`)];
 const whoCell = (text, fill) => cell([txt(text)], COL.taker, { borders: B, fill });
 const DUR2 = COL.secdur + COL.dur;
 
@@ -294,7 +299,9 @@ const agenda = new Table({
     // Shown only when the meeting has a variety session.
     single('{{#多元單元}}{{時間}}', "{{分鐘}}'", T.variety, '{{主持人}}{{/多元單元}}', { bold: true, fill: GREEN }),
     sectionHead('{{演講時間}}', "{{演講分鐘}}'", T.prepared, '{{總主持人}}'),
-    sectionRow('{{#演講}}{{時長}}', '{{講題}}  {{專案}}', '{{講者}}{{/演講}}'),
+    // Like the web agenda: the title (TBD while there is none), and the
+    // Pathways project on its own line in [ ].
+    sectionRow('{{#演講}}{{時長}}', [txt('{{講題}}{{^講題}}TBD{{/講題}}'), ...when('專案', txt(' [{{專案}}]'))], '{{講者}}{{/演講}}'),
     single('{{合照時間}}', "{{合照分鐘}}'", T.photo, T.all),
     fullRow(T.intermission, { bold: true, italic: true, fill: GREY_ROW }),
     single('{{即席時間}}', "{{即席分鐘}}'", T.topics, '{{即席主持人}}', { bold: true, fill: GREEN }),

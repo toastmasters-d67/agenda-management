@@ -29,6 +29,7 @@ import './agenda.css';
 import { withBase } from '@/lib/basePath';
 import { WORD_DEFAULT_TEMPLATE, buildWordData, fillWordTemplate, wordTemplateErrors,
          wordLayoutUrl, wordDownloadUrl } from '@/lib/wordExport';
+import { matchWordLayout } from '@/lib/docxPreviewFix';
 import SearchableSelect from '@/components/SearchableSelect';
 
 // ================================================================
@@ -986,8 +987,9 @@ function updatePreview() {
 // ---- Live preview in the club's Word layout ----
 // A meeting with a Word layout (wordLayoutUrl(), the same template that sets
 // PDF / JPG) is previewed in that layout: each edit fills the template in the
-// browser (buildWordBlob) and docx-preview draws it. That is close to Word but
-// not exact (page breaks, fonts); 精確預覽 lays the file out on the server the
+// browser (buildWordBlob) and docx-preview draws it, with the measured
+// differences from Word corrected (lib/docxPreviewFix.js). That is close to
+// Word but not exact (page breaks, fonts); 精確預覽 lays the file out on the server the
 // way PDF / JPG are. The web layout keeps rendering off-screen meanwhile — the
 // web PDF / JPG fallback captures it. 預覽版型 switches back to the web layout.
 
@@ -1061,6 +1063,7 @@ async function renderWordPreview() {
     });
     if (seq !== wordPreviewSeq) return;
     host.replaceChildren(...next.childNodes);
+    matchWordLayout(host);
     setWordPreviewStatus('');
     requestAnimationFrame(applyWordPreviewScale);
   } catch (e) {
