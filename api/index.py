@@ -1990,7 +1990,9 @@ def presign_upload(req: PresignRequest, user: dict = Depends(require_club_admin_
 
 _WORD_RENDER_LOCK = __import__("threading").Lock()   # one LibreOffice at a time on a 1-vCPU VM
 _WORD_RENDER_MAX = 20 * 1024 * 1024
-_WORD_RENDER_TIMEOUT = 90
+# On the 1 GB VM a one-page agenda has taken over 90 s while Chromium is also
+# running (an export_agenda render). The web page's own fetch waits as long.
+_WORD_RENDER_TIMEOUT = 240
 
 
 def _soffice() -> Optional[str]:
@@ -6499,6 +6501,15 @@ def _render_origin(caller: dict) -> str:
 
 
 _EXPORT_MAX_PAGES = 4
+# export_agenda only starts the render: on the 1 GB VM one with a club's Word
+# template takes minutes, longer than an MCP client waits on a call. The page
+# writes its outcome next to the files, and get_agenda_export reads it there —
+# no table, so it works the same on Vercel.
+_EXPORT_STATUS_NAME = "status.json"
+_EXPORT_JOB_RE = re.compile(r"^(\d+)-([0-9a-f]{12})-(\d+)$")
+_EXPORT_LOGIN_TTL = timedelta(minutes=20)
+# No outcome after this long: the render died. Also how long the upload URLs live.
+_EXPORT_STALE = timedelta(minutes=30)
 
 
 def _tool_export_agenda(caller, args):
@@ -6515,13 +6526,14 @@ def _tool_export_agenda(caller, args):
     # Unguessable names: these URLs are public (the bucket serves anyone who
     # has the link), like every other image this app publishes.
     stem = f"Agenda_{data.get('meetingDate') or 'agenda'}_No{data.get('meetingNo') or ''}"
-    base = f"media/clubs/{cid}/agendas/{uuid.uuid4().hex[:12]}/{stem}"
+    folder = uuid.uuid4().hex[:12]
+    base = f"media/clubs/{cid}/agendas/{folder}/{stem}"
     client = _r2()
 
     def presign(key, ctype):
         return client.generate_presigned_url(
             "put_object", Params={"Bucket": R2_BUCKET_NAME, "Key": key, "ContentType": ctype},
-            ExpiresIn=300)
+            ExpiresIn=int(_EXPORT_STALE.total_seconds()))
 
     keys = {"pdf": f"{base}.pdf", "docx": f"{base}.docx",
             "jpg": [f"{base}_p{i + 1}.jpg" for i in range(_EXPORT_MAX_PAGES)]}
@@ -6532,22 +6544,25 @@ def _tool_export_agenda(caller, args):
         uploads["docx"] = presign(keys["docx"], "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
     if "jpg" in formats:
         uploads["jpg"] = [presign(k, "image/jpeg") for k in keys["jpg"]]
+    # Where the render leaves its outcome; get_agenda_export reads it.
+    uploads["status"] = presign(f"media/clubs/{cid}/agendas/{folder}/{_EXPORT_STATUS_NAME}",
+                                "application/json")
 
-    # A five-minute login token for this one render: the page is opened as the
+    # A short-lived login token for this one render: the page is opened as the
     # caller, so it can show only what they could open themselves.
     token = jwt.encode({"sub": caller["username"],
-                        "exp": datetime.now(timezone.utc) + timedelta(minutes=5)},
+                        "exp": datetime.now(timezone.utc) + _EXPORT_LOGIN_TTL},
                        JWT_SECRET, algorithm=JWT_ALGORITHM)
     req = urllib.request.Request(
         f"{_render_origin(caller)}/svc/agenda-export",
         # clubId: the page is opened acting in the agenda's club (the caller
         # was just checked to have access there via _agenda_for).
         data=json.dumps({"token": token, "agendaId": aid, "clubId": cid, "formats": formats,
-                         "uploads": uploads}).encode(),
+                         "uploads": uploads, "async": True}).encode(),
         headers={"Content-Type": "application/json"}, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=55) as res:
-            out = json.loads(res.read())
+        with urllib.request.urlopen(req, timeout=20) as res:
+            res.read()
     except urllib.error.HTTPError as e:
         try:
             detail = json.loads(e.read()).get("detail")
@@ -6555,21 +6570,61 @@ def _tool_export_agenda(caller, args):
             detail = None
         return _tool_text(detail or f"議程輸出失敗（HTTP {e.code}）", is_error=True)
     except Exception:
-        return _tool_text("議程輸出逾時或連線失敗，請稍後再試", is_error=True)
+        return _tool_text("議程輸出服務沒有回應，請稍後再試", is_error=True)
 
-    files = []
-    if out.get("pdf"):
-        files.append({"format": "pdf", "url": f"{R2_PUBLIC_URL}/{keys['pdf']}"})
-    for i in range(int(out.get("jpgPages") or 0)):
-        files.append({"format": "jpg", "page": i + 1,
-                      "url": f"{R2_PUBLIC_URL}/{keys['jpg'][i]}"})
-    if out.get("docx"):
-        files.append({"format": "docx", "url": f"{R2_PUBLIC_URL}/{keys['docx']}"})
-    names = {"pdf": "PDF", "jpg": "JPG", "docx": "Word"}
-    lines = [f"{names[f['format']]}{'（第 %d 頁）' % f['page'] if 'page' in f else ''}：{f['url']}"
+    job = f"{cid}-{folder}-{int(time.time())}"
+    return _tool_text(f"議程輸出已開始（工作代碼 {job}）。通常要 1～5 分鐘，"
+                      f"分會有上傳 Word 範本時會更久。請稍候再用 get_agenda_export 查詢，"
+                      f"完成後會拿到下載連結。",
+                      {"agendaId": aid, "job": job, "status": "pending"})
+
+
+def _export_job(caller, job: str):
+    """(club id, folder, started) of an export_agenda job the caller may read."""
+    m = _EXPORT_JOB_RE.match(str(job or ""))
+    if not m:
+        raise HTTPException(status_code=400, detail="工作代碼格式不對，請用 export_agenda 回傳的代碼")
+    cid, folder, started = int(m.group(1)), m.group(2), int(m.group(3))
+    if caller["role"] != "system_admin" and cid != caller["club_id"]:
+        raise HTTPException(status_code=403, detail="無權存取其他分會的資料")
+    return cid, folder, started
+
+
+def _tool_get_agenda_export(caller, args):
+    cid, folder, started = _export_job(caller, args.get("job"))
+    prefix = f"media/clubs/{cid}/agendas/{folder}/"
+    client = _r2()
+    try:
+        obj = client.get_object(Bucket=R2_BUCKET_NAME, Key=prefix + _EXPORT_STATUS_NAME)
+        status = json.loads(obj["Body"].read())
+    except client.exceptions.NoSuchKey:
+        status = None
+    if status is None:
+        waited = int(time.time()) - started
+        if waited > _EXPORT_STALE.total_seconds():
+            return _tool_text(f"這次輸出開始已超過 {waited // 60} 分鐘仍沒有結果，"
+                              "可能中途失敗了，請重新用 export_agenda 輸出。",
+                              {"job": args.get("job"), "status": "stale"}, is_error=True)
+        return _tool_text(f"還在輸出中（已過 {waited} 秒），請再等一下後查詢。",
+                          {"job": args.get("job"), "status": "pending", "waitedSeconds": waited})
+    if not status.get("ok"):
+        return _tool_text(status.get("detail") or "議程輸出失敗",
+                          {"job": args.get("job"), "status": "failed"}, is_error=True)
+
+    # The file names come from the listing: the job id does not carry them.
+    listed = client.list_objects_v2(Bucket=R2_BUCKET_NAME, Prefix=prefix).get("Contents") or []
+    names = sorted(o["Key"][len(prefix):] for o in listed)
+    url = lambda n: f"{R2_PUBLIC_URL}/{prefix}{n}"
+    jpgs = sorted((n for n in names if n.endswith(".jpg")),
+                  key=lambda n: int(n[:-4].rsplit("_p", 1)[-1] or 0))
+    files = ([{"format": "pdf", "url": url(n)} for n in names if n.endswith(".pdf")]
+             + [{"format": "jpg", "page": i + 1, "url": url(n)} for i, n in enumerate(jpgs)]
+             + [{"format": "docx", "url": url(n)} for n in names if n.endswith(".docx")])
+    labels = {"pdf": "PDF", "jpg": "JPG", "docx": "Word"}
+    lines = [f"{labels[f['format']]}{'（第 %d 頁）' % f['page'] if 'page' in f else ''}：{f['url']}"
              for f in files]
     return _tool_text("議程檔案（任何拿到連結的人都能開啟）：\n" + "\n".join(lines),
-                      {"agendaId": aid, "files": files})
+                      {"job": args.get("job"), "status": "done", "files": files})
 
 
 # ------------------------------------------------------------------ post images
@@ -7934,7 +7989,8 @@ MCP_TOOLS = [
                        "回傳下載連結。多頁版型的 JPG 每頁一張。Word 用分會上傳的 Word 範本（沒有就用系統預設範本），"
                        "適合要下載後自己再改版面的人。分會上傳了該場次（中文場／英文場）的 Word 範本時，"
                        "PDF、JPG 也用 Word 版型（主機不支援轉檔時改用網頁版型）。"
-                       "約需 10～30 秒。連結是公開的，拿到的人都能開。",
+                       "這支只負責開始輸出，立刻回傳工作代碼 job；檔案通常 1～5 分鐘後才好，"
+                       "請等一下再用 get_agenda_export 帶 job 取得下載連結。連結是公開的，拿到的人都能開。",
         "inputSchema": {"type": "object", "properties": {
             "agenda_id": {"type": "integer"},
             "formats": {"type": "array", "items": {"type": "string", "enum": ["pdf", "jpg", "docx"]},
@@ -7942,6 +7998,16 @@ MCP_TOOLS = [
         }, "required": ["agenda_id"], "additionalProperties": False},
         "annotations": {"readOnlyHint": True, "openWorldHint": False},
         "handler": _tool_export_agenda,
+    },
+    {
+        "name": "get_agenda_export", "scope": "posts:read", "title": "查詢議程輸出結果",
+        "description": "查詢 export_agenda 開始的輸出：還在跑、失敗原因，或完成後的 PDF／JPG／Word 下載連結。"
+                       "還在跑時隔 30～60 秒再查一次；超過 30 分鐘沒結果就是失敗了，請重新輸出。",
+        "inputSchema": {"type": "object", "properties": {
+            "job": {"type": "string", "description": "export_agenda 回傳的工作代碼"},
+        }, "required": ["job"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": False},
+        "handler": _tool_get_agenda_export,
     },
 
     # ---- post images
@@ -8460,7 +8526,7 @@ MCP_TOOLS = [
 _TOOL_MIN_ROLE = {
     **{n: "club_member" for n in (
         "whoami", "switch_club", "list_clubs", "get_club", "list_members", "list_meetings",
-        "get_meeting", "get_agenda", "export_agenda", "get_roles",
+        "get_meeting", "get_agenda", "export_agenda", "get_agenda_export", "get_roles",
         "list_posts", "get_post", "get_post_prefs", "list_post_templates")},
     "create_club": "system_admin",
 }
@@ -8481,7 +8547,8 @@ _TOOL_SUMMARY = {
     "create_agenda": "建立議程；時間地點沿用上一場，可以從 Google Sheet 帶入角色。",
     "update_agenda": "修改議程，只改你指定的欄位。",
     "delete_agenda": "刪除議程；綁定這場的貼文會保留。",
-    "export_agenda": "把議程輸出成 PDF 與 JPG，取得下載連結（與網頁「下載」相同）。",
+    "export_agenda": "開始把議程輸出成 PDF 與 JPG（與網頁「下載」相同），通常要 1～5 分鐘。",
+    "get_agenda_export": "查詢議程輸出進度，完成後取得下載連結。",
     "set_agenda_theme_image": "把一張圖設成議程主題圖（standard、entrepreneur 版型）。",
     "generate_agenda_theme_image": "依例會主題用 AI 產生主題圖並套用，會用到 OpenAI 額度。",
     "get_roles": "查看接下來幾場例會的角色安排。",
@@ -8521,7 +8588,7 @@ _TOOL_GROUPS = (
     ("分會", ("list_clubs", "get_club", "update_club", "create_club", "set_club_image",
               "set_word_template", "set_custom_roles")),
     ("議程", ("list_meetings", "get_meeting", "get_agenda", "create_agenda", "update_agenda",
-              "delete_agenda", "export_agenda", "set_agenda_theme_image",
+              "delete_agenda", "export_agenda", "get_agenda_export", "set_agenda_theme_image",
               "generate_agenda_theme_image")),
     ("角色安排", ("get_roles", "assign_roles", "import_roles_sheet", "list_members")),
     ("社群貼文", ("list_posts", "get_post", "create_post", "update_post", "delete_post",

@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server';
+import { NextResponse, after } from 'next/server';
 import { jwtVerify } from 'jose';
 import { sharedBrowser } from '@/lib/agendaBrowser';
 
@@ -23,7 +23,8 @@ import { sharedBrowser } from '@/lib/agendaBrowser';
 //     without passing back through either function's response size limit.
 //
 // Without `uploads` the files come back inline as data URLs — for local
-// testing, where nothing should be written to the real bucket.
+// testing, where nothing should be written to the real bucket. With `async`
+// the route answers 202 at once and writes the outcome to `uploads.status`.
 
 export const runtime = 'nodejs';
 export const maxDuration = 60;
@@ -33,6 +34,9 @@ const DOCX_TYPE = 'application/vnd.openxmlformats-officedocument.wordprocessingm
 // Of the 60 s: launching Chromium and loading the agenda page get this much,
 // counted from the start of the request; capture and upload get the rest.
 const LOAD_BUDGET_MS = 40000;
+// The same for an asynchronous export, where nobody is waiting on the
+// response: on the 1 GB VM opening the page alone has taken over 30 s.
+const ASYNC_LOAD_BUDGET_MS = 180000;
 
 // Chromium on Vercel ships with no CJK font at all, so every 中文 glyph would
 // render as an empty box. @sparticuz/chromium unpacks its fonts.tar.br —
@@ -117,6 +121,29 @@ async function putDataUrl(url, dataUrl, contentType) {
   if (!res.ok) throw new Error(`上傳失敗（${res.status}）`);
 }
 
+async function putJson(url, value) {
+  const res = await fetch(url, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(value),
+  });
+  if (!res.ok) throw new Error(`上傳失敗（${res.status}）`);
+}
+
+/** The capture, put to the presigned URLs; returns what was written. */
+async function upload(uploads, out) {
+  const jpgUrls = uploads.jpg || [];
+  if (out.jpg && out.jpg.length > jpgUrls.length) {
+    throw new Error(`議程有 ${out.jpg.length} 頁，超過可上傳的 ${jpgUrls.length} 頁`);
+  }
+  await Promise.all([
+    ...(out.jpg || []).map((d, i) => putDataUrl(jpgUrls[i], d, 'image/jpeg')),
+    out.pdf ? putDataUrl(uploads.pdf, out.pdf, 'application/pdf') : null,
+    out.docx ? putDataUrl(uploads.docx, out.docx, DOCX_TYPE) : null,
+  ].filter(Boolean));
+  return { name: out.name, jpgPages: (out.jpg || []).length, pdf: !!out.pdf, docx: !!out.docx };
+}
+
 export async function POST(request) {
   let body;
   try {
@@ -129,6 +156,9 @@ export async function POST(request) {
   if (!token || !Number.isInteger(agendaId) || !formats.length) {
     return NextResponse.json({ detail: '缺少 token、agendaId 或 formats' }, { status: 400 });
   }
+  if (body.async && !uploads?.status) {
+    return NextResponse.json({ detail: '非同步輸出需要 uploads.status' }, { status: 400 });
+  }
 
   try {
     await jwtVerify(token, new TextEncoder().encode(process.env.JWT_SECRET));
@@ -137,7 +167,7 @@ export async function POST(request) {
   }
 
   if (uploads) {
-    const all = [uploads.pdf, uploads.docx, ...(uploads.jpg || [])].filter(Boolean);
+    const all = [uploads.pdf, uploads.docx, uploads.status, ...(uploads.jpg || [])].filter(Boolean);
     if (!all.every(uploadAllowed)) {
       return NextResponse.json({ detail: '上傳網址不在允許的儲存空間' }, { status: 400 });
     }
@@ -152,7 +182,43 @@ export async function POST(request) {
     ? new URL(request.url).origin
     : (process.env.AGENDA_RENDER_PAGE_ORIGIN || `http://127.0.0.1:${process.env.PORT || 3000}`);
   const base = process.env.NEXT_PUBLIC_BASE_PATH || '';
+  const job = { origin, base, token, agendaId, clubId, formats };
 
+  // Asynchronous (export_agenda): answer at once, render after the response,
+  // and leave the outcome in uploads.status for get_agenda_export to read.
+  // On the 1 GB VM a render with a club's Word template takes minutes, longer
+  // than any client waits on one call. Vercel still stops at maxDuration.
+  if (body.async) {
+    after(async () => {
+      const t0 = Date.now();
+      let status;
+      try {
+        const out = await render({
+          ...job, loadBudgetMs: process.env.VERCEL ? LOAD_BUDGET_MS : ASYNC_LOAD_BUDGET_MS,
+        });
+        status = { ok: true, ...(await upload(uploads, out)) };
+        console.log(`agenda-export done in ${Math.round((Date.now() - t0) / 1000)} s`);
+      } catch (e) {
+        console.error('agenda-export failed', e);
+        status = { ok: false, detail: `議程輸出失敗：${e.message || e}` };
+      }
+      await putJson(uploads.status, status)
+        .catch((e) => console.error('agenda-export: status not saved', e));
+    });
+    return NextResponse.json({ accepted: true }, { status: 202 });
+  }
+
+  try {
+    const out = await render({ ...job, loadBudgetMs: LOAD_BUDGET_MS });
+    return NextResponse.json(uploads ? await upload(uploads, out) : out);
+  } catch (e) {
+    console.error('agenda-export failed', e);
+    return NextResponse.json({ detail: `議程輸出失敗：${e.message || e}` }, { status: 502 });
+  }
+}
+
+/** Opens the agenda page as the caller and returns the page's own capture. */
+async function render({ origin, base, token, agendaId, clubId, formats, loadBudgetMs }) {
   const started = Date.now();
   // With an installed Chromium (local development, the VM's container) the
   // browser stays running between exports and each gets a context of its own;
@@ -193,7 +259,7 @@ export async function POST(request) {
     // images are awaited later, by the capture itself (waitForImages).
     // One budget for loading, leaving the rest of maxDuration for capture
     // and upload.
-    const loadBy = started + LOAD_BUDGET_MS;
+    const loadBy = started + loadBudgetMs;
     const left = () => Math.max(1000, loadBy - Date.now());
     await page.goto(`${origin}${base}/agenda?id=${agendaId}`,
       { waitUntil: 'domcontentloaded', timeout: left() });
@@ -207,7 +273,7 @@ export async function POST(request) {
       if (new URL(page.url()).pathname !== `${base}/agenda`) {
         throw new Error('帳號需要先到網站變更密碼，或登入已失效');
       }
-      throw new Error(`議程頁在 ${Math.round(LOAD_BUDGET_MS / 1000)} 秒內沒有載入完成`
+      throw new Error(`議程頁在 ${Math.round(loadBudgetMs / 1000)} 秒內沒有載入完成`
         + `（伺服器可能剛啟動，請稍後再試一次）${alerts.length ? '：' + alerts.join('；') : ''}`);
     }
     const failure = await page.evaluate(() => window.__agendaExport.error || '');
@@ -228,24 +294,7 @@ export async function POST(request) {
       if (wanted.includes('docx')) res.docx = await window.__agendaExport.docx();
       return res;
     }, formats);
-
-    if (!uploads) return NextResponse.json(out);
-
-    const jpgUrls = uploads.jpg || [];
-    if (out.jpg && out.jpg.length > jpgUrls.length) {
-      throw new Error(`議程有 ${out.jpg.length} 頁，超過可上傳的 ${jpgUrls.length} 頁`);
-    }
-    await Promise.all([
-      ...(out.jpg || []).map((d, i) => putDataUrl(jpgUrls[i], d, 'image/jpeg')),
-      out.pdf ? putDataUrl(uploads.pdf, out.pdf, 'application/pdf') : null,
-      out.docx ? putDataUrl(uploads.docx, out.docx, DOCX_TYPE) : null,
-    ].filter(Boolean));
-    return NextResponse.json({
-      name: out.name, jpgPages: (out.jpg || []).length, pdf: !!out.pdf, docx: !!out.docx,
-    });
-  } catch (e) {
-    console.error('agenda-export failed', e);
-    return NextResponse.json({ detail: `議程輸出失敗：${e.message || e}` }, { status: 502 });
+    return out;
   } finally {
     if (context) await context.close().catch(() => {});
     if (browser) await browser.close().catch(() => {});
