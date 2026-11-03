@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { jwtVerify } from 'jose';
+import { sharedBrowser } from '@/lib/agendaBrowser';
 
 // ================================================================
 // AGENDA EXPORT  (server-side JPG / PDF / Word)
@@ -73,19 +74,12 @@ async function ensureCjkFont() {
   }));
 }
 
+/** Vercel only: a Chromium for this one request. Elsewhere see sharedBrowser(). */
 async function launchBrowser() {
   const puppeteer = (await import('puppeteer-core')).default;
-  // Anywhere but Vercel: an installed Chrome/Chromium — local development, or
-  // a container image that ships one. The bundled Chromium is an Amazon
-  // Linux binary and does not run elsewhere (not on Alpine, not on Windows).
-  if (process.env.CHROME_EXECUTABLE_PATH) {
-    return puppeteer.launch({
-      executablePath: process.env.CHROME_EXECUTABLE_PATH,
-      headless: true,
-      // Container defaults: no user namespaces for the sandbox, small /dev/shm.
-      args: ['--no-sandbox', '--disable-dev-shm-usage'],
-    });
-  }
+  // The bundled Chromium is an Amazon Linux binary and does not run anywhere
+  // else (not on Alpine, not on Windows): there an installed Chrome/Chromium
+  // is used instead, through CHROME_EXECUTABLE_PATH.
   if (!process.env.VERCEL) {
     throw new Error('這個部署沒有可用的 Chromium，無法輸出議程。'
       + '請在執行環境安裝 Chromium 與中文字型，並設定 CHROME_EXECUTABLE_PATH');
@@ -160,10 +154,18 @@ export async function POST(request) {
   const base = process.env.NEXT_PUBLIC_BASE_PATH || '';
 
   const started = Date.now();
+  // With an installed Chromium (local development, the VM's container) the
+  // browser stays running between exports and each gets a context of its own;
+  // closing that context drops this caller's login cookie with it.
   let browser;
+  let context;
   try {
-    browser = await launchBrowser();
-    const page = await browser.newPage();
+    if (process.env.CHROME_EXECUTABLE_PATH) {
+      context = await (await sharedBrowser()).createBrowserContext();
+    } else {
+      browser = await launchBrowser();
+    }
+    const page = await (context || browser).newPage();
     // The editor reports load failures with alert(), which would otherwise
     // hang a headless page until the timeout. Dismiss, but keep the text —
     // it is the actual reason ("找不到此議程", a 403, …).
@@ -245,6 +247,7 @@ export async function POST(request) {
     console.error('agenda-export failed', e);
     return NextResponse.json({ detail: `議程輸出失敗：${e.message || e}` }, { status: 502 });
   } finally {
+    if (context) await context.close().catch(() => {});
     if (browser) await browser.close().catch(() => {});
   }
 }
