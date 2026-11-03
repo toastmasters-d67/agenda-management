@@ -29,6 +29,7 @@ import './agenda.css';
 import { withBase } from '@/lib/basePath';
 import { WORD_DEFAULT_TEMPLATE, buildWordData, fillWordTemplate, wordTemplateErrors,
          wordLayoutUrl, wordDownloadUrl } from '@/lib/wordExport';
+import { matchWordLayout } from '@/lib/docxPreviewFix';
 import SearchableSelect from '@/components/SearchableSelect';
 
 // ================================================================
@@ -927,6 +928,7 @@ function applyPreviewScale() {
   // compensate the visual gap a sub-1 scale leaves below the (possibly multi-page) block
   const h = pages.offsetHeight;
   pages.style.marginBottom = scale < 1 ? `${h * (scale - 1)}px` : '';
+  applyWordPreviewScale();
 }
 
 function updatePreview() {
@@ -979,6 +981,113 @@ function updatePreview() {
   // The club or the language may have changed which layout PDF / JPG use.
   updateExportNote();
   if (wordRenderAvailable === null && wordLayoutUrl(club, lang)) canRenderWord();
+  syncPreviewMode();
+}
+
+// ---- Live preview in the club's Word layout ----
+// A meeting with a Word layout (wordLayoutUrl(), the same template that sets
+// PDF / JPG) is previewed in that layout: each edit fills the template in the
+// browser (buildWordBlob) and docx-preview draws it, with the measured
+// differences from Word corrected (lib/docxPreviewFix.js). That is close to
+// Word but not exact (page breaks, fonts); 精確預覽 lays the file out on the server the
+// way PDF / JPG are. The web layout keeps rendering off-screen meanwhile — the
+// web PDF / JPG fallback captures it. 預覽版型 switches back to the web layout.
+
+const PREVIEW_MODE_KEY = 'agendaPreviewMode';
+let previewMode = null;            // 'word' | 'web'; null = not read from storage yet
+let wordPreviewTimer = null;
+let wordPreviewSeq = 0;            // a newer render makes older ones drop their result
+
+function wordPreviewActive() {
+  if (previewMode === null) {
+    try {
+      previewMode = localStorage.getItem(PREVIEW_MODE_KEY) === 'web' ? 'web' : 'word';
+    } catch {
+      previewMode = 'word';
+    }
+  }
+  return previewMode === 'word' && !!wordLayoutUrl(getActiveClub(), lang);
+}
+
+/** Show the layout the preview is in, and redraw the Word one after an edit. */
+function syncPreviewMode() {
+  const hasLayout = !!wordLayoutUrl(getActiveClub(), lang);
+  const word = wordPreviewActive();
+  document.querySelector('.preview-scroll')?.classList.toggle('word-mode', word);
+  const modeItem = document.getElementById('previewModeMenuItem');
+  if (modeItem) modeItem.style.display = hasLayout ? '' : 'none';
+  const modeLabel = document.getElementById('previewModeLabel');
+  if (modeLabel) modeLabel.textContent = word ? '切換網頁版型' : '切換 Word 版型';
+  const label = document.getElementById('previewLabel');
+  if (label) label.textContent = word ? '預覽（Word 版型・即時更新）' : '預覽（即時更新）';
+  updateExactPreviewItem();
+  clearTimeout(wordPreviewTimer);
+  if (word) {
+    wordPreviewTimer = setTimeout(renderWordPreview, 300);
+  } else {
+    wordPreviewSeq++;
+  }
+}
+
+function togglePreviewMode() {
+  previewMode = wordPreviewActive() ? 'web' : 'word';
+  try {
+    localStorage.setItem(PREVIEW_MODE_KEY, previewMode);
+  } catch {}
+  syncPreviewMode();
+  requestAnimationFrame(applyPreviewScale);
+}
+
+/** 精確預覽 needs the server's converter; it is the 下載 Word preview. */
+function updateExactPreviewItem() {
+  const item = document.getElementById('exactPreviewMenuItem');
+  if (item) item.style.display = wordPreviewActive() && wordRenderAvailable !== false ? '' : 'none';
+}
+
+async function renderWordPreview() {
+  const url = wordLayoutUrl(getActiveClub(), lang);
+  const host = document.getElementById('wordPreviewDoc');
+  if (!url || !host || !wordPreviewActive()) return;
+  const seq = ++wordPreviewSeq;
+  setWordPreviewStatus('更新中…');
+  try {
+    const [blob, { renderAsync }] = await Promise.all([
+      buildWordBlob(url, { cacheTemplate: true }), import('docx-preview'),
+    ]);
+    if (seq !== wordPreviewSeq) return;
+    // Draw into a detached node and swap, so the old pages stay up meanwhile.
+    const next = document.createElement('div');
+    await renderAsync(blob, next, null, {
+      inWrapper: true, breakPages: true, ignoreLastRenderedPageBreak: true,
+      experimental: true, useBase64URL: true,
+    });
+    if (seq !== wordPreviewSeq) return;
+    host.replaceChildren(...next.childNodes);
+    matchWordLayout(host);
+    setWordPreviewStatus('');
+    requestAnimationFrame(applyWordPreviewScale);
+  } catch (e) {
+    if (seq !== wordPreviewSeq) return;
+    setWordPreviewStatus(`Word 版型預覽失敗：${wordTemplateErrors(e).join('；')}`, true);
+  }
+}
+
+function setWordPreviewStatus(text, isError = false) {
+  const el = document.getElementById('wordPreviewStatus');
+  if (!el) return;
+  el.textContent = text;
+  el.style.display = text ? '' : 'none';
+  el.classList.toggle('error', isError);
+}
+
+function applyWordPreviewScale() {
+  const scroll = document.querySelector('.preview-scroll');
+  const doc = document.getElementById('wordPreviewDoc');
+  const page = doc && doc.querySelector('section');
+  if (!scroll || !page || !scroll.classList.contains('word-mode')) return;
+  const scale = Math.min(1, (scroll.clientWidth - 20) / page.offsetWidth);
+  doc.style.transform = scale < 1 ? `scale(${scale})` : '';
+  doc.style.marginBottom = scale < 1 ? `${doc.offsetHeight * (scale - 1)}px` : '';
 }
 
 // Resolve the active club (branding + template) for rendering.
@@ -1437,18 +1546,26 @@ function setSaveStatus(state) {
 // ================================================================
 // PDF / JPG DOWNLOAD
 // ================================================================
+// The last saved theme picture fetched, so the live Word preview doesn't
+// download it again on every edit.
+let themeImgFetched = { url: null, data: null };
+
 async function getThemeImgBase64() {
   if (images.themeImgBase64) return images.themeImgBase64;
   if (!images.themeImg) return null;
-  const res = await apiFetch(`/image-proxy?url=${encodeURIComponent(images.themeImg)}`);
+  if (themeImgFetched.url === images.themeImg) return themeImgFetched.data;
+  const url = images.themeImg;
+  const res = await apiFetch(`/image-proxy?url=${encodeURIComponent(url)}`);
   if (!res.ok) return null;
   const blob = await res.blob();
-  return new Promise((resolve, reject) => {
+  const data = await new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(reader.result);
     reader.onerror = reject;
     reader.readAsDataURL(blob);
   });
+  themeImgFetched = { url, data };
+  return data;
 }
 
 async function getThemeImgCovered(containerEl) {
@@ -1683,6 +1800,7 @@ function updateExportNote() {
   } else {
     el.textContent = `PDF／JPG 使用分會的${lang === 'en' ? '英文場' : '中文場'} Word 版型`;
   }
+  updateExactPreviewItem();
 }
 
 /** The whole agenda as one PDF, as a data URL. */
@@ -1760,12 +1878,9 @@ function saveDataUrl(href, filename) {
 // (or its Chinese one, or the bundled default), filled with this meeting
 // (lib/wordExport.js). Shared by the 下載 Word button, the server-side export
 // (MCP) and — with the layout template passed in — PDF / JPG in Word layout.
-async function buildWordBlob(tplUrl = wordDownloadUrl(getActiveClub(), lang)) {
+async function buildWordBlob(tplUrl = wordDownloadUrl(getActiveClub(), lang), { cacheTemplate = false } = {}) {
   const club = getActiveClub();
-  const res = tplUrl
-    ? await apiFetch(`/image-proxy?url=${encodeURIComponent(tplUrl)}`)
-    : await fetch(WORD_DEFAULT_TEMPLATE);
-  if (!res.ok) throw new Error('Word 範本下載失敗');
+  const template = await loadWordTemplate(tplUrl, cacheTemplate);
   // Full data: also the roles this template doesn't show, for their marks.
   const data = collectSaveData();
   const values = buildWordData(data, club, {
@@ -1778,7 +1893,24 @@ async function buildWordBlob(tplUrl = wordDownloadUrl(getActiveClub(), lang)) {
   } catch (e) {
     console.warn('主題圖片讀取失敗，Word 保留佔位圖:', e);
   }
-  return fillWordTemplate(await res.arrayBuffer(), values, { 主題圖片: themeImg });
+  return fillWordTemplate(template, values, { 主題圖片: themeImg });
+}
+
+// The live Word preview fills the template on every edit, so it keeps the
+// download per URL; exports always fetch, picking up a template re-uploaded
+// under the same address.
+const wordTemplateCache = new Map();   // url → ArrayBuffer
+
+async function loadWordTemplate(tplUrl, useCache) {
+  const key = tplUrl || WORD_DEFAULT_TEMPLATE;
+  if (useCache && wordTemplateCache.has(key)) return wordTemplateCache.get(key).slice(0);
+  const res = tplUrl
+    ? await apiFetch(`/image-proxy?url=${encodeURIComponent(tplUrl)}`)
+    : await fetch(WORD_DEFAULT_TEMPLATE);
+  if (!res.ok) throw new Error('Word 範本下載失敗');
+  const buf = await res.arrayBuffer();
+  wordTemplateCache.set(key, buf);
+  return buf.slice(0);
 }
 
 function blobToDataUrl(blob) {
@@ -2999,7 +3131,7 @@ export default function AgendaIndexPage() {
         <div className="preview-panel">
           <div className="preview-toolbar">
             <button className="btn-home-rwd" onClick={() => { location.href = withBase('/home'); }}>← 首頁</button>
-            <span className="toolbar-label">預覽（即時更新）</span>
+            <span className="toolbar-label" id="previewLabel">預覽（即時更新）</span>
             <div className="toolbar-right">
               <div className="settings-dropdown" id="settingsDropdown">
                 <button className="btn-settings" onClick={toggleSettingsMenu}>
@@ -3010,6 +3142,10 @@ export default function AgendaIndexPage() {
                   <button className="settings-menu-item" id="langMenuItem" onClick={toggleLang}>
                     <span>語言</span><span id="langToggle">切換中文</span>
                   </button>
+                  <button className="settings-menu-item" id="previewModeMenuItem" style={{ display: 'none' }} onClick={togglePreviewMode}>
+                    <span>預覽版型</span><span id="previewModeLabel">切換網頁版型</span>
+                  </button>
+                  <button className="settings-menu-item" id="exactPreviewMenuItem" style={{ display: 'none' }} onClick={downloadWord}>精確預覽（與輸出相同）</button>
                   <button className="settings-menu-item" onClick={downloadPDF}>下載 PDF</button>
                   <button className="settings-menu-item" onClick={downloadJPG}>下載 JPG</button>
                   <button className="settings-menu-item" onClick={downloadWord}>下載 Word</button>
@@ -3025,6 +3161,10 @@ export default function AgendaIndexPage() {
           <div className="preview-scroll">
             <div id="agendaPages">
               <div id="agendaPreview" className="agenda-page"></div>
+            </div>
+            <div id="wordPreview">
+              <div id="wordPreviewStatus" className="word-live-status" style={{ display: 'none' }}></div>
+              <div id="wordPreviewDoc"></div>
             </div>
           </div>
         </div>

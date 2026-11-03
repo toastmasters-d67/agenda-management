@@ -224,6 +224,7 @@ EntrepreneurAgenda/
 - **範本來源**：分會在「版型」設定的「Word 匯出範本」區上傳的 .docx，**中文場、英文場各一份**（`clubs.settings.word_template_url`／`word_template_url_en`，檔案放 R2，透過 `/api/image-proxy` 讀取）。下載 Word 依序用：該場語言的範本 → 中文場範本 → 內建的 `public/templates/agenda-default.docx`（仿標準版）。Word 範本屬於分會，不分議程版型。
 - **移除範本**：「移除範本」按下並儲存後，設定清掉、R2 上的檔案也一併刪除（替換新範本時舊檔同樣刪除；只刪本分會目錄下的檔案）。MCP 用 `set_word_template` 的 `clear: true`。
 - **PDF／JPG 也跟著 Word 版型**：分會**有上傳該場語言的範本**時，議程頁的「下載 PDF／JPG」與 MCP 的 `export_agenda` 都改用 Word 版型——瀏覽器照「下載 Word」同一套程式填好 .docx，送到 `/api/word-render`，伺服器用 LibreOffice 排版成 PDF、poppler 切成每頁一張 JPG。沒有該語言的範本（例如只上傳中文場、這場是英文場）就照舊截網頁議程。設定選單的下載按鈕下方會寫出這次用的是哪一種。
+- **即時預覽也跟著 Word 版型**：同樣的條件（該場語言有上傳範本）下，議程頁右邊的預覽改成 Word 版型——每次改欄位（停 0.3 秒後）就用「下載 Word」同一套程式填好 .docx，交給 [`docx-preview`](https://www.npmjs.com/package/docx-preview) 在瀏覽器裡畫出來，不經過伺服器，所以每個網址都能用。它和 Word 很接近但不是 100% 一樣（分頁位置、字型、填滿頁面的高度可能有差），所以設定選單另有「精確預覽（與輸出相同）」：用 LibreOffice 排一次，就是「下載 Word」的預覽視窗（只有主機有轉檔程式時才出現）。設定選單的「預覽版型」可以切回網頁版型，選擇記在這台瀏覽器。網頁版型在 Word 模式下仍在畫面外照常排版，因為 Word 轉檔失敗時 PDF／JPG 會退回截它。
   - **只在 Azure VM**：`Dockerfile.api` 裝了 LibreOffice、思源黑體（Noto CJK）、Noto Color Emoji、Liberation（代替 Arial），映像約 740 MB。Vercel 沒有這些，`GET /api/word-render` 回 `available: false`，PDF／JPG 一律用網頁版型。
   - **字型**：Windows 的微軟正黑體、新細明體、標楷體不能放進伺服器（授權），`deploy/fonts/99-agenda-fonts.conf` 把它們對應到思源黑體／思源宋體。企業家與 Chill Hi High 的範本直接用 `Noto Sans CJK TC`，PDF 才會與 Word 一致；分會自己做的範本建議也用它。
   - **轉檔失敗**時退回網頁版型並告知原因，不讓下載整個失敗；同一時間只跑一個 LibreOffice（1 vCPU 的 VM），一份約 1 秒。
