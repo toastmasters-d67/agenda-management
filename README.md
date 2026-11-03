@@ -922,7 +922,8 @@ https://<你的網域>/api/mcp
 | `create_agenda` | `agendas:write` | 建立議程。時間地點沿用該分會上一份議程（再退到分會設定）；同一天已有議程時拒絕並回傳既有 id。`import_roles: true` 從角色試算表帶入 |
 | `update_agenda` | `agendas:write` | 只改有給的欄位；`speeches`／`evaluators` 依位置合併（`null` 表示該位置不變），刪減篇數用 `speech_count`／`evaluator_count`。`import_roles` 只補空白的角色，`overwrite_roles` 才覆蓋 |
 | `delete_agenda` | `agendas:write` | 刪除議程，與 `DELETE /api/agendas/{id}` 同規則（分會管理員以上、只能刪自己分會）。綁定這場的貼文保留、改為未綁定（FK `ON DELETE SET NULL`），回覆會列出是哪幾則 |
-| `export_agenda` | `posts:read` | 議程輸出 PDF／JPG（每頁一張）／可編輯的 Word（docx），回傳 R2 公開連結。見下方「議程輸出」 |
+| `export_agenda` | `posts:read` | 開始把議程輸出成 PDF／JPG（每頁一張）／可編輯的 Word（docx），回傳工作代碼。見下方「議程輸出」 |
+| `get_agenda_export` | `posts:read` | 用工作代碼查輸出進度，完成後回傳 R2 公開連結 |
 | `set_agenda_theme_image` | `agendas:write` | 設定（或 `clear` 移除）議程的主題圖 `themeImgUrl`，圖片來源同 `add_post_image`。只有 `standard`、`entrepreneur` 版型會顯示主題圖，其他版型直接拒絕 |
 | `generate_agenda_theme_image` | `ai:generate` | 用平台 OpenAI 生成主題圖並套用；沒給 prompt 時依例會主題產生。版型不顯示主題圖時**先拒絕、不花錢** |
 | `get_roles` | `posts:read` | 角色安排表：分會接下來（或指定範圍）每場已安排的角色 |
@@ -979,14 +980,16 @@ https://<你的網域>/api/mcp
 
 議程表是在瀏覽器裡畫的（各分會版型、列高平均、html2canvas），網頁的「下載 JPG／PDF」是截那個畫面。伺服器端不另寫一套 renderer，而是**用無頭 Chromium 開同一個 `/agenda` 頁面，請頁面做與按鈕完全相同的截圖**：
 
-1. MCP 工具（Python）檢查權限，產生 R2 的 presigned PUT 網址（PDF 一個、Word 一個、JPG 最多 4 頁），再簽一把**5 分鐘的登入 token**（呼叫者本人）。
+1. MCP 工具（Python）檢查權限，產生 R2 的 presigned PUT 網址（PDF 一個、Word 一個、JPG 最多 4 頁，外加一個 `status.json`），再簽一把**20 分鐘的登入 token**（呼叫者本人）。
 2. 呼叫 Next 的 `POST /svc/agenda-export`（`app/svc/agenda-export/route.js`，Node runtime）。它驗 token（`JWT_SECRET`）、用 `@sparticuz/chromium` + `puppeteer-core` 以這個身分開 `/agenda?id=…`，等 `window.__agendaExport.ready`，呼叫頁面上的 `jpg()`／`pdf()`／`docx()`（與下載按鈕共用 `captureJPGs`／`capturePDF`／`buildWordBlob`；Word 一樣先用分會上傳的 Word 範本，沒有才用預設範本。分會上傳了該場次的 Word 範本時，PDF／JPG 也和按鈕一樣走 Word 版型（`/api/word-render`），主機沒有 LibreOffice 時退回網頁版型）。
-3. 檔案直接 PUT 到 R2，不經過兩邊 function 的回應大小上限；工具回傳公開連結（路徑含亂數，拿到連結的人都能開）。
+3. 檔案直接 PUT 到 R2，不經過兩邊 function 的回應大小上限。
+
+**非同步**：`export_agenda` 帶 `async: true` 呼叫 route，route 立刻回 202、用 Next 的 `after()` 在回應之後才轉檔，結束時把結果（成功與頁數，或失敗原因）寫進同一個資料夾的 `status.json`。工具馬上回傳工作代碼 `{分會 id}-{資料夾亂數}-{開始時間}`，之後用 `get_agenda_export` 查：沒有 `status.json` 就是還在跑（超過 30 分鐘視為失敗），有就列出資料夾裡的檔案回傳公開連結（路徑含亂數，拿到連結的人都能開）。狀態放在 R2 而不是資料表，Vercel 上一樣能用。改成這樣是因為 1 GB 的 VM 上，有 Word 範本的分會一次要好幾分鐘（LibreOffice 單次轉檔就超過 90 秒），超過 MCP 客戶端等一次呼叫的時間。
 
 注意：
 - 只開**自己這個部署**的頁面（不看請求帶來的 host），上傳網址限定本帳號的 R2 網域——請求裡的 token 不會被送去別的地方。正式站從 Python 呼叫時用 `VERCEL_PROJECT_PRODUCTION_URL`，可用 `AGENDA_RENDER_URL` 覆寫。
 - Vercel 的 Chromium 沒有中文字型，第一次（每個暖機實例一次）會從 Google Fonts 下載 Noto Sans TC 與 Noto Emoji（黑白，給 ⏱ 這類符號）到 `/tmp/fonts`。**順序很重要**：`@sparticuz/chromium` 只在 `/tmp/fonts` 不存在時才解壓自帶的 `fonts.conf`，所以要先呼叫 `chromium.executablePath()` 再補字型；反過來 Chromium 會沒有字型設定，一導覽就斷線（`Navigating frame was detached`）。
-- 一次約 10～30 秒（冷啟動較久），都在 60 秒的 `maxDuration` 內。
+- Vercel 上一次約 10～30 秒（冷啟動較久），`after()` 也受 60 秒的 `maxDuration` 限制。VM 上用網頁版型約 1 分鐘，有 Word 範本會到好幾分鐘（議程頁 PDF、JPG 各轉一次 LibreOffice）。
 - 頁面用 `alert()` 報錯，route 會關掉對話框並把文字帶進錯誤訊息。
 - 本機開發：Chromium 套件是 Linux 版，設 `CHROME_EXECUTABLE_PATH` 指向本機的 Chrome。不帶 `uploads` 呼叫 route 時檔案以 data URL 直接回傳，不會寫入 R2。
 
