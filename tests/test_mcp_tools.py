@@ -142,8 +142,12 @@ def test_word_template_tool_checks_then_stores(index, env, monkeypatch):
     assert club["settings"]["word_template_url"] == ok["structuredContent"]["url"]
     cleared = call(index, "set_word_template", env["admin"], {"club_id": env["cid"], "clear": True})
     assert not cleared["isError"]
+    # A club admin manages their own club's template, not another club's.
+    own = call(index, "set_word_template", env["officer"],
+               {"club_id": env["cid"], "lang": "en", "file_base64": _docx("{{總主持人}}")})
+    assert not own["isError"]
     with pytest.raises(index.HTTPException):
-        call(index, "set_word_template", env["officer"], {"club_id": env["cid"], "clear": True})
+        call(index, "set_word_template", env["officer"], {"club_id": env["cid"] + 999, "clear": True})
 
 
 def test_custom_roles_keep_their_ids(index, env):

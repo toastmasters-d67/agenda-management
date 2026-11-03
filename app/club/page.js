@@ -2,7 +2,7 @@
 
 import { useEffect } from 'react';
 import { apiJson } from '@/lib/api';
-import { setAuth, clearAuth, applyRoleUI } from '@/lib/auth';
+import { setAuth, clearAuth, applyRoleUI, isSystemAdmin, getClubId } from '@/lib/auth';
 import { AGENDA_TEMPLATES, TEMPLATE_OPTIONS, templateAssetDefaults } from '@/lib/agendaTemplates';
 import { WORD_TEMPLATE_FIELDS, WORD_FIELDS, WORD_LOOPS, WORD_PICTURES, WORD_DEFAULT_TEMPLATE, checkWordTemplate, wordKnownTags } from '@/lib/wordExport';
 import { CUSTOM_ROLES_FIELD, MEETING_ROLES, newCustomRoleId } from '@/lib/meetingRoles';
@@ -59,7 +59,9 @@ async function fetchClubs() {
   document.getElementById('clubTableBody').innerHTML =
     '<tr><td colspan="3"><div class="loading-spinner"><div class="spinner"></div></div></td></tr>';
   try {
-    clubs = await apiJson('/clubs');
+    // A club admin sees and edits their own club only (the API enforces it too).
+    const all = await apiJson('/clubs');
+    clubs = isSystemAdmin() ? all : all.filter((c) => c.id === getClubId());
     updateStats();
     renderList();
   } catch {
@@ -134,15 +136,15 @@ function renderList() {
       <td class="td-club-name">${c.name}</td>
       <td><span class="td-member-count">${count} 位</span></td>
       <td class="td-actions">
-        <button class="btn-edit-row system-admin-only" onclick="window.__clubOpenModal(${c.id})" style="display:none">
+        <button class="btn-edit-row write-action" onclick="window.__clubOpenModal(${c.id})" style="display:none">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
           編輯
         </button>
-        <button class="btn-edit-row system-admin-only" onclick="window.__clubOpenModal(${c.id}, 'template')" style="display:none">
+        <button class="btn-edit-row write-action" onclick="window.__clubOpenModal(${c.id}, 'template')" style="display:none">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
           版型
         </button>
-        <button class="btn-edit-row system-admin-only" onclick="window.__clubOpenModal(${c.id}, 'social')" style="display:none">
+        <button class="btn-edit-row write-action" onclick="window.__clubOpenModal(${c.id}, 'social')" style="display:none">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l18-8-8 18-2-7-8-3z"/></svg>
           社群
         </button>
@@ -152,8 +154,8 @@ function renderList() {
       </td>
     </tr>`;
   }).join('');
-  // rows are created after the initial applyRoleUI(); re-apply so the
-  // system-admin-only edit/delete buttons become visible for admins.
+  // rows are created after the initial applyRoleUI(); re-apply so the edit
+  // buttons (club admins too) and the delete button (system admins only) show.
   applyRoleUI();
 }
 

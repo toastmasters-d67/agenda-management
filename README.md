@@ -930,11 +930,11 @@ https://<你的網域>/api/mcp
 | `import_roles_sheet` | `agendas:write` | 角色安排頁的「從 Google Sheet 匯入」，一次匯整個日期範圍。預設只補空白、不建立議程；`overwrite`、`create_missing` 開啟對應行為；只有會議編號的欄視為空檔跳過 |
 | `list_members` | `posts:read` | 分會會員的中英文名與等級（不含帳號、Email），安排角色時對照人名用 |
 | `get_club` | `posts:read` | 分會設定（只回傳議程用欄位；`meta_app_id` 等其他設定不回傳） |
-| `update_club` | `clubs:write` | 修改分會欄位與版型設定，只改有給的；`settings` 給 `null` 刪除。**限系統管理員**（與 `PUT /api/clubs/{id}` 同規則） |
+| `update_club` | `clubs:write` | 修改分會欄位與版型設定，只改有給的；`settings` 給 `null` 刪除。**分會管理員以上，分會管理員只能改自己的分會**（與 `PUT /api/clubs/{id}` 同規則） |
 | `create_club` | `clubs:write` | 建立分會。限系統管理員 |
-| `set_club_image` | `clubs:write` | 更換 Logo、各 QR code、第二頁圖片。限系統管理員 |
-| `set_word_template` | `clubs:write` | 上傳分會的 Word 議程範本（`file`／`file_url`／`file_base64`），伺服器檢查 `{{標記}}` 與迴圈是否成對，壞的拒收；`lang` 選中文場／英文場；`clear: true` 改回預設。目前的範本網址在 `get_club` 的 `settings.word_template_url(_en)`。限系統管理員 |
-| `set_custom_roles` | `clubs:write` | 整份取代分會自訂角色；帶原 `id` 才會保留已排的人。限系統管理員 |
+| `set_club_image` | `clubs:write` | 更換 Logo、各 QR code、第二頁圖片。分會管理員以上，分會管理員只能改自己的分會 |
+| `set_word_template` | `clubs:write` | 上傳分會的 Word 議程範本（`file`／`file_url`／`file_base64`），伺服器檢查 `{{標記}}` 與迴圈是否成對，壞的拒收；`lang` 選中文場／英文場；`clear: true` 改回預設。目前的範本網址在 `get_club` 的 `settings.word_template_url(_en)`。分會管理員以上，分會管理員只能改自己的分會 |
+| `set_custom_roles` | `clubs:write` | 整份取代分會自訂角色；帶原 `id` 才會保留已排的人。分會管理員以上，分會管理員只能改自己的分會 |
 | `list_machines` | `posts:read` | 電子名牌機台與綁定的會員。分會管理員以上 |
 | `pair_machine` / `update_machine` | `clubs:write` | 用配對碼綁定名牌；改名、換綁、解除綁定、停用。分會管理員以上 |
 | `delete_post` | `posts:write` | 從系統刪除一則貼文（草稿或已發布的都可以），與網頁的刪除相同。只刪系統紀錄，已發到社群平台上的貼文不受影響——本系統不管理發布之後的社群貼文 |
@@ -1015,7 +1015,7 @@ https://<你的網域>/api/mcp
 | 角色 | 說明 |
 |------|------|
 | `system_admin` | 最高權限，可 CRUD 所有分會、所有用戶、所有議程 |
-| `club_admin` | 可新增 / 編輯**自己分會**的會員（含改他們在本分會的角色、等級，包括自己）、把既有帳號加進本分會、把一般會員移出本分會；可審核 / 拒絕自行註冊的 pending 用戶；可 CRUD 自己分會的議程 |
+| `club_admin` | 可新增 / 編輯**自己分會**的會員（含改他們在本分會的角色、等級，包括自己）、把既有帳號加進本分會、把一般會員移出本分會；可審核 / 拒絕自行註冊的 pending 用戶；可 CRUD 自己分會的議程；可在「分會管理」編輯**自己分會**的設定（品牌、版型、Word 範本、社群帳號），不能新增或刪除分會 |
 | `club_member` | 僅能閱覽頁面，無法寫入任何資料 |
 
 `club_admin`／`club_member` 是**每個分會各自的角色**：一個人可以屬於多個分會，在每個分會的角色可以不同（例如在 A 分會是管理員、在 B 分會是一般會員）。`system_admin` 是全站角色，不分分會。
@@ -1418,7 +1418,7 @@ DATABASE_URL=postgresql://user:pass@ep-xxx-pooler.../neondb?sslmode=require
 | `/roles` | `app/roles/page.js` | 角色安排，多場例會 × 角色矩陣，人選可下拉選取或自由輸入 | `club_admin`（寫入） |
 | `/social` | `app/social/page.js` | 社群發文，AI 產生文案／生圖、海報版型、各平台版本與規則檢查、發布；個人與分會共用 AI 金鑰也在這裡設定 | `club_admin`（寫入） |
 | `/member` | `app/member/page.js` | 會員管理，新增、編輯（含 Email）、批量匯入、審核、重設密碼、移除會員；system_admin 另可設定角色與所屬分會 | `club_admin`（寫入） |
-| `/club` | `app/club/page.js` | 分會管理：新增／刪除分會、品牌、版型設定、社群帳號（Meta App）設定 | `system_admin`（寫入） |
+| `/club` | `app/club/page.js` | 分會管理：新增／刪除分會、品牌、版型設定、Word 範本、社群帳號（Meta App）設定 | `system_admin`；`club_admin` 只看到並編輯自己的分會，不能新增／刪除 |
 | `/machines` | `app/machines/page.js` | 機台管理：輸入名牌上的配對碼綁定會員、換綁、停用、解除綁定、刪除；顯示最後上線時間 | `club_admin` |
 | `/pathways` | `app/pathways/page.js` | Pathways 路徑管理：路徑、各級必修、專案中英名稱、選修清單 | `system_admin` |
 | `/change-password` | `app/change-password/page.js` | 修改密碼；admin 建立帳號後首次登入強制跳轉；沒有密碼的帳號在這裡設定第一組（不需舊密碼） | 任何登入用戶 |
@@ -1484,7 +1484,7 @@ DATABASE_URL=postgresql://user:pass@ep-xxx-pooler.../neondb?sslmode=require
 |------|------|------|------|
 | GET    | `/api/clubs` | 取得分會列表（含品牌與 `template_key` 等欄位；**不需登入**，註冊表單只取 `id/name`） | 無 |
 | POST   | `/api/clubs` | 新增分會（可帶品牌欄位 + `template_key`） | `system_admin` |
-| PUT    | `/api/clubs/{id}` | 更新分會名稱與品牌 / 版型 | `system_admin` |
+| PUT    | `/api/clubs/{id}` | 更新分會名稱與品牌 / 版型 | `club_admin` 以上（只能改自己的分會） |
 | DELETE | `/api/clubs/{id}` | 刪除分會 | `system_admin` |
 | GET    | `/api/pathways` | Pathways 目錄（路徑、各級必修、專案、選修清單） | 已登入 |
 | PUT    | `/api/pathways` | 整份取代 Pathways 目錄；專案改名時同步更新既有議程 | `system_admin` |
@@ -1548,7 +1548,7 @@ DATABASE_URL=postgresql://user:pass@ep-xxx-pooler.../neondb?sslmode=require
 
 | 方法 | 路徑 | 說明 | 權限 |
 |------|------|------|------|
-| POST | `/api/upload/presign` | 取得 R2 Presigned URL（前端直傳） | `club_admin` 以上 |
+| POST | `/api/upload/presign` | 取得 R2 Presigned URL（前端直傳）；帶 `club_id` 時，分會管理員只能傳到自己的分會 | `club_admin` 以上 |
 | GET  | `/api/image-proxy` | 代理取得 R2 私有圖片（`?url=...`） | 已登入 |
 
 ### 機台管理（電子名牌）
