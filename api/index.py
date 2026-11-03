@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Depends, Query, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -8655,7 +8656,12 @@ async def mcp_endpoint(request: Request):
             # whoami, which reads nothing but the caller's own identity.)
             require_scope(caller, tool["scope"], request)
         try:
-            result = tool["handler"](caller, params.get("arguments") or {})
+            # Handlers are blocking (database, HTTP calls). Run inline, they
+            # would stall this async endpoint's event loop, and with it the
+            # whole API on the VM's single worker. export_agenda then
+            # deadlocks: the agenda page it opens calls back into this API
+            # and waits until the export itself has timed out.
+            result = await run_in_threadpool(tool["handler"], caller, params.get("arguments") or {})
         except HTTPException as e:
             # The app's own refusals are things a model can act on — a missing
             # field, a wrong id, an unconnected platform — so they come back as
