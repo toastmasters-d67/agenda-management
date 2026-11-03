@@ -1068,7 +1068,10 @@ def create_club(req: ClubRequest, user: dict = Depends(require_system_admin)):
 
 
 @app.put("/api/clubs/{club_id}")
-def update_club(club_id: int, req: ClubRequest, user: dict = Depends(require_system_admin)):
+def update_club(club_id: int, req: ClubRequest, user: dict = Depends(require_club_admin_or_above)):
+    # A club admin edits their own club only; creating and deleting clubs
+    # stay with system admins.
+    _social_scope(user, club_id)
     if not req.name.strip():
         raise HTTPException(status_code=400, detail="分會名稱不得為空")
     settings_json = json.dumps(req.settings) if req.settings is not None else "{}"
@@ -1954,6 +1957,9 @@ def presign_upload(req: PresignRequest, user: dict = Depends(require_club_admin_
     tw_tz = timezone(timedelta(hours=8))
     ts = datetime.now(tw_tz).strftime("%H%M%S")
     # Files for a known club are filed under media/clubs/{id}/; otherwise flat media/.
+    # A club admin files only under their own club (分會管理 is open to them).
+    if req.club_id:
+        _social_scope(user, req.club_id)
     base = f"media/clubs/{req.club_id}" if req.club_id else "media"
     if req.meeting_date and req.meeting_no:
         key = f"{base}/{req.meeting_date}_No{req.meeting_no}_{ts}.{ext}"
@@ -4879,7 +4885,7 @@ MCP_SCOPES = {
     "posts:read":    "讀取分會、例會議程與貼文，並匯出議程 PDF／JPG",
     "posts:write":   "建立與修改貼文草稿、加入或移除貼文圖片",
     "agendas:write": "建立與修改議程、安排角色（含從角色試算表帶入）",
-    "clubs:write":   "修改分會設定與圖片（名稱、版型、地點、QR code、Word 範本；限系統管理員），以及配對電子名牌",
+    "clubs:write":   "修改分會設定與圖片（名稱、版型、地點、QR code、Word 範本；分會管理員只能改自己的分會），以及配對電子名牌",
     "ai:generate":   "用你的 AI 帳號產生文案與圖片（會消耗你的 API 額度）",
     "publish":       "代表分會公開發文到 Facebook／Instagram／Threads，以及核可受控貼文（核可後才能發布）",
 }
@@ -6954,7 +6960,7 @@ _TEMPLATE_KEYS = ("standard", "entrepreneur", "chillhihigh", "china")
 
 def _system_admin_only(caller: dict):
     if caller["role"] != "system_admin":
-        raise HTTPException(status_code=403, detail="分會設定只有系統管理員可以修改")
+        raise HTTPException(status_code=403, detail="只有系統管理員可以建立分會")
 
 
 def _club_view(cur, club_id: int) -> dict:
@@ -7014,8 +7020,8 @@ def _club_changes(args: dict):
 
 
 def _tool_update_club(caller, args):
-    _system_admin_only(caller)
-    cid = int(args["club_id"])
+    _officer_only(caller)
+    cid = _social_scope(caller, int(args["club_id"]))   # a club admin: their own club only
     cols, sets = _club_changes(args)
     if not cols and not sets:
         return _tool_text("沒有要修改的欄位", is_error=True)
@@ -7082,8 +7088,9 @@ def _store_image(raw: bytes, ctype: str, prefix: str) -> str:
 
 
 def _tool_set_club_image(caller, args):
-    _system_admin_only(caller)
-    cid, slot = int(args["club_id"]), args.get("slot") or ""
+    _officer_only(caller)
+    cid = _social_scope(caller, int(args["club_id"]))   # a club admin: their own club only
+    slot = args.get("slot") or ""
     if slot not in _CLUB_IMAGE_COLUMNS and slot not in _CLUB_IMAGE_SETTINGS:
         return _tool_text("slot 只能是 " + "、".join(list(_CLUB_IMAGE_COLUMNS)
                                                      + list(_CLUB_IMAGE_SETTINGS)), is_error=True)
@@ -7175,8 +7182,8 @@ def _file_from_args(args: dict, max_bytes: int = 15 * 1024 * 1024) -> bytes:
 
 
 def _tool_set_word_template(caller, args):
-    _system_admin_only(caller)
-    cid = int(args["club_id"])
+    _officer_only(caller)
+    cid = _social_scope(caller, int(args["club_id"]))   # a club admin: their own club only
     lang = args.get("lang") or "zh"
     if lang not in ("zh", "en"):
         return _tool_text("lang 只能是 zh（中文場）或 en（英文場）", is_error=True)
@@ -7224,8 +7231,8 @@ def _tool_set_custom_roles(caller, args):
     a meeting's assignment lives at agendas.data.customRoles[id], so keeping
     the id is what keeps who was assigned when a role is renamed.
     """
-    _system_admin_only(caller)
-    cid = int(args["club_id"])
+    _officer_only(caller)
+    cid = _social_scope(caller, int(args["club_id"]))   # a club admin: their own club only
     roles, seen = [], set()
     for r in args.get("roles") or []:
         zh = str(r.get("zh") or "").strip()[:30]
@@ -8089,7 +8096,7 @@ MCP_TOOLS = [
     },
     {
         "name": "update_club", "scope": "clubs:write", "title": "修改分會設定",
-        "description": "修改分會設定，只會改有給的欄位；settings 裡的值給 null 表示刪除。限系統管理員。"
+        "description": "修改分會設定，只會改有給的欄位；settings 裡的值給 null 表示刪除。分會管理員以上；分會管理員只能改自己的分會。"
                        "圖片（Logo、QR code、第二頁圖片）請用 set_club_image；Word 範本用 set_word_template；"
                        "自訂角色用 set_custom_roles。",
         "inputSchema": {"type": "object", "properties": {
@@ -8126,7 +8133,7 @@ MCP_TOOLS = [
     },
     {
         "name": "set_club_image", "scope": "clubs:write", "title": "設定分會圖片",
-        "description": "更換分會的 Logo、QR code 或議程第二頁圖片。給 image（檔案）、image_url 或 image_base64 其中一個。限系統管理員。",
+        "description": "更換分會的 Logo、QR code 或議程第二頁圖片。給 image（檔案）、image_url 或 image_base64 其中一個。分會管理員以上；分會管理員只能改自己的分會。",
         "inputSchema": {"type": "object", "properties": {
             "club_id": {"type": "integer"},
             "slot": {"type": "string",
@@ -8370,7 +8377,7 @@ MCP_TOOLS = [
                        "可用的標記見網頁「分會管理 → Word 匯出範本 → 可用的標記」；"
                        "表格的替代文字標題設為 {{填滿:148}} 這種寫法，下載時會把表格拉高到該毫米數、填滿頁面。"
                        "目前上傳的範本網址在 get_club 的 settings.word_template_url（英文場是 word_template_url_en）。"
-                       "限系統管理員。",
+                       "分會管理員以上；分會管理員只能設定自己的分會。",
         "inputSchema": {"type": "object", "properties": {
             "club_id": {"type": "integer"},
             "file": {"type": "object", "description": "範本檔案（支援檔案參數的客戶端使用）",
@@ -8390,7 +8397,7 @@ MCP_TOOLS = [
         "name": "set_custom_roles", "scope": "clubs:write", "title": "設定分會自訂角色",
         "description": "整份取代分會的自訂角色（角色目錄以外、這個分會自己的角色）。"
                        "改名請帶原本的 id，已排的人才會跟著保留；沒帶 id 的視為新角色。"
-                       "排人用 assign_roles 的 custom_<id>。限系統管理員。",
+                       "排人用 assign_roles 的 custom_<id>。分會管理員以上；分會管理員只能改自己的分會。",
         "inputSchema": {"type": "object", "properties": {
             "club_id": {"type": "integer"},
             "roles": {"type": "array", "items": {"type": "object", "properties": {
@@ -8454,8 +8461,7 @@ _TOOL_MIN_ROLE = {
         "whoami", "switch_club", "list_clubs", "get_club", "list_members", "list_meetings",
         "get_meeting", "get_agenda", "export_agenda", "get_roles",
         "list_posts", "get_post", "get_post_prefs", "list_post_templates")},
-    **{n: "system_admin" for n in ("update_club", "create_club", "set_club_image",
-                                   "set_word_template", "set_custom_roles")},
+    "create_club": "system_admin",
 }
 # What the help page says about each tool. The `description` in MCP_TOOLS is
 # written for the model (ids, argument shapes, when to call it); people need
