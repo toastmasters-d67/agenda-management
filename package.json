@@ -10,8 +10,10 @@
   },
   "dependencies": {
     "@sparticuz/chromium": "^153.0.0",
+    "docx-preview": "0.4.1",
     "docxtemplater": "^3.71.1",
     "jose": "^5.9.6",
+    "jszip": "3.10.1",
     "next": "^15.5.24",
     "pizzip": "^3.3.0",
     "puppeteer-core": "^25.12.0",

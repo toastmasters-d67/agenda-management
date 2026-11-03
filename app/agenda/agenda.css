@@ -358,6 +358,21 @@ details[open] summary::before { content: "▼ "; }
   box-shadow: 0 2px 8px rgba(0,0,0,0.15);
 }
 .word-preview-note { align-self: stretch; color: #772432; }
+
+/* Live preview in the club's Word layout (docx-preview). The web pages stay
+   laid out off-screen: the web PDF / JPG fallback captures them. */
+.preview-scroll { position: relative; }
+.preview-scroll:not(.word-mode) #wordPreview { display: none; }
+.preview-scroll.word-mode #agendaPages { position: absolute; left: -10000px; top: 0; }
+#wordPreview { width: 100%; display: flex; flex-direction: column; align-items: center; gap: 8px; }
+#wordPreviewDoc { width: 100%; transform-origin: top center; }
+#wordPreviewDoc .docx-wrapper { background: transparent; padding: 0; }
+#wordPreviewDoc .docx-wrapper > section { box-shadow: 0 2px 14px rgba(0,0,0,0.2); margin-bottom: 8mm; }
+.word-live-status {
+  align-self: stretch; text-align: center; font-size: 12px; color: #666;
+  padding: 4px 8px; border-radius: 4px; background: rgba(255,255,255,0.8);
+}
+.word-live-status.error { color: #772432; background: #fdecee; }
 .modal-actions {
   display: flex; justify-content: flex-end; gap: 8px;
   padding: 12px 16px; border-top: 1px solid #eee;
