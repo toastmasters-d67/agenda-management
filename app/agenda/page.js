@@ -29,7 +29,7 @@ import './agenda.css';
 import { withBase } from '@/lib/basePath';
 import { WORD_DEFAULT_TEMPLATE, buildWordData, fillWordTemplate, wordTemplateErrors,
          wordLayoutUrl, wordDownloadUrl } from '@/lib/wordExport';
-import { matchWordLayout } from '@/lib/docxPreviewFix';
+import { matchWordLayout, parseForPreview } from '@/lib/docxPreviewFix';
 import SearchableSelect from '@/components/SearchableSelect';
 
 // ================================================================
@@ -1051,16 +1051,17 @@ async function renderWordPreview() {
   const seq = ++wordPreviewSeq;
   setWordPreviewStatus('更新中…');
   try {
-    const [blob, { renderAsync }] = await Promise.all([
+    const [blob, { parseAsync, renderDocument }] = await Promise.all([
       buildWordBlob(url, { cacheTemplate: true }), import('docx-preview'),
     ]);
     if (seq !== wordPreviewSeq) return;
-    // Draw into a detached node and swap, so the old pages stay up meanwhile.
-    const next = document.createElement('div');
-    await renderAsync(blob, next, null, {
+    const options = {
       inWrapper: true, breakPages: true, ignoreLastRenderedPageBreak: true,
       experimental: true, useBase64URL: true,
-    });
+    };
+    // Draw into a detached node and swap, so the old pages stay up meanwhile.
+    const next = document.createElement('div');
+    next.append(...await renderDocument(await parseForPreview(parseAsync, blob, options), options));
     if (seq !== wordPreviewSeq) return;
     host.replaceChildren(...next.childNodes);
     matchWordLayout(host);
