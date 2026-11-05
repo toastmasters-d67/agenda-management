@@ -6137,16 +6137,30 @@ _SHEET_PERSON_ROWS = {
     "講評員講評": "evalEvaluator1",
 }
 _SHEET_META_ROWS = {"會議編號": "meetingNo", "會議主題": "meetingTheme", "主題題目": "themeQuestion"}
+# English labels (生橋's sheet), keyed by _sheet_label_key.
+_SHEET_EN_ROWS = {
+    "toastmaster of the day": "tme", "toastmasters of the day": "tme", "tme": "tme",
+    "timer": "timer", "ah counter": "ahCounter",
+    "variety session": "varietyHost", "variety session host": "varietyHost",
+    "table topics session": "tableTopicsMaster", "table topics master": "tableTopicsMaster",
+    "language evaluator": "langEvaluator", "general evaluator": "generalEvaluator",
+    "evaluator's evaluator": "evalEvaluator1",
+    "meeting no.": "meetingNo", "meeting no": "meetingNo",
+    "meeting theme": "meetingTheme", "theme question": "themeQuestion",
+}
+_SHEET_DATE_LABELS = {_SHEET_DATE_ROW, "date", "meeting date", "日期"}
 _SHEET_IGNORED_ROWS = {"特別單元", "無法參加的成員"}
 _SHEET_INDEXED_ROWS = [
     (re.compile(r"^演講者\s*(\d+)$"),     "speech{}",          True),
+    (re.compile(r"^speaker\s*#?\s*(\d+)$", re.I),              "speech{}",    True),
     (re.compile(r"^個別講評員\s*(\d+)$"), "evaluator{}",       True),
+    (re.compile(r"^individual evaluator\s*#?\s*(\d+)$", re.I), "evaluator{}", True),
     (re.compile(r"^講評員講評\s*(\d+)$"), "evalEvaluator{}",   True),
     (re.compile(r"^標題\s*(\d+)$"),       "speech{}_title",    False),
     (re.compile(r"^單元號\s*(\d+)$"),     "speech{}_pathway",  False),
     (re.compile(r"^單元\s*(\d+)$"),       "speech{}_project",  False),
 ]
-_SHEET_BLANKS = {"na", "n/a", "-", "—", "–", "tbd", "待定", "未定", "?", "？"}
+_SHEET_BLANKS = {"na", "n/a", "-", "--", "—", "–", "tbd", "待定", "未定", "?", "？"}
 # Roles only some agenda templates print (the catalog's `templates`). They're
 # still saved on any club — Word templates and other outputs may use them —
 # but import reports note that this club's agenda won't print them.
@@ -6164,9 +6178,65 @@ def _sheet_clean(v) -> str:
     return re.sub(r"\s+", " ", str(v or "")).strip()
 
 
+def _sheet_clean_text(v) -> str:
+    """_sheet_clean keeping line breaks — a two-line 主題 stays two lines."""
+    lines = (_sheet_clean(x) for x in re.split(r"\r\n?|\n", str(v or "")))
+    return "\n".join(x for x in lines if x)
+
+
+def _sheet_label_key(label: str) -> str:
+    return re.sub(r"\s+", " ", label.lower().replace("-", " ")).strip()
+
+
 def _sheet_iso_date(raw: str) -> str:
     m = re.match(r"^(\d{4})[/.\-](\d{1,2})[/.\-](\d{1,2})$", _sheet_clean(raw))
     return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}" if m else ""
+
+
+def _sheet_row_dates(cells: list, today) -> list:
+    """
+    rowDates in lib/rolesSheet.js: a sheet without years (`07/11 … 06/26`) is
+    one season left to right — the first date takes the year nearest `today`,
+    and each later date that goes backwards rolls into the next year.
+    """
+    from datetime import date as _date
+    out, year, prev = [], None, ""
+    for raw in cells:
+        full = _sheet_iso_date(raw)
+        if full:
+            year, prev = int(full[:4]), full
+            out.append(full)
+            continue
+        m = re.match(r"^(\d{1,2})[/.\-](\d{1,2})$", _sheet_clean(raw))
+        mo, d = (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+        if not (1 <= mo <= 12 and 1 <= d <= 31):
+            out.append("")
+            continue
+        iso = lambda y: f"{y}-{mo:02d}-{d:02d}"
+        if year is None:
+            def dist(y):
+                try:
+                    return abs((_date(y, mo, d) - today).days)
+                except ValueError:      # 2/29 in a non-leap year
+                    return 10 ** 6
+            year = min((today.year - 1, today.year, today.year + 1), key=dist)
+        elif iso(year) < prev:
+            year += 1
+        prev = iso(year)
+        out.append(prev)
+    return out
+
+
+def _sheet_find_date_row(grid: list, today):
+    """findDateRow: the row labelled 會議時間 / Date, else the first mostly-dates row."""
+    for r in grid:
+        if r and _sheet_label_key(_sheet_clean(r[0])) in _SHEET_DATE_LABELS:
+            return r
+    for r in grid:
+        cells = [v for v in r[1:] if _sheet_clean(v)]
+        if cells and sum(1 for d in _sheet_row_dates(cells, today) if d) * 2 > len(cells):
+            return r
+    return None
 
 
 def _sheet_is_person(rid: str) -> bool:
@@ -6174,23 +6244,27 @@ def _sheet_is_person(rid: str) -> bool:
         not re.search(r"_(title|pwcode|pwlevel|project)$", rid)
 
 
-def _parse_roles_sheet(csv_text: str, pathway_codes: set) -> dict:
+def _parse_roles_sheet(csv_text: str, pathway_codes: set, today=None) -> dict:
     """CSV → {iso date: {role id: value}}, as parseRolesSheet does."""
     import csv
     import io
+    from datetime import date as _date
+    today = today or _date.today()
     grid = list(csv.reader(io.StringIO(csv_text.lstrip("﻿"))))
-    date_row = next((r for r in grid if r and _sheet_clean(r[0]) == _SHEET_DATE_ROW), None)
+    date_row = _sheet_find_date_row(grid, today)
     if date_row is None:
         raise HTTPException(status_code=400,
-                            detail=f"試算表找不到「{_SHEET_DATE_ROW}」這一列，請確認分頁與欄位格式")
-    cols = {c: _sheet_iso_date(v) for c, v in enumerate(date_row) if c and _sheet_iso_date(v)}
+                            detail=f"試算表找不到日期列（第一欄寫「{_SHEET_DATE_ROW}」，或一整列都是"
+                                   " 2026/07/03、07/03 這類日期），請確認分頁與欄位格式")
+    cols = {c: d for c, d in enumerate([""] + _sheet_row_dates(date_row[1:], today)) if c and d}
     out = {d: {} for d in cols.values()}
 
     for row in grid:
         label = _sheet_clean(row[0]) if row else ""
-        if not label or label == _SHEET_DATE_ROW or label in _SHEET_IGNORED_ROWS:
+        if not label or row is date_row or label in _SHEET_IGNORED_ROWS:
             continue
-        rid = _SHEET_PERSON_ROWS.get(label) or _SHEET_META_ROWS.get(label)
+        rid = (_SHEET_PERSON_ROWS.get(label) or _SHEET_META_ROWS.get(label)
+               or _SHEET_EN_ROWS.get(_sheet_label_key(label)))
         person = _sheet_is_person(rid) if rid else False
         if not rid:
             for rx, fmt, is_person in _SHEET_INDEXED_ROWS:
@@ -6201,7 +6275,8 @@ def _parse_roles_sheet(csv_text: str, pathway_codes: set) -> dict:
         if not rid:
             continue
         for c, date in cols.items():
-            raw = _sheet_clean(row[c]) if c < len(row) else ""
+            cell = row[c] if c < len(row) else ""
+            raw = _sheet_clean(cell) if person else _sheet_clean_text(cell)
             if not raw or (person and raw.lower() in _SHEET_BLANKS):
                 continue
             if rid.endswith("_pathway"):

@@ -67,7 +67,12 @@ function roleGroups() {
  * not member fields, so they get no autocomplete.
  */
 const META_FIELDS = MEETING_META.filter((m) => m.header)
-  .map((m) => ({ key: m.key, label: m.zh, placeholder: m.placeholder, templates: m.templates }));
+  .map((m) => ({ key: m.key, label: m.zh, placeholder: m.placeholder, templates: m.templates,
+                 // 主題 / 題目 may be two lines (中文 + English); a plain <input> would drop the break.
+                 multiline: m.key !== 'meetingNo' }));
+
+/** One header row per line of the value, so a two-line theme shows both lines. */
+const metaRows = (v) => Math.max(1, String(v || '').split('\n').length);
 
 /** Same shape app/agenda/page.js uses, so a row added here stays valid in the editor. */
 function blankSpeech() {
@@ -519,11 +524,18 @@ function renderMatrix() {
     <th class="rm-meeting" data-mid="${m.id}">
       ${showAddCol ? `<button class="rm-m-del" onclick="window.__rolesDeleteMeeting(${m.id})" title="刪除這場例會">✕</button>` : ''}
       <div class="rm-m-date">${esc(fmtDate(m.meetingDate))}<span class="rm-dot" id="dot_${m.id}"></span></div>
-      ${activeMetaFields().map((f) => `
-        <input type="text" class="rm-m-meta" id="cell_${m.id}_${f.key}"
-               value="${esc(m.draft[f.key] ?? '')}" data-mid="${m.id}" data-rid="${f.key}"
+      ${activeMetaFields().map((f) => {
+        const attrs = `class="rm-m-meta" id="cell_${m.id}_${f.key}" data-mid="${m.id}" data-rid="${f.key}"
                placeholder="${esc(f.placeholder)}" ${readOnly ? 'disabled' : ''}
-               title="${esc(f.label)}（可編輯）" oninput="window.__rolesOnCellInput(this)">`).join('')}
+               title="${esc(f.label)}（可編輯）"`;
+        return f.multiline
+          ? `
+        <textarea ${attrs} wrap="off" rows="${metaRows(m.draft[f.key])}"
+               oninput="this.rows = window.__rolesMetaRows(this.value); window.__rolesOnCellInput(this)">${esc(m.draft[f.key] ?? '')}</textarea>`
+          : `
+        <input type="text" ${attrs}
+               value="${esc(m.draft[f.key] ?? '')}" oninput="window.__rolesOnCellInput(this)">`;
+      }).join('')}
       <div class="rm-m-foot">
         <span class="rm-m-fill" id="fill_${m.id}"></span>
         <a class="rm-m-link" href="${withBase('/index')}?id=${m.id}" title="開啟此場議程">議程 ↗</a>
@@ -1240,6 +1252,7 @@ export default function RolesPage() {
   useEffect(() => {
     // Bridge for oninput="..."/onclick="..." strings inside renderMatrix()'s innerHTML.
     window.__rolesOnCellInput = onCellInput;
+    window.__rolesMetaRows = metaRows;
     window.__rolesOnPathwayInput = onPathwayInput;
     window.__rolesOnPathwayCustom = onPathwayCustom;
     window.__rolesStartAddMeeting = startAddMeeting;
@@ -1290,6 +1303,7 @@ export default function RolesPage() {
 
     return () => {
       delete window.__rolesOnCellInput;
+      delete window.__rolesMetaRows;
       delete window.__rolesOnPathwayInput;
       delete window.__rolesOnPathwayCustom;
       delete window.__rolesStartAddMeeting;
