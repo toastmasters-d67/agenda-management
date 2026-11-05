@@ -128,6 +128,8 @@ table.role-matrix thead th.rm-corner {
   font-family: inherit; font-size: 11px; color: #64748b;
   background: transparent; text-overflow: ellipsis;
 }
+/* 主題 / 題目: a textarea so line breaks survive; sized by rows, one per line. */
+textarea.rm-m-meta { resize: none; overflow: hidden; line-height: 1.4; }
 .rm-m-meta::placeholder { color: #cbd5e1; font-style: italic; }
 .rm-m-meta:hover:not(:disabled) { background: #fff; border-color: #e2e8f0; }
 .rm-m-meta:focus {

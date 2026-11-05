@@ -739,6 +739,12 @@ function buildClubPayload() {
       const v = el ? el.value.trim() : '';
       val = v || null;
     }
+    // A checkbox / color still on its default is left unset rather than
+    // pinned: renders already fall back to the default, and a club that never
+    // touched it then follows the default if it ever changes.
+    if (f.default !== undefined && (f.type === 'color' ? String(val).toLowerCase() === String(f.default).toLowerCase() : val === f.default)) {
+      val = null;
+    }
     if (f.store === 'column') payload[f.key] = val;
     else payload.settings[f.key] = val;
   });

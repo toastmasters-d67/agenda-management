@@ -652,16 +652,28 @@ function addMins(timeStr, delta) {
   return minsToTime(timeToMins(timeStr) + delta);
 }
 
+/** `10:00 ~ 12:30`, `10:00-12:30`, `10:00～12:30` → { start, end }; else null. */
+function parseTimeRange(str) {
+  const m = String(str || '').match(/(\d{1,2}):(\d{2})\s*[~～\-–—至到]\s*(\d{1,2}):(\d{2})/);
+  if (!m) return null;
+  return { start: minsToTime(+m[1] * 60 + +m[2]), end: minsToTime(+m[3] * 60 + +m[4]) };
+}
+
 function calcTimes(spList) {
   const validTime = (s) => /^\d{1,2}:\d{2}$/.test((s || '').trim());
   const getTime = (key, auto) => (validTime(timeOverrides[key]) ? timeOverrides[key].trim() : auto);
   const validDur = (s) => { const n = parseInt(s, 10); return !isNaN(n) && n >= 0; };
   const getDur = (key, auto) => (validDur(durationOverrides[key]) ? parseInt(durationOverrides[key], 10) : auto);
 
-  const receptionStart = getTime('receptionStart', '18:50');
-  const endTime = getTime('endTime', '21:00');
-
+  // The agenda's 時間段 (`19:10 ~ 21:00`) is when the meeting opens and ends;
+  // reception runs the `receptionMins` before it. Without a readable one, the
+  // evening club defaults the system started with.
+  const range = parseTimeRange(val('timeRange'));
   const receptionMins = getDur('receptionMins', 20);
+  const receptionStart = getTime('receptionStart',
+    range ? minsToTime(Math.max(0, timeToMins(range.start) - receptionMins)) : '18:50');
+  const endTime = getTime('endTime', range ? range.end : '21:00');
+
   const openingStart = getTime('openingStart', addMins(receptionStart, receptionMins));
   const openingMins = getDur('openingMins', 10);
   const varietyMins = varietySession.enabled ? varietySession.duration : 0;
@@ -766,6 +778,9 @@ function autoValueFor(key) {
 }
 
 function refreshAutoHints() {
+  const receptionHint = document.getElementById('hint_receptionStart');
+  if (receptionHint) receptionHint.textContent = calcTimes(speeches).receptionStart;
+
   Object.keys(timeOverrides).forEach((key) => {
     const el = document.getElementById(`auto_${key}`);
     if (el) el.textContent = `自動: ${autoValueFor(key)}`;
@@ -2586,7 +2601,7 @@ export default function AgendaIndexPage() {
                 </div>
                 <div className="form-row">
                   <label>會議主題 Meeting Theme</label>
-                  <input type="text" id="meetingTheme" placeholder="-Urban Legend-" />
+                  <textarea rows={2} id="meetingTheme" placeholder="-Urban Legend-"></textarea>
                 </div>
                 <div className="form-row" data-tmpl="standard entrepreneur chillhihigh" style={{ display: 'none' }}>
                   <label>時間段 Time Range</label>
@@ -2838,7 +2853,7 @@ export default function AgendaIndexPage() {
               <summary>角色分配</summary>
               <div className="form-section">
                 <div className="form-row">
-                  <label>Reception Host <span className="time-hint">18:50</span></label>
+                  <label>Reception Host <span className="time-hint" id="hint_receptionStart">18:50</span></label>
                   <input type="text" id="receptionHost" placeholder="Name, Title" className="member-ac" />
                 </div>
                 <div className="form-row" data-tmpl="standard entrepreneur china" style={{ display: 'none' }}>
