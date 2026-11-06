@@ -25,6 +25,7 @@ import {
   levelSelect,
   projectSelect,
   suggestedDuration,
+  projectDurationNote,
 } from '@/lib/pathways';
 import './agenda.css';
 import { withBase } from '@/lib/basePath';
@@ -421,6 +422,7 @@ function renderSpeechForms() {
       <div class="form-row">
         <label>時長 Duration</label>
         <input type="text" class="sp-duration" value="${sp.duration}" oninput="window.__idxUpdateSpeech(${i},'duration',this.value)" placeholder="5'-7'">
+        ${durationHintHtml(sp)}
       </div>
       <div class="form-row">
         <label>演講語言 Language（Chill Hi High 用於個別講評員標示）</label>
@@ -488,9 +490,22 @@ function afterPwChange(i, field) {
   updatePreview();
 }
 
+/**
+ * A project whose 建議時長 is a list (several parts or options) isn't filled
+ * in; the list shows under the 時長 box so the speaker can pick.
+ */
+function durationHintHtml(sp) {
+  const note = projectDurationNote(sp.pathwayProject).trim();
+  if (!note.includes('\n')) return '<div class="sp-dur-hint" hidden></div>';
+  const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return `<div class="sp-dur-hint time-override-hint">建議時長：<br>${esc(note).replace(/\n/g, '<br>')}</div>`;
+}
+
 /** A new project may bring its suggested length (lib/pathways.js suggestedDuration). */
 function applySuggestedDuration(i, prevProject) {
   const sp = speeches[i];
+  const hint = document.querySelector(`#speech-${i} .sp-dur-hint`);
+  if (hint) hint.outerHTML = durationHintHtml(sp);
   const next = suggestedDuration(sp.duration, prevProject, sp.pathwayProject);
   if (next == null) return;
   sp.duration = next;

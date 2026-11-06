@@ -2360,8 +2360,9 @@ class PathwayProjectItem(BaseModel):
     id: Optional[int] = None    # absent = new project
     en: str
     zh: str = ""
-    duration: str = ""          # suggested speech length, e.g. 5'-7' (migration 0025)
-    objectives: str = ""        # 演講目標 — the Word mark {{演講目標}}
+    duration: str = ""          # suggested speech length, e.g. 5'-7', or a bulleted list (0025, 0027)
+    objectives: str = ""        # 演講目標 (中文) — the Word mark {{演講目標}} on 國語 speeches
+    objectivesEn: str = ""      # speech objectives (English) — {{演講目標}} on English speeches
 
 
 class PathwayItem(BaseModel):
@@ -2379,9 +2380,9 @@ class PathwayCatalogRequest(BaseModel):
 
 
 def _load_pathway_catalog(cur) -> dict:
-    cur.execute("SELECT id, name_en, name_zh, duration, objectives FROM pathway_projects"
+    cur.execute("SELECT id, name_en, name_zh, duration, objectives, objectives_en FROM pathway_projects"
                 " ORDER BY sort_order, id")
-    projects = [{"id": r[0], "en": r[1], "zh": r[2], "duration": r[3], "objectives": r[4]}
+    projects = [{"id": r[0], "en": r[1], "zh": r[2], "duration": r[3], "objectives": r[4], "objectivesEn": r[5]}
                 for r in cur.fetchall()]
 
     cur.execute("SELECT code, name_en, name_zh, legacy FROM pathways ORDER BY sort_order, code")
@@ -2438,8 +2439,9 @@ def put_pathways(req: PathwayCatalogRequest, user: dict = Depends(require_system
         if en.lower() in seen:
             raise HTTPException(status_code=400, detail=f"專案名稱重複：{en}")
         seen.add(en.lower())
-        projects.append({"id": p.id, "en": en, "zh": zh, "duration": _clean_name(p.duration),
-                         "objectives": _clean_text_block(p.objectives)})
+        projects.append({"id": p.id, "en": en, "zh": zh, "duration": _clean_text_block(p.duration),
+                         "objectives": _clean_text_block(p.objectives),
+                         "objectives_en": _clean_text_block(p.objectivesEn)})
     known = {p["en"] for p in projects}
 
     def level_lists(raw: Dict[str, List[str]], where: str) -> Dict[int, List[str]]:
@@ -2506,17 +2508,17 @@ def put_pathways(req: PathwayCatalogRequest, user: dict = Depends(require_system
             cur.execute("DELETE FROM pathway_projects WHERE NOT (id = ANY(%s))", (keep or [0],))
             cur.execute("UPDATE pathway_projects SET name_en = '#parked#' || id WHERE id = ANY(%s)", (keep or [0],))
             ids = {p["en"]: p["id"] for p in projects if p["id"] is not None}
-            kept = [(p["id"], p["en"], p["zh"], p["duration"], p["objectives"], order)
+            kept = [(p["id"], p["en"], p["zh"], p["duration"], p["objectives"], p["objectives_en"], order)
                     for order, p in enumerate(projects) if p["id"] is not None]
-            added = [(p["en"], p["zh"], p["duration"], p["objectives"], order)
+            added = [(p["en"], p["zh"], p["duration"], p["objectives"], p["objectives_en"], order)
                      for order, p in enumerate(projects) if p["id"] is None]
             if kept:
                 batch("UPDATE pathway_projects AS p SET name_en = v.en, name_zh = v.zh, duration = v.d,"
-                      " objectives = v.obj, sort_order = v.o, updated_at = NOW()"
-                      " FROM (VALUES %s) AS v(id, en, zh, d, obj, o) WHERE p.id = v.id",
-                      kept, template="(%s::int, %s::text, %s::text, %s::text, %s::text, %s::int)")
+                      " objectives = v.obj, objectives_en = v.obj_en, sort_order = v.o, updated_at = NOW()"
+                      " FROM (VALUES %s) AS v(id, en, zh, d, obj, obj_en, o) WHERE p.id = v.id",
+                      kept, template="(%s::int, %s::text, %s::text, %s::text, %s::text, %s::text, %s::int)")
             if added:
-                rows = batch("INSERT INTO pathway_projects (name_en, name_zh, duration, objectives, sort_order)"
+                rows = batch("INSERT INTO pathway_projects (name_en, name_zh, duration, objectives, objectives_en, sort_order)"
                              " VALUES %s RETURNING id, name_en", added, fetch=True)
                 ids.update({en: pid for pid, en in rows})
 
@@ -6283,7 +6285,9 @@ def _fill_suggested_durations(data: dict, before: list, explicit: set = frozense
         return
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT name_en, name_zh, duration FROM pathway_projects WHERE duration <> ''")
+            # A list (several parts / options) is only a hint in the editor, never filled in.
+            cur.execute("SELECT name_en, name_zh, duration FROM pathway_projects"
+                        " WHERE duration <> '' AND strpos(duration, chr(10)) = 0")
             durs = {}
             for en, zh, d in cur.fetchall():
                 for name in (en, zh):
