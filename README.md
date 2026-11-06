@@ -1176,17 +1176,17 @@ Push 到 GitHub 的 **`master`** 分支，Vercel 自動部署到正式站；其�
 
 ## 正式部署（Azure VM，Docker）
 
-正式站網址：`https://postgen-d67.eastasia.cloudapp.azure.com/club-management`
+正式站網址：`https://postgen-d67.eastasia.cloudapp.azure.com/`（2026-11 起掛在網域根目錄；舊的 `/club-management/...` 由 nginx 以 308 導到根目錄）
 
-`vm-postgen-prod`（Ubuntu 24.04，B1s）與 post-generator 共用，主機上的 nginx 依路徑導流：`/club-management/` 屬於本專案，其餘屬於 post-generator。
+`vm-postgen-prod`（Ubuntu 24.04，B1s）與 post-generator 共用，主機上的 nginx 依路徑導流：`/post-generator/` 屬於 post-generator，其餘屬於本專案。
 
 | 元件 | 位置 |
 |------|------|
-| 前端 Next.js（`basePath=/club-management`） | 容器 `web`，`127.0.0.1:3000` |
+| 前端 Next.js（沒有 basePath） | 容器 `web`，`127.0.0.1:3000` |
 | FastAPI | 容器 `api`，`127.0.0.1:8001` |
 | PostgreSQL 16 | 容器 `db`，不對外開 port，資料在 volume `club-management_pgdata` |
 | compose、`.env`、部署腳本 | `/srv/club-management/`（屬於 `deploy` 帳號） |
-| nginx 設定 | `/etc/nginx/snippets/club-management*.conf`，由 `sites-enabled/postgen` 的 443 區塊 `include` |
+| nginx 設定 | `/etc/nginx/snippets/club-management*.conf` 與 `post-generator.conf`（來源：`deploy/nginx-*.conf`），由 `sites-enabled/postgen` 的 443 區塊 `include` |
 | 備份 | `/mnt/backup-disk/club-management/`（另一顆磁碟），每晚一次＋每次部署前一次，保留 14 天 |
 
 ### CI/CD（`.github/workflows/ci-cd.yml`）
@@ -1204,32 +1204,41 @@ GitHub → Settings → Environments → `production` 需要的 secrets：
 | `VM_SSH_KNOWN_HOSTS` | `ssh-keyscan postgen-d67.eastasia.cloudapp.azure.com` 的輸出 |
 | `PROD_ENV_FILE` | 整份 `.env` 內容，欄位見 `deploy/env.production.example` |
 
-### 子路徑部署要注意的地方
+### 部署網址要注意的地方
 
-- Next.js 只會自動幫 `<Link>`、redirects、rewrites 加上 basePath。手寫的 `<a href>`、`<img src>`、`fetch()`、`location.href` 都要透過 `lib/basePath.js` 的 `withBase()`。
-- `NEXT_PUBLIC_BASE_PATH` 是 **build 時**寫進 bundle 的（Dockerfile.web 的 build-arg）。Vercel 不設，行為不變。
-- 登入 cookie 的 path 是 `/club-management`，避免跟同網域的其他專案互相干擾。
+- 程式仍支援子路徑部署（`NEXT_PUBLIC_BASE_PATH`，build 時寫進 bundle）：手寫的 `<a href>`、`<img src>`、`fetch()`、`location.href` 都要透過 `lib/basePath.js` 的 `withBase()`。正式站與 Vercel 都不設。
+- 登入 cookie 的 path 跟著 basePath（根目錄就是 `/`）。post-generator 的 cookie 叫 `sid`、path 是 `/post-generator`，不會互相干擾。
 - FastAPI 經由 `/svc` 代理收到的 Host 是 `api:8001`，所以 OAuth / MCP 的 issuer 與 resource 以 `PUBLIC_BASE_URL` 為準；Microsoft 登入的回呼網址以 `PUBLIC_ORIGIN` 為準。
-- Microsoft 登入（Entra）、Meta 的 redirect URI 要登記為 `https://postgen-d67.eastasia.cloudapp.azure.com/club-management/svc/auth/microsoft/callback` 與 `.../club-management/club`。
-- **MCP 的 `export_agenda`（議程 PDF／JPG）**用無頭 Chromium 開議程頁截圖。`node_modules` 裡內建的 Chromium 是給 Vercel 的 Amazon Linux 版本，在 Alpine 跑不起來，所以 `Dockerfile.web` 另外 `apk add chromium font-noto-cjk font-noto-emoji`（沒有中文字型，議程上的中文會全部變成方框），並把執行檔連到固定的 `/usr/local/bin/agenda-chromium`、設成 `CHROME_EXECUTABLE_PATH`。route 會開 `http://127.0.0.1:3000/club-management/agenda`（同一個容器、加上 basePath），不需要額外設定網址；產生的檔案上傳到 `.env` 裡設定的 R2。這讓 web 映像大約多 200 MB。
+- Microsoft 登入（Entra）、Meta 的 redirect URI 要登記為 `https://postgen-d67.eastasia.cloudapp.azure.com/svc/auth/microsoft/callback` 與 `.../club`。
+- MCP 端點是 `https://postgen-d67.eastasia.cloudapp.azure.com/api/mcp`。MCP 客戶端不跟隨導向，舊的 `/club-management/api/mcp` 要改設定、重新授權。
+- Azure Blob 的檔案連結存成 `PUBLIC_BASE_URL/api/files/...`；migration 0028 把舊的 `/club-management/api/files/` 連結改成根目錄。
+- **MCP 的 `export_agenda`（議程 PDF／JPG）**用無頭 Chromium 開議程頁截圖。`node_modules` 裡內建的 Chromium 是給 Vercel 的 Amazon Linux 版本，在 Alpine 跑不起來，所以 `Dockerfile.web` 另外 `apk add chromium font-noto-cjk font-noto-emoji`（沒有中文字型，議程上的中文會全部變成方框），並把執行檔連到固定的 `/usr/local/bin/agenda-chromium`、設成 `CHROME_EXECUTABLE_PATH`。route 會開 `http://127.0.0.1:3000/agenda`（同一個容器、加上 basePath），不需要額外設定網址。這讓 web 映像大約多 200 MB。
+
+### 從 `/club-management` 搬到根目錄（2026-11，在 VM 上手動做一次）
+
+同時把 post-generator 搬到 `/post-generator/`（它需要支援子路徑的版本，見 post-generator repo）。順序：
+
+1. **post-generator 先上支援子路徑的版本**，並把 `/srv/post-generator/.env` 的 `PUBLIC_BASE_URL` 改成 `https://postgen-d67.eastasia.cloudapp.azure.com/post-generator`（`CORS_ORIGINS` 維持 `https://postgen-d67.eastasia.cloudapp.azure.com`，不帶路徑）。
+2. **GitHub secret `PROD_ENV_FILE`**：`PUBLIC_BASE_URL` 去掉 `/club-management`。
+3. **nginx**：把 `deploy/nginx-club-management.conf`、`deploy/nginx-post-generator.conf` 複製成 `/etc/nginx/snippets/club-management.conf`、`/etc/nginx/snippets/post-generator.conf`；`/etc/nginx/sites-enabled/postgen` 的 443 區塊裡，**刪掉原本屬於 post-generator 的 `location /` 與 `location = /health`**，加上 `include snippets/post-generator.conf;`（`club-management.conf` 原本就有 include）。`sudo nginx -t` 通過後**先不要 reload**。
+4. **合併同步 PR 到 `main`**，等 CI/CD 部署完成（migration 0028 會改寫檔案連結），馬上 `sudo systemctl reload nginx`。部署完到 reload 之間網站會打不開，挑沒人用的時間做。
+5. **post-generator 重啟**（`cd /srv/post-generator && docker compose up -d`）讓新的 `PUBLIC_BASE_URL` 生效。
+6. **Entra**：Microsoft 登入的 redirect URI 加上 `https://postgen-d67.eastasia.cloudapp.azure.com/svc/auth/microsoft/callback`（舊的觀察一陣子再刪）；Meta 的 redirect URI 同樣更新。
+7. **MCP 客戶端**：本系統改連 `https://postgen-d67.eastasia.cloudapp.azure.com/api/mcp`，post-generator 改連 `.../post-generator/mcp`，都要重新授權。
+8. 驗證：`/` 開本系統登入頁、`/club-management/agenda` 導到 `/agenda`、`/post-generator/` 開 post-generator、議程裡的 Word 範本與圖片能下載。
+
+使用者需要重新登入一次（cookie 的 path 變了）。
 
 ---
 
 ### PostGenerator 退役（在 VM 上手動做）
 
-PostGenerator 的生成引擎已經在本專案裡（見「受控生成」），它原本的服務可以停掉。資料不搬（2026-11 決定重新開始）。這些步驟動到正式環境，**要人手動做**：
+PostGenerator 的生成引擎已經在本專案裡（見「受控生成」），它原本的服務可以停掉。資料不搬（2026-11 決定重新開始）。2026-11 決定先保留，搬到 `/post-generator/`（見上一節）。要退役時，這些步驟動到正式環境，**要人手動做**：
 
 1. **先通知 PostGenerator 的使用者**改用本系統的「社群發文」，並提醒他們 PostGenerator 上的歷史專案不會搬過來。
 2. **最後備份一次**：`docker compose -f /srv/post-generator/docker-compose.yml exec app python -m app.tools.backup`，確認 `/data/backups` 有新檔。
 3. **停服務但先留 volume**：`cd /srv/post-generator && docker compose down`（不要加 `-v`，觀察一段時間再刪）。
-4. **nginx**：`/etc/nginx/sites-enabled/postgen` 的 443 區塊裡，原本屬於 PostGenerator 的 `location /` 改成導到本系統，其餘（`include snippets/club-management*.conf` 與 MCP 的 `/.well-known/...club-management` 那兩條）不動：
-
-   ```nginx
-   location = / { return 302 /club-management; }
-   location /   { return 404; }
-   ```
-
-   `sudo nginx -t && sudo systemctl reload nginx`。PostGenerator 自己的 MCP 連線（`/mcp`）會失效，那是預期的，改連本系統的 `/club-management/api/mcp`。
+4. **nginx**：`/etc/nginx/sites-enabled/postgen` 的 443 區塊拿掉 `include snippets/post-generator.conf;`，`sudo nginx -t && sudo systemctl reload nginx`。PostGenerator 自己的 MCP 連線會失效，那是預期的，改連本系統的 `/api/mcp`。
 5. **GitHub**：`toastmasters-d67/post-generator` 設為 Archived（唯讀），停用它的 Deploy workflow。
 6. 觀察一兩週沒問題後再 `docker volume rm` 掉 PostGenerator 的 volume、刪除 GHCR 上的舊 image。B1s 的記憶體會因此寬鬆一些。
 
