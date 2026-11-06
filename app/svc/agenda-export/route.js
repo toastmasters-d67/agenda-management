@@ -19,7 +19,7 @@ import { sharedBrowser } from '@/lib/agendaBrowser';
 //   - mints a short-lived login token for the caller (the token *is* the
 //     authorisation here: this route can render only what that person's own
 //     browser session could), and
-//   - hands over presigned R2 PUT URLs, so the files go straight to storage
+//   - hands over presigned PUT URLs (R2, or the API's own /api/files/upload on Blob), so the files go straight to storage
 //     without passing back through either function's response size limit.
 //
 // Without `uploads` the files come back inline as data URLs — for local
@@ -100,20 +100,38 @@ async function launchBrowser() {
   });
 }
 
-/** Only our own bucket may be written to — the URLs arrive in the request. */
+// On the Azure VM files live in Blob and the API hands out its own signed
+// upload URLs (PUT /api/files/upload/…, see the storage layer in api/index.py)
+// instead of R2 presigned ones.
+const FILES_UPLOAD_PATH = '/api/files/upload/';
+const publicBase = () => (process.env.PUBLIC_BASE_URL || '').replace(/\/+$/, '');
+
+/** Only our own storage may be written to — the URLs arrive in the request. */
 function uploadAllowed(url) {
   try {
     const u = new URL(url);
     const acct = process.env.R2_ACCOUNT_ID;
-    return u.protocol === 'https:' && !!acct && u.hostname.endsWith(`${acct}.r2.cloudflarestorage.com`);
+    if (u.protocol === 'https:' && acct && u.hostname.endsWith(`${acct}.r2.cloudflarestorage.com`)) return true;
+    const own = publicBase();
+    return !!own && url.startsWith(own + FILES_UPLOAD_PATH);
   } catch {
     return false;
   }
 }
 
+/**
+ * An upload URL on this deployment goes straight to the API container
+ * (FASTAPI_BASE_URL) rather than back out through the public host and nginx.
+ */
+function uploadTarget(url) {
+  const own = publicBase(), api = (process.env.FASTAPI_BASE_URL || '').replace(/\/+$/, '');
+  return own && api && url.startsWith(own + FILES_UPLOAD_PATH)
+    ? api + url.slice(own.length) : url;
+}
+
 async function putDataUrl(url, dataUrl, contentType) {
   const b64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
-  const res = await fetch(url, {
+  const res = await fetch(uploadTarget(url), {
     method: 'PUT',
     headers: { 'Content-Type': contentType },
     body: Buffer.from(b64, 'base64'),
@@ -122,7 +140,7 @@ async function putDataUrl(url, dataUrl, contentType) {
 }
 
 async function putJson(url, value) {
-  const res = await fetch(url, {
+  const res = await fetch(uploadTarget(url), {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(value),

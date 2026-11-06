@@ -32,7 +32,10 @@
   "meta": [
     { "key": "meetingNo", "zh": "場次編號", "templates": null, "header": true, "placeholder": "場次編號", "word": "例會次數" },
     { "key": "meetingTheme", "zh": "例會主題", "templates": null, "header": true, "placeholder": "未設定主題", "word": "例會主題" },
-    { "key": "themeQuestion", "zh": "主題題目", "templates": ["chillhihigh"], "header": true, "placeholder": "主題題目", "word": "主題題目" },
-    { "key": "tableTopicsQuestion", "zh": "即席問答題目", "templates": null, "word": "即席題目" }
+    { "key": "themeQuestion", "zh": "主題題目", "templates": null, "header": true, "placeholder": "主題題目", "word": "主題題目" },
+    { "key": "tableTopicsQuestion", "zh": "即席題目", "templates": null, "word": "即席題目" },
+    { "key": "announcement", "zh": "公告", "templates": null, "word": "公告", "hint": "可多行；網頁版議程不印，Word 範本用 {{公告}}" },
+    { "key": "lastBest", "zh": "上一場最佳", "templates": null, "word": "上一場最佳", "hint": "上一場例會的最佳講者／講評等，可多行；網頁版議程不印，Word 範本用 {{上一場最佳}}" },
+    { "key": "guests", "zh": "來賓", "templates": null, "word": "來賓", "hint": "可多行；網頁版議程不印，Word 範本用 {{來賓}}" }
   ]
 }

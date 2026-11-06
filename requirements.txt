@@ -5,6 +5,9 @@ bcrypt
 pyjwt
 python-dotenv
 boto3
+# Azure VM 部署的檔案儲存（AZURE_STORAGE_ACCOUNT 有設才會用到）
+azure-storage-blob
+azure-identity
 aiofiles
 alembic
 sqlalchemy

@@ -50,6 +50,148 @@ def _r2():
         region_name="auto",
     )
 
+
+# --- file storage: Cloudflare R2 or Azure Blob --------------------------------
+# One code base, two deployments: Vercel (master) keeps R2; the Azure VM (main)
+# sets AZURE_STORAGE_ACCOUNT + AZURE_STORAGE_CONTAINER and stores in Blob,
+# reached with the VM's managed identity (no account key). Blob has no public
+# read, so files are served by GET /api/files/<key> below, and browser / render
+# uploads go to PUT /api/files/upload/<key> with a short-lived signature —
+# the stand-in for R2's presigned PUT URLs, so clients don't change.
+# Everything in this file goes through the _store_* helpers, never _r2() directly.
+AZURE_STORAGE_ACCOUNT   = os.getenv("AZURE_STORAGE_ACCOUNT", "")
+AZURE_STORAGE_CONTAINER = os.getenv("AZURE_STORAGE_CONTAINER", "")
+# Public base of blob files; defaults to this deployment's own /api/files.
+FILES_PUBLIC_URL        = os.getenv("FILES_PUBLIC_URL", "").rstrip("/")
+_FILE_UPLOAD_MAX = 50 * 1024 * 1024     # matches nginx client_max_body_size
+_blob_cc = None
+
+
+class StoreMissing(Exception):
+    """The key isn't in storage."""
+
+
+def _blob_mode() -> bool:
+    return bool(AZURE_STORAGE_ACCOUNT and AZURE_STORAGE_CONTAINER)
+
+
+def _files_base() -> str:
+    """Public URL prefix of stored files ('' when storage isn't configured)."""
+    if not _blob_mode():
+        return R2_PUBLIC_URL
+    if FILES_PUBLIC_URL:
+        return FILES_PUBLIC_URL
+    base = (os.getenv("PUBLIC_BASE_URL") or "").rstrip("/")
+    return f"{base}/api/files" if base else ""
+
+
+def _store_url(key: str) -> str:
+    return f"{_files_base()}/{key}"
+
+
+def _store_key(url) -> Optional[str]:
+    """
+    The storage key behind one of our file URLs, else None. On Blob, links
+    still pointing at R2 (R2_PUBLIC_URL) resolve too: the move copied every
+    object under the same key.
+    """
+    if not isinstance(url, str):
+        return None
+    for base in dict.fromkeys(b for b in (_files_base(), R2_PUBLIC_URL if _blob_mode() else "") if b):
+        if url.startswith(base + "/"):
+            key = url[len(base) + 1:].split("?", 1)[0]
+            return key or None
+    return None
+
+
+def _blob():
+    global _blob_cc
+    if _blob_cc is None:
+        from azure.identity import DefaultAzureCredential
+        from azure.storage.blob import BlobServiceClient
+        # On the VM: its managed identity (AZURE_CLIENT_ID picks a user-assigned
+        # one). Locally: `az login`.
+        cred = DefaultAzureCredential(exclude_interactive_browser_credential=True)
+        svc = BlobServiceClient(f"https://{AZURE_STORAGE_ACCOUNT}.blob.core.windows.net", credential=cred)
+        _blob_cc = svc.get_container_client(AZURE_STORAGE_CONTAINER)
+    return _blob_cc
+
+
+def _store_put(key: str, body: bytes, content_type: str):
+    if _blob_mode():
+        from azure.storage.blob import ContentSettings
+        _blob().upload_blob(key, body, overwrite=True,
+                            content_settings=ContentSettings(content_type=content_type))
+    else:
+        _r2().put_object(Bucket=R2_BUCKET_NAME, Key=key, Body=body, ContentType=content_type)
+
+
+def _store_get(key: str, limit: Optional[int] = None) -> tuple:
+    """(bytes, content type); raises StoreMissing when the key isn't there."""
+    if _blob_mode():
+        from azure.core.exceptions import ResourceNotFoundError
+        try:
+            dl = _blob().download_blob(key, offset=0, length=limit) if limit else _blob().download_blob(key)
+            return dl.readall(), (dl.properties.content_settings.content_type or "")
+        except ResourceNotFoundError:
+            raise StoreMissing(key)
+    client = _r2()
+    try:
+        obj = client.get_object(Bucket=R2_BUCKET_NAME, Key=key)
+    except client.exceptions.NoSuchKey:
+        raise StoreMissing(key)
+    body = obj["Body"]
+    return (body.read(limit) if limit else body.read()), obj.get("ContentType", "")
+
+
+def _store_delete(key: str):
+    if _blob_mode():
+        from azure.core.exceptions import ResourceNotFoundError
+        try:
+            _blob().delete_blob(key)
+        except ResourceNotFoundError:
+            pass
+    else:
+        _r2().delete_object(Bucket=R2_BUCKET_NAME, Key=key)
+
+
+def _store_list(prefix: str) -> list:
+    """Keys under `prefix`."""
+    if _blob_mode():
+        return [b.name for b in _blob().list_blobs(name_starts_with=prefix)]
+    listed = _r2().list_objects_v2(Bucket=R2_BUCKET_NAME, Prefix=prefix).get("Contents") or []
+    return [o["Key"] for o in listed]
+
+
+def _upload_sig(key: str, content_type: str, exp: int) -> str:
+    import hashlib
+    msg = f"file-upload|{key}|{content_type}|{exp}".encode()
+    return hmac.new(JWT_SECRET.encode(), msg, hashlib.sha256).hexdigest()
+
+
+def _store_presign_put(key: str, content_type: str, expires: int) -> str:
+    """A URL a client can PUT this one file to, for `expires` seconds."""
+    if not _blob_mode():
+        return _r2().generate_presigned_url(
+            "put_object", Params={"Bucket": R2_BUCKET_NAME, "Key": key, "ContentType": content_type},
+            ExpiresIn=expires)
+    from urllib.parse import quote, urlencode
+    base = (os.getenv("PUBLIC_BASE_URL") or "").rstrip("/")
+    if not base:
+        raise HTTPException(status_code=503, detail="PUBLIC_BASE_URL 未設定，無法上傳檔案")
+    exp = int(time.time()) + expires
+    q = urlencode({"ct": content_type, "exp": exp, "sig": _upload_sig(key, content_type, exp)})
+    return f"{base}/api/files/upload/{quote(key)}?{q}"
+
+
+# Keys this app writes all start with media/; older R2 keys may hold any text.
+_FILE_KEY_RE = re.compile(r"^media/[^\x00-\x1f\\]+$")
+
+
+def _check_file_key(key: str):
+    if not _FILE_KEY_RE.match(key or "") or ".." in key or "//" in key:
+        raise HTTPException(status_code=404, detail="找不到檔案")
+
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
@@ -1111,11 +1253,11 @@ WORD_TEMPLATE_KEYS = ("word_template_url", "word_template_url_en")
 def _delete_club_file(club_id: int, url: Optional[str]):
     """Delete one of this club's R2 files. Anything else — another club's, or
     not in our bucket — is left alone. Best effort: the setting is already gone."""
-    prefix = f"{R2_PUBLIC_URL}/media/clubs/{club_id}/"
-    if not url or not R2_PUBLIC_URL or not url.startswith(prefix):
+    key = _store_key(url)
+    if not key or not key.startswith(f"media/clubs/{club_id}/"):
         return
     try:
-        _r2().delete_object(Bucket=R2_BUCKET_NAME, Key=url[len(R2_PUBLIC_URL) + 1:])
+        _store_delete(key)
     except Exception:
         pass
 
@@ -1963,19 +2105,13 @@ def presign_upload(req: PresignRequest, user: dict = Depends(require_club_admin_
         _social_scope(user, req.club_id)
     base = f"media/clubs/{req.club_id}" if req.club_id else "media"
     if req.meeting_date and req.meeting_no:
-        key = f"{base}/{req.meeting_date}_No{req.meeting_no}_{ts}.{ext}"
+        key = f"{base}/{req.meeting_date}_No{req.meeting_no}_{ts}_{uuid.uuid4().hex[:8]}.{ext}"
     elif req.meeting_date:
-        key = f"{base}/{req.meeting_date}_{ts}.{ext}"
+        key = f"{base}/{req.meeting_date}_{ts}_{uuid.uuid4().hex[:8]}.{ext}"
     else:
         key = f"{base}/{ts}_{uuid.uuid4()}.{ext}"
-    client = _r2()
-    upload_url = client.generate_presigned_url(
-        "put_object",
-        Params={"Bucket": R2_BUCKET_NAME, "Key": key, "ContentType": req.content_type},
-        ExpiresIn=300,
-    )
-    public_url = f"{R2_PUBLIC_URL}/{key}"
-    return {"uploadUrl": upload_url, "publicUrl": public_url}
+    upload_url = _store_presign_put(key, req.content_type, 300)
+    return {"uploadUrl": upload_url, "publicUrl": _store_url(key)}
 
 
 # ------------------------------------------------------------------ word render
@@ -2082,18 +2218,62 @@ def image_proxy(
     url: str = Query(...),
     user: dict = Depends(get_current_user),
 ):
-    prefix = R2_PUBLIC_URL + "/"
-    if not R2_PUBLIC_URL or not url.startswith(prefix):
+    key = _store_key(url)
+    if not key:
         raise HTTPException(status_code=400, detail="Invalid image URL")
-    key = url[len(prefix):]
-    client = _r2()
     try:
-        obj = client.get_object(Bucket=R2_BUCKET_NAME, Key=key)
+        data, content_type = _store_get(key)
     except Exception:
         raise HTTPException(status_code=404, detail="Image not found")
-    data = obj["Body"].read()
-    content_type = obj.get("ContentType", "image/jpeg")
-    return Response(content=data, media_type=content_type, headers={"Cache-Control": "max-age=3600"})
+    return Response(content=data, media_type=content_type or "image/jpeg",
+                    headers={"Cache-Control": "max-age=3600"})
+
+
+# Blob deployments only (see the storage layer at the top). Like R2's public
+# bucket, a file is readable by anyone holding its link — keys carry random
+# parts — and needs no login, so links handed to Claude via MCP still work.
+@app.get("/api/files/{key:path}")
+def get_file(key: str):
+    if not _blob_mode():
+        raise HTTPException(status_code=404, detail="找不到檔案")
+    _check_file_key(key)
+    from azure.core.exceptions import ResourceNotFoundError
+    from fastapi.responses import StreamingResponse
+    try:
+        dl = _blob().download_blob(key)
+    except ResourceNotFoundError:
+        raise HTTPException(status_code=404, detail="找不到檔案")
+    props = dl.properties
+    # Every key is written once — except an export's status.json, which the
+    # render overwrites when it finishes.
+    cache = "no-store" if key.endswith("/" + _EXPORT_STATUS_NAME) \
+        else "public, max-age=31536000, immutable"
+    headers = {"Cache-Control": cache, "X-Content-Type-Options": "nosniff"}
+    if props.size is not None:
+        headers["Content-Length"] = str(props.size)
+    return StreamingResponse(dl.chunks(), headers=headers,
+                             media_type=props.content_settings.content_type or "application/octet-stream")
+
+
+@app.put("/api/files/upload/{key:path}")
+async def put_file(key: str, request: Request, ct: str = Query(...), exp: int = Query(...),
+                   sig: str = Query(...)):
+    """The blob stand-in for an R2 presigned PUT (_store_presign_put)."""
+    if not _blob_mode():
+        raise HTTPException(status_code=404, detail="找不到檔案")
+    _check_file_key(key)
+    if not hmac.compare_digest(sig, _upload_sig(key, ct, exp)):
+        raise HTTPException(status_code=403, detail="上傳連結無效")
+    if exp < time.time():
+        raise HTTPException(status_code=403, detail="上傳連結已過期，請重新上傳")
+    sent = (request.headers.get("content-type") or "").split(";", 1)[0].strip()
+    if sent != ct.split(";", 1)[0].strip():
+        raise HTTPException(status_code=400, detail="檔案類型與上傳連結不符")
+    body = await request.body()
+    if len(body) > _FILE_UPLOAD_MAX:
+        raise HTTPException(status_code=413, detail="檔案太大")
+    await run_in_threadpool(_store_put, key, body, ct)
+    return Response(status_code=200)
 
 
 # ------------------------------------------------------------------ roles sheet
@@ -2180,6 +2360,8 @@ class PathwayProjectItem(BaseModel):
     id: Optional[int] = None    # absent = new project
     en: str
     zh: str = ""
+    duration: str = ""          # suggested speech length, e.g. 5'-7' (migration 0025)
+    objectives: str = ""        # 演講目標 — the Word mark {{演講目標}}
 
 
 class PathwayItem(BaseModel):
@@ -2197,8 +2379,10 @@ class PathwayCatalogRequest(BaseModel):
 
 
 def _load_pathway_catalog(cur) -> dict:
-    cur.execute("SELECT id, name_en, name_zh FROM pathway_projects ORDER BY sort_order, id")
-    projects = [{"id": r[0], "en": r[1], "zh": r[2]} for r in cur.fetchall()]
+    cur.execute("SELECT id, name_en, name_zh, duration, objectives FROM pathway_projects"
+                " ORDER BY sort_order, id")
+    projects = [{"id": r[0], "en": r[1], "zh": r[2], "duration": r[3], "objectives": r[4]}
+                for r in cur.fetchall()]
 
     cur.execute("SELECT code, name_en, name_zh, legacy FROM pathways ORDER BY sort_order, code")
     paths = [{"code": r[0], "en": r[1], "zh": r[2], "legacy": r[3], "required": {}}
@@ -2229,6 +2413,12 @@ def _clean_name(s: str) -> str:
     return re.sub(r"\s+", " ", s or "").strip()
 
 
+def _clean_text_block(s: str) -> str:
+    """Multi-line text (演講目標): trims each line, keeps the line breaks."""
+    lines = (re.sub(r"[ \t]+", " ", x).strip() for x in re.split(r"\r\n?|\n", s or ""))
+    return "\n".join(x for x in lines if x)
+
+
 @app.get("/api/pathways")
 def get_pathways(user: dict = Depends(get_current_user)):
     with get_db() as conn:
@@ -2248,7 +2438,8 @@ def put_pathways(req: PathwayCatalogRequest, user: dict = Depends(require_system
         if en.lower() in seen:
             raise HTTPException(status_code=400, detail=f"專案名稱重複：{en}")
         seen.add(en.lower())
-        projects.append({"id": p.id, "en": en, "zh": zh})
+        projects.append({"id": p.id, "en": en, "zh": zh, "duration": _clean_name(p.duration),
+                         "objectives": _clean_text_block(p.objectives)})
     known = {p["en"] for p in projects}
 
     def level_lists(raw: Dict[str, List[str]], where: str) -> Dict[int, List[str]]:
@@ -2315,15 +2506,18 @@ def put_pathways(req: PathwayCatalogRequest, user: dict = Depends(require_system
             cur.execute("DELETE FROM pathway_projects WHERE NOT (id = ANY(%s))", (keep or [0],))
             cur.execute("UPDATE pathway_projects SET name_en = '#parked#' || id WHERE id = ANY(%s)", (keep or [0],))
             ids = {p["en"]: p["id"] for p in projects if p["id"] is not None}
-            kept = [(p["id"], p["en"], p["zh"], order) for order, p in enumerate(projects) if p["id"] is not None]
-            added = [(p["en"], p["zh"], order) for order, p in enumerate(projects) if p["id"] is None]
+            kept = [(p["id"], p["en"], p["zh"], p["duration"], p["objectives"], order)
+                    for order, p in enumerate(projects) if p["id"] is not None]
+            added = [(p["en"], p["zh"], p["duration"], p["objectives"], order)
+                     for order, p in enumerate(projects) if p["id"] is None]
             if kept:
-                batch("UPDATE pathway_projects AS p SET name_en = v.en, name_zh = v.zh, sort_order = v.o, updated_at = NOW()"
-                      " FROM (VALUES %s) AS v(id, en, zh, o) WHERE p.id = v.id",
-                      kept, template="(%s::int, %s::text, %s::text, %s::int)")
+                batch("UPDATE pathway_projects AS p SET name_en = v.en, name_zh = v.zh, duration = v.d,"
+                      " objectives = v.obj, sort_order = v.o, updated_at = NOW()"
+                      " FROM (VALUES %s) AS v(id, en, zh, d, obj, o) WHERE p.id = v.id",
+                      kept, template="(%s::int, %s::text, %s::text, %s::text, %s::text, %s::int)")
             if added:
-                rows = batch("INSERT INTO pathway_projects (name_en, name_zh, sort_order) VALUES %s RETURNING id, name_en",
-                             added, fetch=True)
+                rows = batch("INSERT INTO pathway_projects (name_en, name_zh, duration, objectives, sort_order)"
+                             " VALUES %s RETURNING id, name_en", added, fetch=True)
                 ids.update({en: pid for pid, en in rows})
 
             # ---- paths and their level lists: replaced wholesale
@@ -3278,13 +3472,13 @@ class PosterRequest(BaseModel):
 def _download_r2(url: str, suffix: str) -> str:
     """R2 上的檔案 → 本機暫存路徑。只收本系統 R2 的網址。"""
     import tempfile
-    prefix = R2_PUBLIC_URL + "/"
-    if not R2_PUBLIC_URL or not url.startswith(prefix):
+    key = _store_key(url)
+    if not key:
         raise HTTPException(status_code=400, detail="檔案不在本系統的儲存空間")
-    obj = _r2().get_object(Bucket=R2_BUCKET_NAME, Key=url[len(prefix):])
+    raw, _ = _store_get(key, limit=30 * 1024 * 1024)
     fd, path = tempfile.mkstemp(suffix=suffix)
     with os.fdopen(fd, "wb") as fh:
-        fh.write(obj["Body"].read(30 * 1024 * 1024))
+        fh.write(raw)
     return path
 
 
@@ -3300,9 +3494,9 @@ _PHOTO_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".gif")
 
 def _is_club_photo(club_id: int, url: str) -> bool:
     """這個分會上傳到本系統 R2 的圖片。海報照片只收這種——別處的網址不下載。"""
-    prefix = f"{R2_PUBLIC_URL}/media/clubs/{club_id}/"
-    return (bool(R2_PUBLIC_URL) and isinstance(url, str) and url.startswith(prefix)
-            and ".." not in url and url.split("?", 1)[0].lower().endswith(_PHOTO_EXTS))
+    key = _store_key(url)
+    return (bool(key) and key.startswith(f"media/clubs/{club_id}/")
+            and ".." not in url and key.lower().endswith(_PHOTO_EXTS))
 
 
 def _poster_photo_picks(club_id: int, photos: dict, role_photos: dict) -> tuple[dict, dict]:
@@ -3385,10 +3579,9 @@ def _build_poster(post: dict, club_id: int, req: PosterRequest) -> dict:
             except OSError:
                 pass
     key = f"media/clubs/{club_id}/social/poster_{post['id']}_{uuid.uuid4().hex[:8]}.pptx"
-    _r2().put_object(Bucket=R2_BUCKET_NAME, Key=key, Body=data,
-                     ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation")
+    _store_put(key, data, "application/vnd.openxmlformats-officedocument.presentationml.presentation")
     _save_poster_photos(post["id"], photos, role_photos)
-    return {"url": f"{R2_PUBLIC_URL}/{key}", "template": tpl["id"], "templateName": tpl["name"],
+    return {"url": _store_url(key), "template": tpl["id"], "templateName": tpl["name"],
             "photos": photos, "rolePhotos": role_photos}
 
 
@@ -3597,7 +3790,7 @@ def create_post_template(req: PostTemplateRequest,
     cid = _prefs_scope(user, req.club_id) if req.club_id is not None else _prefs_scope(user, user["club_id"])
     # Only a file uploaded under this club (POST /upload/presign files it
     # there) — not some other club's file that happens to be in the bucket.
-    if not R2_PUBLIC_URL or not req.file_url.startswith(f"{R2_PUBLIC_URL}/media/clubs/{cid}/"):
+    if not (_store_key(req.file_url) or "").startswith(f"media/clubs/{cid}/"):
         raise HTTPException(status_code=400, detail="模板檔案必須是上傳到本分會的檔案")
     path = _download_r2(req.file_url, ".pptx")
     try:
@@ -3630,9 +3823,7 @@ def download_post_template(template_id: str, club_id: Optional[int] = Query(defa
         with get_db() as conn:
             with conn.cursor() as cur:
                 row = _load_template(cur, template_id, user)
-        prefix = R2_PUBLIC_URL + "/"
-        obj = _r2().get_object(Bucket=R2_BUCKET_NAME, Key=row[5][len(prefix):])
-        data = obj["Body"].read()
+        data, _ = _store_get(_store_key(row[5]) or "")
     return Response(content=data, media_type=(
         "application/vnd.openxmlformats-officedocument.presentationml.presentation"))
 
@@ -3950,13 +4141,13 @@ def _generate_image(username: str, club_id: Optional[int], params: dict) -> dict
     base = f"media/clubs/{club_id}/social" if club_id else "media/social"
     key = f"{base}/{uuid.uuid4()}.png"
     try:
-        _r2().put_object(Bucket=R2_BUCKET_NAME, Key=key, Body=raw, ContentType="image/png")
+        _store_put(key, raw, "image/png")
     except HTTPException:
         raise
     except Exception:
         raise HTTPException(status_code=502, detail="圖片產生成功，但上傳雲端失敗")
 
-    return {"url": f"{R2_PUBLIC_URL}/{key}", "name": "AI 生成圖片", "type": "image"}
+    return {"url": _store_url(key), "name": "AI 生成圖片", "type": "image"}
 
 
 _JOB_RUNNERS = {"image": _generate_image}
@@ -6017,6 +6208,8 @@ _TEMPLATE_NAMES = {"standard": "標準版", "entrepreneur": "企業家", "chillh
 
 def _catalog_desc(entry: dict) -> str:
     tmpls = entry.get("templates")
+    if entry.get("hint"):
+        return f"{entry['zh']}（{entry['hint']}）"
     if not tmpls:
         return entry["zh"]
     return f"{entry['zh']}（{'、'.join(_TEMPLATE_NAMES.get(t, t) for t in tmpls)} 版型的議程會印出）"
@@ -6051,6 +6244,64 @@ def _merge_slots(current, given, blank):
         if v is not None:
             out[i] = v
     return out
+
+
+_DEFAULT_SPEECH_DURATION = "5'-7'"
+
+
+def _suggested_duration(current: str, prev_suggested: str, suggested: str):
+    """
+    suggestedDuration in lib/pathways.js: the length to switch to when a
+    speech's project changes, or None to leave it. Only a length nobody chose
+    is replaced — blank, the 5'-7' default, or the previous project's
+    suggestion; a project without one puts such a length back to the default.
+    """
+    cur = (current or "").strip()
+    if cur and cur != _DEFAULT_SPEECH_DURATION and not (prev_suggested and cur == prev_suggested):
+        return None
+    nxt = suggested or _DEFAULT_SPEECH_DURATION
+    return None if nxt == cur else nxt
+
+
+def _speech_projects(data: dict) -> list:
+    """Each speech's pathwayProject — taken before an edit, for _fill_suggested_durations."""
+    return [(sp or {}).get("pathwayProject") or "" if isinstance(sp, dict) else ""
+            for sp in (data.get("speeches") or [])]
+
+
+def _fill_suggested_durations(data: dict, before: list, explicit: set = frozenset()):
+    """
+    Speeches whose project changed since `before` take the new project's
+    suggested length (pathway_projects.duration), as the agenda editor does.
+    `explicit` holds speech indexes whose duration the same call set itself.
+    """
+    sps = data.get("speeches") or []
+    changed = [i for i, sp in enumerate(sps)
+               if isinstance(sp, dict) and i not in explicit
+               and (sp.get("pathwayProject") or "") != (before[i] if i < len(before) else "")]
+    if not changed:
+        return
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT name_en, name_zh, duration FROM pathway_projects WHERE duration <> ''")
+            durs = {}
+            for en, zh, d in cur.fetchall():
+                for name in (en, zh):
+                    if name:
+                        durs[_clean_name(name).lower()] = d
+    look = lambda name: durs.get(_clean_name(name).lower(), "")
+    for i in changed:
+        sp = sps[i]
+        prev = before[i] if i < len(before) else ""
+        nxt = _suggested_duration(sp.get("duration"), look(prev), look(sp.get("pathwayProject")))
+        if nxt is not None:
+            sp["duration"] = nxt
+
+
+def _explicit_durations(fields: dict) -> set:
+    """Speech indexes an update_agenda / create_agenda call gave a duration for."""
+    sps = fields.get("speeches") if isinstance(fields.get("speeches"), list) else []
+    return {i for i, sp in enumerate(sps) if isinstance(sp, dict) and sp.get("duration") is not None}
 
 
 def _apply_agenda_fields(data: dict, fields: dict) -> list:
@@ -6136,7 +6387,10 @@ _SHEET_PERSON_ROWS = {
     "總講評員": "generalEvaluator", "語言/幽默講評員": "langEvaluator",
     "講評員講評": "evalEvaluator1",
 }
-_SHEET_META_ROWS = {"會議編號": "meetingNo", "會議主題": "meetingTheme", "主題題目": "themeQuestion"}
+_SHEET_META_ROWS = {"會議編號": "meetingNo", "會議主題": "meetingTheme", "主題題目": "themeQuestion",
+                    "即席題目": "tableTopicsQuestion", "即席問答題目": "tableTopicsQuestion",
+                    "公告": "announcement", "公告欄": "announcement",
+                    "上一場最佳": "lastBest", "來賓": "guests"}
 # English labels (生橋's sheet), keyed by _sheet_label_key.
 _SHEET_EN_ROWS = {
     "toastmaster of the day": "tme", "toastmasters of the day": "tme", "tme": "tme",
@@ -6147,6 +6401,10 @@ _SHEET_EN_ROWS = {
     "evaluator's evaluator": "evalEvaluator1",
     "meeting no.": "meetingNo", "meeting no": "meetingNo",
     "meeting theme": "meetingTheme", "theme question": "themeQuestion",
+    "table topics question": "tableTopicsQuestion",
+    "announcement": "announcement", "announcements": "announcement",
+    "the best on": "lastBest", "best of last meeting": "lastBest",
+    "guests": "guests", "the guests on": "guests",
 }
 _SHEET_DATE_LABELS = {_SHEET_DATE_ROW, "date", "meeting date", "日期"}
 _SHEET_IGNORED_ROWS = {"特別單元", "無法參加的成員"}
@@ -6244,8 +6502,14 @@ def _sheet_is_person(rid: str) -> bool:
         not re.search(r"_(title|pwcode|pwlevel|project)$", rid)
 
 
-def _parse_roles_sheet(csv_text: str, pathway_codes: set, today=None) -> dict:
-    """CSV → {iso date: {role id: value}}, as parseRolesSheet does."""
+def _parse_roles_sheet(csv_text: str, pathway_codes: set, today=None,
+                       customs: list = None, unknown: list = None) -> dict:
+    """
+    CSV → {iso date: {role id: value}}, as parseRolesSheet does. `customs`
+    ([{id, zh, en}], _club_custom_role_list) lets rows named after the club's
+    own roles land on `custom_<id>`; labels nothing matched are appended to
+    `unknown` (when given) if their row holds data.
+    """
     import csv
     import io
     from datetime import date as _date
@@ -6258,13 +6522,21 @@ def _parse_roles_sheet(csv_text: str, pathway_codes: set, today=None) -> dict:
                                    " 2026/07/03、07/03 這類日期），請確認分頁與欄位格式")
     cols = {c: d for c, d in enumerate([""] + _sheet_row_dates(date_row[1:], today)) if c and d}
     out = {d: {} for d in cols.values()}
+    # After the built-in rows, so a club role can't shadow a built-in one.
+    custom_by_label = {}
+    for r in customs or []:
+        for name in (r.get("zh"), r.get("en")):
+            k = _sheet_label_key(_sheet_clean(name)) if name else ""
+            if k:
+                custom_by_label.setdefault(k, f"custom_{r['id']}")
 
     for row in grid:
         label = _sheet_clean(row[0]) if row else ""
         if not label or row is date_row or label in _SHEET_IGNORED_ROWS:
             continue
         rid = (_SHEET_PERSON_ROWS.get(label) or _SHEET_META_ROWS.get(label)
-               or _SHEET_EN_ROWS.get(_sheet_label_key(label)))
+               or _SHEET_EN_ROWS.get(_sheet_label_key(label))
+               or custom_by_label.get(_sheet_label_key(label)))
         person = _sheet_is_person(rid) if rid else False
         if not rid:
             for rx, fmt, is_person in _SHEET_INDEXED_ROWS:
@@ -6273,6 +6545,8 @@ def _parse_roles_sheet(csv_text: str, pathway_codes: set, today=None) -> dict:
                     rid, person = fmt.format(m.group(1)), is_person
                     break
         if not rid:
+            if unknown is not None and any(_sheet_clean(v) for v in row[1:]):
+                unknown.append(label)
             continue
         for c, date in cols.items():
             cell = row[c] if c < len(row) else ""
@@ -6379,11 +6653,21 @@ def _club_role_context(club_id: int) -> dict:
             cur.execute("SELECT template_key, settings FROM clubs WHERE id=%s", (club_id,))
             row = cur.fetchone() or (None, None)
             tmpl = row[0] or "standard"
-            customs = _club_custom_roles(parse_jsonb(row[1]) if row[1] else {})
+            settings = parse_jsonb(row[1]) if row[1] else {}
+            customs = _club_custom_roles(settings)
+            custom_list = _club_custom_role_list(settings)
             cur.execute("SELECT u.name_en, u.name_zh, u.level FROM club_memberships m"
                         " JOIN users u ON u.username = m.username WHERE m.club_id=%s", (club_id,))
             roster = cur.fetchall()
-    return {"codes": codes, "template": tmpl, "roster": roster, "customs": customs}
+    return {"codes": codes, "template": tmpl, "roster": roster, "customs": customs,
+            "custom_list": custom_list}
+
+
+def _club_custom_role_list(settings: dict) -> list:
+    """clubCustomRoles in lib/meetingRoles.js: [{id, zh, en}], blank names dropped."""
+    return [{"id": str(r["id"]), "zh": str(r["zh"]).strip(), "en": str(r.get("en") or "").strip()}
+            for r in (settings or {}).get("custom_roles") or []
+            if isinstance(r, dict) and r.get("id") and str(r.get("zh") or "").strip()]
 
 
 def _club_custom_roles(settings: dict) -> dict:
@@ -6443,7 +6727,16 @@ def _role_report(r: dict, what: str, overwrite_hint: str) -> list:
 def _sheet_values(caller: dict, club_id: int, ctx: dict) -> dict:
     """The club's role sheet as {iso date: {role id: value}}."""
     csv_text = fetch_roles_sheet(club_id, caller)["csv"]    # raises with the reason
-    return _parse_roles_sheet(csv_text, ctx["codes"])
+    ctx["unknown"] = []
+    return _parse_roles_sheet(csv_text, ctx["codes"], customs=ctx.get("custom_list"),
+                              unknown=ctx["unknown"])
+
+
+def _unknown_rows_line(ctx: dict) -> list:
+    """The sheet rows nothing matched, for import reports."""
+    rows = list(dict.fromkeys(ctx.get("unknown") or []))
+    return ["試算表裡這些列沒有對應的角色，沒有匯入（如果是分會自訂角色，請確認名稱跟分會設定一致）："
+            + "、".join(rows)] if rows else []
 
 
 def _import_sheet_roles(caller: dict, club_id: int, data: dict, overwrite: bool) -> list:
@@ -6456,7 +6749,7 @@ def _import_sheet_roles(caller: dict, club_id: int, data: dict, overwrite: bool)
     if values is None:
         return [f"角色試算表裡沒有 {date} 這一欄，角色沒有匯入"]
     return _role_report(_apply_role_values(data, values, ctx, overwrite),
-                        "從角色試算表匯入", "overwrite_roles")
+                        "從角色試算表匯入", "overwrite_roles") + _unknown_rows_line(ctx)
 
 
 def _agenda_for(cur, agenda_id: int, caller: dict):
@@ -6522,10 +6815,12 @@ def _tool_create_agenda(caller, args):
     }
     if prev.get("lang"):
         data["lang"] = prev["lang"]
+    before = _speech_projects(data)
     _apply_agenda_fields(data, fields)
     _trim_slots(data, args)
     notes = _import_sheet_roles(caller, cid, data, overwrite=bool(args.get("overwrite_roles"))) \
         if args.get("import_roles") else []
+    _fill_suggested_durations(data, before, _explicit_durations(fields))
 
     with get_db() as conn:
         with conn.cursor() as cur:
@@ -6544,9 +6839,11 @@ def _tool_update_agenda(caller, args):
     with get_db() as conn:
         with conn.cursor() as cur:
             data, cid = _agenda_for(cur, aid, caller)
+    before = _speech_projects(data)
     touched = _apply_agenda_fields(data, args.get("fields") or {}) + _trim_slots(data, args)
     notes = _import_sheet_roles(caller, cid, data, overwrite=bool(args.get("overwrite_roles"))) \
         if args.get("import_roles") else []
+    _fill_suggested_durations(data, before, _explicit_durations(args.get("fields") or {}))
     if not touched and not args.get("import_roles"):
         return _tool_text("沒有要修改的欄位", is_error=True)
 
@@ -6603,12 +6900,9 @@ def _tool_export_agenda(caller, args):
     stem = f"Agenda_{data.get('meetingDate') or 'agenda'}_No{data.get('meetingNo') or ''}"
     folder = uuid.uuid4().hex[:12]
     base = f"media/clubs/{cid}/agendas/{folder}/{stem}"
-    client = _r2()
 
     def presign(key, ctype):
-        return client.generate_presigned_url(
-            "put_object", Params={"Bucket": R2_BUCKET_NAME, "Key": key, "ContentType": ctype},
-            ExpiresIn=int(_EXPORT_STALE.total_seconds()))
+        return _store_presign_put(key, ctype, int(_EXPORT_STALE.total_seconds()))
 
     keys = {"pdf": f"{base}.pdf", "docx": f"{base}.docx",
             "jpg": [f"{base}_p{i + 1}.jpg" for i in range(_EXPORT_MAX_PAGES)]}
@@ -6668,11 +6962,9 @@ def _export_job(caller, job: str):
 def _tool_get_agenda_export(caller, args):
     cid, folder, started = _export_job(caller, args.get("job"))
     prefix = f"media/clubs/{cid}/agendas/{folder}/"
-    client = _r2()
     try:
-        obj = client.get_object(Bucket=R2_BUCKET_NAME, Key=prefix + _EXPORT_STATUS_NAME)
-        status = json.loads(obj["Body"].read())
-    except client.exceptions.NoSuchKey:
+        status = json.loads(_store_get(prefix + _EXPORT_STATUS_NAME)[0])
+    except StoreMissing:
         status = None
     if status is None:
         waited = int(time.time()) - started
@@ -6687,9 +6979,8 @@ def _tool_get_agenda_export(caller, args):
                           {"job": args.get("job"), "status": "failed"}, is_error=True)
 
     # The file names come from the listing: the job id does not carry them.
-    listed = client.list_objects_v2(Bucket=R2_BUCKET_NAME, Prefix=prefix).get("Contents") or []
-    names = sorted(o["Key"][len(prefix):] for o in listed)
-    url = lambda n: f"{R2_PUBLIC_URL}/{prefix}{n}"
+    names = sorted(k[len(prefix):] for k in _store_list(prefix))
+    url = lambda n: _store_url(prefix + n)
     jpgs = sorted((n for n in names if n.endswith(".jpg")),
                   key=lambda n: int(n[:-4].rsplit("_p", 1)[-1] or 0))
     files = ([{"format": "pdf", "url": url(n)} for n in names if n.endswith(".pdf")]
@@ -6806,10 +7097,10 @@ def _tool_add_post_image(caller, args):
     base = f"media/clubs/{cid}/social" if cid else "media/social"
     key = f"{base}/{uuid.uuid4()}.{_IMAGE_EXT[ctype]}"
     try:
-        _r2().put_object(Bucket=R2_BUCKET_NAME, Key=key, Body=raw, ContentType=ctype)
+        _store_put(key, raw, ctype)
     except Exception:
         return _tool_text("圖片上傳雲端失敗，請稍後再試", is_error=True)
-    item = {"url": f"{R2_PUBLIC_URL}/{key}", "type": "image",
+    item = {"url": _store_url(key), "type": "image",
             "name": str(args.get("name") or f.get("name") or "MCP 上傳圖片")[:200]}
     n = _attach_post_image(row, item)
     note = "" if ctype == "image/jpeg" else \
@@ -6864,7 +7155,8 @@ _ROLE_IDS_DOC = (
     "boardWriter 板書、photographer 攝影、voteCounter 計票員、varietyHost 多元單元主持人、"
     "tableTopicsMaster 即席問答主持人、wordOfTheDay 每日一字、quizHost 問答遊戲主持、"
     "langEvaluator 語言講評、generalEvaluator 總講評、awardsPresenter 贈感謝狀、"
-    "sharingFeedback 會後分享、meetingNo 場次、meetingTheme 主題、themeQuestion 主題題目；"
+    "sharingFeedback 會後分享、meetingNo 場次、meetingTheme 主題、themeQuestion 主題題目、"
+    "tableTopicsQuestion 即席題目、announcement 公告、lastBest 上一場最佳、guests 來賓；"
     "第 N 篇演講：speechN（演講者）、speechN_title、speechN_pwcode、speechN_pwlevel、"
     "speechN_project；evaluatorN 第 N 位個別講評員；evalEvaluatorN 講評員講評；"
     "分會自訂角色為 custom_<id>（get_roles 的 customRoles 列出該分會有哪些）")
@@ -6943,8 +7235,10 @@ def _tool_assign_roles(caller, args):
                                     or (_CUSTOM_RE.match(k) and _CUSTOM_RE.match(k).group(1) in ctx["customs"]))]
     if bad:
         return _tool_text("不認得的角色 id：" + "、".join(bad) + "。" + _ROLE_IDS_DOC, is_error=True)
+    before = _speech_projects(data)
     report = _apply_role_values(data, {k: ("" if v is None else str(v)) for k, v in roles.items()},
                                 ctx, overwrite=args.get("overwrite", True))
+    _fill_suggested_durations(data, before)
     if report["applied"]:
         with get_db() as conn:
             with conn.cursor() as cur:
@@ -6990,7 +7284,9 @@ def _tool_import_roles_sheet(caller, args):
         else:
             skipped_new.append(d)
             continue
+        before = _speech_projects(data)
         report = _apply_role_values(data, values, ctx, overwrite)
+        _fill_suggested_durations(data, before)
         if aid is None or report["applied"]:
             changed.append((aid, d, data))
         tag = "新建" if aid is None else f"#{aid}"
@@ -7017,6 +7313,7 @@ def _tool_import_roles_sheet(caller, args):
                      + "、".join(skipped_new))
     if not overwrite and any("沒覆蓋" in l for l in lines):
         lines.append("要以試算表為準覆蓋已填的角色，請帶 overwrite: true")
+    lines += _unknown_rows_line(ctx)
     return _tool_text("\n".join([f"已更新 {len(changed) - created} 份、新建 {created} 份議程"]
                                 + lines),
                       {"clubId": cid, "updated": len(changed) - created, "created": created})
@@ -7212,10 +7509,10 @@ def _image_from_args(args: dict) -> tuple:
 def _store_image(raw: bytes, ctype: str, prefix: str) -> str:
     key = f"{prefix}/{uuid.uuid4().hex}.{_IMAGE_EXT[ctype]}"
     try:
-        _r2().put_object(Bucket=R2_BUCKET_NAME, Key=key, Body=raw, ContentType=ctype)
+        _store_put(key, raw, ctype)
     except Exception:
         raise HTTPException(status_code=502, detail="圖片上傳雲端失敗，請稍後再試")
-    return f"{R2_PUBLIC_URL}/{key}"
+    return _store_url(key)
 
 
 def _tool_set_club_image(caller, args):
@@ -7340,12 +7637,12 @@ def _tool_set_word_template(caller, args):
         return _tool_text("範本有錯，沒有存入：\n" + "\n".join(errors), {"errors": errors}, is_error=True)
     obj_key = f"media/clubs/{cid}/{uuid.uuid4().hex}.docx"
     try:
-        _r2().put_object(Bucket=R2_BUCKET_NAME, Key=obj_key, Body=raw, ContentType=_DOCX_TYPE)
+        _store_put(obj_key, raw, _DOCX_TYPE)
     except HTTPException:
         raise
     except Exception:
         raise HTTPException(status_code=502, detail="範本上傳雲端失敗，請稍後再試")
-    url = f"{R2_PUBLIC_URL}/{obj_key}"
+    url = _store_url(obj_key)
     with get_db() as conn:
         with conn.cursor() as cur:
             _club_write(cur, cid, {}, {key: url})
@@ -7515,9 +7812,8 @@ def _tool_upload_post_template(caller, args):
 
     def store():
         key = f"media/clubs/{cid}/{uuid.uuid4().hex}.pptx"
-        _r2().put_object(Bucket=R2_BUCKET_NAME, Key=key, Body=raw,
-                         ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation")
-        return f"{R2_PUBLIC_URL}/{key}"
+        _store_put(key, raw, "application/vnd.openxmlformats-officedocument.presentationml.presentation")
+        return _store_url(key)
 
     try:
         row = _add_post_template(cid, args.get("use") or "", path, store, args.get("name") or "",
@@ -7602,9 +7898,9 @@ def _tool_download_post_template(caller, args):
             data = fh.read()
         cid = args.get("club_id") or caller["club_id"]
         key = f"media/clubs/{cid}/templates/{uuid.uuid4().hex[:12]}/{tpl['id']}.pptx"
-        _r2().put_object(Bucket=R2_BUCKET_NAME, Key=key, Body=data, ContentType=(
+        _store_put(key, data, (
             "application/vnd.openxmlformats-officedocument.presentationml.presentation"))
-        url = f"{R2_PUBLIC_URL}/{key}"
+        url = _store_url(key)
     else:
         url = tpl.get("fileUrl") or ""
     if not url:
