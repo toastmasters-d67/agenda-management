@@ -6287,7 +6287,8 @@ def _fill_suggested_durations(data: dict, before: list, explicit: set = frozense
         with conn.cursor() as cur:
             # A list (several parts / options) is only a hint in the editor, never filled in.
             cur.execute("SELECT name_en, name_zh, duration FROM pathway_projects"
-                        " WHERE duration <> '' AND strpos(duration, chr(10)) = 0")
+                        " WHERE duration <> '' AND strpos(duration, chr(10)) = 0"
+                        " AND left(btrim(duration), 1) <> '•'")
             durs = {}
             for en, zh, d in cur.fetchall():
                 for name in (en, zh):
