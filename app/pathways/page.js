@@ -50,7 +50,8 @@ function toDraft(cat) {
   const projects = cat.projects.map((p) => {
     const k = `p${nextKey++}`;
     keyOf.set(p.en, k);
-    return { k, id: p.id, en: p.en, zh: p.zh, duration: p.duration || '', objectives: p.objectives || '' };
+    return { k, id: p.id, en: p.en, zh: p.zh, duration: p.duration || '',
+             objectives: p.objectives || '', objectivesEn: p.objectivesEn || '' };
   });
   const keys = (names) => (names || []).map((n) => keyOf.get(n)).filter(Boolean);
   const levels = (obj) => Object.fromEntries(LEVELS.map((l) => [l, keys(obj?.[String(l)])]));
@@ -67,7 +68,8 @@ function toPayload() {
     LEVELS.map((l) => [String(l), (obj[l] || []).map((k) => nameOf.get(k))]).filter(([, v]) => v.length));
   return {
     projects: draft.projects.map((p) => ({ id: p.id ?? null, en: p.en.trim(), zh: p.zh.trim(),
-                                           duration: p.duration.trim(), objectives: p.objectives.trim() })),
+                                           duration: p.duration.trim(), objectives: p.objectives.trim(),
+                                           objectivesEn: p.objectivesEn.trim() })),
     paths: draft.paths.map((p) => ({ code: p.code.trim().toUpperCase(), en: p.en.trim(), zh: p.zh.trim(), legacy: p.legacy, required: levels(p.required) })),
     electives: levels(draft.electives),
   };
@@ -198,8 +200,9 @@ function renderProjectsTab() {
       return `<tr>
         <td><input type="text" value="${esc(p.en)}" placeholder="English name" oninput="window.__pwProjectField('${p.k}','en',this.value)"></td>
         <td><input type="text" value="${esc(p.zh)}" placeholder="中文名稱" oninput="window.__pwProjectField('${p.k}','zh',this.value)"></td>
-        <td><input type="text" class="pw-dur" value="${esc(p.duration)}" placeholder="5'-7'" oninput="window.__pwProjectField('${p.k}','duration',this.value)"></td>
-        <td><textarea rows="1" class="pw-obj" placeholder="演講目標（選填）" oninput="window.__pwProjectField('${p.k}','objectives',this.value)">${esc(p.objectives)}</textarea></td>
+        <td><textarea rows="1" class="pw-dur" placeholder="5'-7'" oninput="window.__pwProjectField('${p.k}','duration',this.value)">${esc(p.duration)}</textarea></td>
+        <td><textarea rows="1" class="pw-obj" placeholder="中文（選填）" oninput="window.__pwProjectField('${p.k}','objectives',this.value)">${esc(p.objectives)}</textarea></td>
+        <td><textarea rows="1" class="pw-obj" placeholder="English (optional)" oninput="window.__pwProjectField('${p.k}','objectivesEn',this.value)">${esc(p.objectivesEn)}</textarea></td>
         <td class="pw-num">${n ? `${n} 處` : '<span class="pw-muted">未使用</span>'}</td>
         <td class="pw-num"><button class="pw-icon danger" title="刪除專案" onclick="window.__pwDeleteProject('${p.k}')">✕</button></td>
       </tr>`;
@@ -212,10 +215,10 @@ function renderProjectsTab() {
       <button class="btn-ghost" onclick="window.__pwAddProject()">＋ 新增專案</button>
     </div>
     <p class="pw-hint">議程以<strong>英文名稱</strong>記錄專案，並依議程語言顯示中文或英文。修改既有專案的名稱後儲存，已存的議程會一併改成新名稱。</p>
-    <p class="pw-hint"><strong>建議時長</strong>：議程選了這個專案、而演講時長還是空白或預設的 5'-7' 時自動帶入，不會蓋掉手動改過的時長。<strong>演講目標</strong>：所有分會共用，Word 範本的演講迴圈用 {{演講目標}} 印出。</p>
+    <p class="pw-hint"><strong>建議時長</strong>：議程選了這個專案、而演講時長還是空白或預設的 5'-7' 時自動帶入，不會蓋掉手動改過的時長。專案有好幾段或好幾種選項時可以分行列點，這時不自動帶入，只在議程的時長欄下方提示。<strong>演講目標</strong>：所有分會共用，Word 範本的演講迴圈用 {{演講目標}} 印出；國語演講印中文、英語演講印英文，其中一種沒填就用另一種。</p>
     <table class="pw-table">
-      <thead><tr><th>英文名稱 English</th><th>中文名稱</th><th>建議時長</th><th>演講目標</th><th class="pw-num">使用於</th><th></th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="6" class="pw-empty">沒有符合的專案</td></tr>'}</tbody>
+      <thead><tr><th>英文名稱 English</th><th>中文名稱</th><th>建議時長</th><th>演講目標（中文）</th><th>Objectives (English)</th><th class="pw-num">使用於</th><th></th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="7" class="pw-empty">沒有符合的專案</td></tr>'}</tbody>
     </table>`;
 }
 
@@ -290,7 +293,7 @@ const handlers = {
   projectField(k, field, value) { focusKeep(() => { project(k)[field] = value; }); },
   addProject() {
     const k = `p${nextKey++}`;
-    draft.projects.unshift({ k, id: null, en: '', zh: '', duration: '', objectives: '' });
+    draft.projects.unshift({ k, id: null, en: '', zh: '', duration: '', objectives: '', objectivesEn: '' });
     search = '';
     render();
     document.querySelector('.pw-table tbody input')?.focus();

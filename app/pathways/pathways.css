@@ -157,5 +157,5 @@ body {
 }
 
 /* 建議時長 / 演講目標 columns on the 專案 tab */
-.pw-table input.pw-dur { width: 72px; }
+.pw-table textarea.pw-dur { width: 120px; resize: vertical; field-sizing: content; max-height: 160px; }
 .pw-table textarea.pw-obj { width: 100%; min-width: 180px; resize: vertical; field-sizing: content; max-height: 160px; }
