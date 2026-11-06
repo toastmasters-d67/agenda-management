@@ -24,6 +24,7 @@ import {
   pathwaySelect,
   levelSelect,
   projectSelect,
+  suggestedDuration,
 } from '@/lib/pathways';
 import './agenda.css';
 import { withBase } from '@/lib/basePath';
@@ -419,7 +420,7 @@ function renderSpeechForms() {
       </div>
       <div class="form-row">
         <label>時長 Duration</label>
-        <input type="text" value="${sp.duration}" oninput="window.__idxUpdateSpeech(${i},'duration',this.value)" placeholder="5'-7'">
+        <input type="text" class="sp-duration" value="${sp.duration}" oninput="window.__idxUpdateSpeech(${i},'duration',this.value)" placeholder="5'-7'">
       </div>
       <div class="form-row">
         <label>演講語言 Language（Chill Hi High 用於個別講評員標示）</label>
@@ -487,8 +488,19 @@ function afterPwChange(i, field) {
   updatePreview();
 }
 
+/** A new project may bring its suggested length (lib/pathways.js suggestedDuration). */
+function applySuggestedDuration(i, prevProject) {
+  const sp = speeches[i];
+  const next = suggestedDuration(sp.duration, prevProject, sp.pathwayProject);
+  if (next == null) return;
+  sp.duration = next;
+  const el = document.querySelector(`#speech-${i} .sp-duration`);
+  if (el) el.value = next;
+}
+
 function setSpeechPwSelect(i, field, value) {
   const sp = speeches[i];
+  const prevProject = sp.pathwayProject;
   const box = document.querySelector(`#speech-${i} .${PW_FIELDS[field].cls}-custom`);
   if (value === CUSTOM_VALUE) {
     sp[field] = '';
@@ -507,11 +519,14 @@ function setSpeechPwSelect(i, field, value) {
       fillPwField(i, 'pathwayProject');
     }
   }
+  if (field === 'pathwayProject') applySuggestedDuration(i, prevProject);
   afterPwChange(i, field);
 }
 
 function setSpeechPwCustom(i, field, value) {
+  const prevProject = speeches[i].pathwayProject;
   speeches[i][field] = value;
+  if (field === 'pathwayProject') applySuggestedDuration(i, prevProject);
   afterPwChange(i, field);
 }
 
@@ -886,7 +901,11 @@ function collectData() {
     voteCounter: val('voteCounter'),
     wordOfTheDay: val('wordOfTheDay'),
     quizHost: val('quizHost'),
+    themeQuestion: val('themeQuestion'),
     tableTopicsQuestion: val('tableTopicsQuestion'),
+    announcement: val('announcement'),
+    lastBest: val('lastBest'),
+    guests: val('guests'),
     signals,
     // CHINA template only — page-2 reference content (ignored by other
     // templates' render()s). `nextMeetingDate`/`assigneeNext` are gone: the
@@ -1228,7 +1247,8 @@ function applyAgendaData(d) {
     'receptionHost', 'callingToOrder', 'welcomeTME', 'tme', 'timer', 'ahCounter',
     'tableTopicsMaster', 'generalEvaluator', 'langEvaluator',
     'awardsPresenter', 'sharingFeedback',
-    'boardWriter', 'photographer', 'tableTopicsQuestion',
+    'boardWriter', 'photographer', 'themeQuestion', 'tableTopicsQuestion',
+    'announcement', 'lastBest', 'guests',
     'voteCounter', 'wordOfTheDay', 'quizHost',
   ];
   fields.forEach((id) => {
@@ -2054,7 +2074,8 @@ function applyDefaultState() {
     'receptionHost', 'callingToOrder', 'welcomeTME', 'tme', 'timer', 'ahCounter',
     'tableTopicsMaster', 'generalEvaluator', 'langEvaluator',
     'awardsPresenter', 'sharingFeedback',
-    'boardWriter', 'photographer', 'tableTopicsQuestion',
+    'boardWriter', 'photographer', 'themeQuestion', 'tableTopicsQuestion',
+    'announcement', 'lastBest', 'guests',
     'voteCounter', 'wordOfTheDay', 'quizHost',
   ];
   fields.forEach((id) => { const el = document.getElementById(id); if (el) el.value = ''; });
@@ -2956,13 +2977,37 @@ export default function AgendaIndexPage() {
               </div>
             </details>
 
-            {/* Template-specific fields: shown only when the active club uses this template */}
-            <details open data-tmpl="chillhihigh china" style={{ display: 'none' }}>
-              <summary>主題題目 Table Topics Question</summary>
+            {/* Every club: the web templates print what they use (Chill Hi High 主題題目,
+                China the Table Topics question); Word templates can use either mark. */}
+            <details open>
+              <summary>主題題目／即席題目 Questions</summary>
               <div className="form-section">
                 <div className="form-row">
-                  <label>主題題目 Table Topics Question</label>
+                  <label>主題題目 Theme Question <span className="time-hint">Word：{'{{主題題目}}'}</span></label>
+                  <textarea rows={2} id="themeQuestion" placeholder="這場例會主題延伸出的問題"></textarea>
+                </div>
+                <div className="form-row">
+                  <label>即席題目 Table Topics Question <span className="time-hint">Word：{'{{即席題目}}'}</span></label>
                   <textarea rows={3} id="tableTopicsQuestion" placeholder="你覺得「最不適合開玩笑」的議題是什麼？…"></textarea>
+                </div>
+              </div>
+            </details>
+
+            {/* Per-meeting notes for Word templates' footer blocks; the web templates don't print them. */}
+            <details>
+              <summary>公告／上一場最佳／來賓（Word 範本用）</summary>
+              <div className="form-section">
+                <div className="form-row">
+                  <label>公告 <span className="time-hint">Word：{'{{公告}}'}</span></label>
+                  <textarea rows={3} id="announcement" placeholder="例：下次例會改在 3 樓會議室"></textarea>
+                </div>
+                <div className="form-row">
+                  <label>上一場最佳 <span className="time-hint">Word：{'{{上一場最佳}}'}</span></label>
+                  <textarea rows={3} id="lastBest" placeholder="最佳講者、最佳講評、最佳即席…"></textarea>
+                </div>
+                <div className="form-row">
+                  <label>來賓 <span className="time-hint">Word：{'{{來賓}}'}</span></label>
+                  <textarea rows={3} id="guests" placeholder="本場來賓名單"></textarea>
                 </div>
               </div>
             </details>

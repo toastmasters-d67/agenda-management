@@ -58,3 +58,71 @@ def test_no_date_row(index):
     with pytest.raises(index.HTTPException) as e:
         index._parse_roles_sheet("Timer,Amy,Ben\n", set(), TODAY)
     assert "日期列" in e.value.detail
+
+
+CUSTOMS = [{"id": "rws", "zh": "工作坊", "en": "Workshop"},
+           {"id": "resp", "zh": "ESP 個別講評", "en": "Individual Evaluator-ESP"}]
+
+
+def test_custom_roles_match_by_zh_or_en(index):
+    csv = (',11/28\n'
+           'workshop,Amy Lee\n'                       # en, case-insensitive
+           'Individual Evaluator - ESP,Ben Wu\n'      # `-` and spacing don't matter
+           '工作坊,\n'
+           'Timer,Cathy\n'
+           '備註,颱風\n')
+    unknown = []
+    out = index._parse_roles_sheet(csv, set(), TODAY, customs=CUSTOMS, unknown=unknown)
+    assert out == {"2026-11-28": {"custom_rws": "Amy Lee", "custom_resp": "Ben Wu", "timer": "Cathy"}}
+    assert unknown == ["備註"]
+
+
+def test_custom_roles_never_shadow_builtin(index):
+    customs = [{"id": "rt", "zh": "計時員", "en": "Timer"}]
+    out = index._parse_roles_sheet(',11/28\nTimer,Cathy\n計時員,Dan\n', set(), TODAY, customs=customs)
+    assert out["2026-11-28"] == {"timer": "Dan"}
+
+
+def test_without_customs_rows_are_unknown(index):
+    unknown = []
+    out = index._parse_roles_sheet(',11/28\nWorkshop,Amy\nESP,\n', set(), TODAY, unknown=unknown)
+    assert out == {"2026-11-28": {}}
+    assert unknown == ["Workshop"]          # an empty row isn't worth reporting
+
+
+def test_custom_role_list_drops_blank_names(index):
+    settings = {"custom_roles": [{"id": "a", "zh": " 工作坊 ", "en": "Workshop"},
+                                 {"id": "b", "zh": "  ", "en": "X"}, "junk"]}
+    assert index._club_custom_role_list(settings) == [{"id": "a", "zh": "工作坊", "en": "Workshop"}]
+
+
+def test_questions_and_footer_rows(index):
+    csv = (',11/28\n'
+           'Theme Question,"Why travel?\n為什麼旅行？"\n'
+           '即席題目,最難忘的旅程\n'
+           'Announcements,下次改在 3 樓\n'
+           'The BEST ON,Best Speaker: Amy\n'
+           '來賓,Ben、Cathy\n')
+    assert index._parse_roles_sheet(csv, set(), TODAY)["2026-11-28"] == {
+        "themeQuestion": "Why travel?\n為什麼旅行？", "tableTopicsQuestion": "最難忘的旅程",
+        "announcement": "下次改在 3 樓", "lastBest": "Best Speaker: Amy", "guests": "Ben、Cathy"}
+
+
+def test_footer_fields_are_agenda_text_fields(index):
+    for k in ("themeQuestion", "tableTopicsQuestion", "announcement", "lastBest", "guests"):
+        assert k in index._AGENDA_TEXT_FIELDS
+    assert "{{公告}}" in index._AGENDA_TEXT_FIELDS["announcement"]
+
+
+def test_suggested_duration_rule(index):
+    sd = index._suggested_duration
+    assert sd("", "", "4'-6'") == "4'-6'"              # blank → suggestion
+    assert sd("5'-7'", "", "4'-6'") == "4'-6'"         # the default counts as blank
+    assert sd("6'-8'", "", "4'-6'") is None            # a length someone typed stays
+    assert sd("4'-6'", "4'-6'", "18'-22'") == "18'-22'"  # an auto-filled one follows the project
+    assert sd("4'-6'", "4'-6'", "") == "5'-7'"         # …back to the default when there's none
+    assert sd("5'-7'", "", "") is None
+
+
+def test_clean_text_block_keeps_lines(index):
+    assert index._clean_text_block("  a   b \r\n\n c ") == "a b\nc"

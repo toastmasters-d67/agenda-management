@@ -10,7 +10,7 @@
 | 前端 → 後端 | `/svc/*` 代理（`app/svc/**`） | 瀏覽器只拿得到 httpOnly 的 `auth_token` cookie，代理在伺服器端把它轉成 `Authorization: Bearer` 送到 FastAPI。前端一律用 `lib/api.js` 的 `apiJson()` |
 | 後端 | **FastAPI**（`api/index.py`，單一檔案） | 所有 `/api/*`、OAuth 與 MCP 端點；Vercel 上是 Python serverless function |
 | 資料庫 | Neon PostgreSQL，**Alembic** 管 schema | 見「Database Migration」 |
-| 檔案 | Cloudflare R2 | 前端拿 presigned URL 直傳 |
+| 檔案 | Cloudflare R2（Vercel）／Azure Blob（Azure VM） | 前端拿 presigned URL 直傳。設了 `AZURE_STORAGE_ACCOUNT`／`AZURE_STORAGE_CONTAINER` 就用 Blob，見「檔案儲存：R2 與 Azure Blob」 |
 
 ## 專案結構
 
@@ -293,6 +293,7 @@ EntrepreneurAgenda/
 - 角色安排頁多出「分會自訂角色」分組；Word 範本用 `{{角色中文名}}` 帶入，也會出現在 `{{#所有角色}}`。
 - 名稱不能和內建角色或 Word 標記同名（因為名稱就是 Word 標記），存檔時檢查。
 - MCP 的角色 id 是 `custom_<id>`（`get_roles` 會列出該分會有哪些）。
+- 角色表匯入時，列名跟自訂角色的中文名或英文名相同（不分大小寫、`-` 視同空白）就匯入該角色；內建角色優先，自訂角色不會搶走內建角色的列。
 - 網頁議程版型目前**不會**印出自訂角色；要印的話是之後「版型可設定流程順序」的工作。
 
 ### 角色清單
@@ -337,6 +338,8 @@ CHINA 議程表右側原本每列都有一欄「下一場負責人」（`assigne
 |------|------|------|
 | `會議時間` | 欄（`meetingDate`） | 認得 `2026/07/03`、`2026-7-3`、`2026.07.03`，也認得沒有年份的 `07/03`、`7/3`；認不出來的整欄略過。第一欄也可以寫 `Date`／`日期` 或留白——留白時取第一列「大半格子都是日期」的列 |
 | `會議編號`／`會議主題`／`主題題目` | `META_FIELDS` | 欄標題欄位，不算角色 |
+| `即席題目`／`公告`／`上一場最佳`／`來賓` | `tableTopicsQuestion`／`announcement`／`lastBest`／`guests` | 每場的文字欄位，可多行；矩陣沒有這幾列，以隱藏欄位寫入 |
+| 分會自訂角色的中文名或英文名 | `customRoles[id]` | 見「分會自訂角色」 |
 | `單元號N`（`PM 4-1`） | `speeches[N].pathwayCode` + `pathwayLevel` | 一格拆成兩個欄位；前兩碼要在 PATHWAYS 清單裡才當作路徑代碼。落在演講者底下的「學習路徑／路徑等級」下拉列；`4-1` 這種非 `L1`–`L5` 的等級落在「其他／自訂」文字框 |
 | `單元N` | `speeches[N].pathwayProject` | 落在「專案名稱」下拉列；中英文專案名都認得，不在目錄裡的文字落在「其他／自訂」文字框 |
 | `標題N` | `speeches[N].title` | 矩陣沒有這一列，以隱藏欄位寫入（預覽會告知數量） |
@@ -344,7 +347,7 @@ CHINA 議程表右側原本每列都有一欄「下一場負責人」（`assigne
 
 **沒有年份的日期**被當成同一季、由左到右排：第一個日期取離今天最近的那一年，之後只要日期往回走（`12/12` → `01/09`）就跨到下一年。
 
-**英文列名**（生橋的表）：`Toastmaster(s) of the Day`→總主持人、`Timer`、`Ah Counter`、`Variety Session`→多元單元主持人、`Speaker #N`→演講者 N、`Table Topics Session`／`Table Topics Master`、`Individual Evaluator #N`→個別講評員 N、`Language Evaluator`、`General Evaluator`、`Evaluator's Evaluator`→講評員講評、`Meeting No.`、`Meeting Theme`、`Theme Question`。不分大小寫，`-` 視同空白。`Workshop`、`備註`、外賓／請假名單這類列不是角色，預覽會列在「沒匯入的列」。`--` 跟 `NA` 一樣當作空白。
+**英文列名**（生橋的表）：`Toastmaster(s) of the Day`→總主持人、`Timer`、`Ah Counter`、`Variety Session`→多元單元主持人、`Speaker #N`→演講者 N、`Table Topics Session`／`Table Topics Master`、`Individual Evaluator #N`→個別講評員 N、`Language Evaluator`、`General Evaluator`、`Evaluator's Evaluator`→講評員講評、`Meeting No.`、`Meeting Theme`、`Theme Question`、`Table Topics Question`→即席題目、`Announcement(s)`→公告、`The BEST ON`→上一場最佳、`Guests`／`The GUESTS ON`→來賓。不分大小寫，`-` 視同空白。`Workshop`、`ESP` 這類列要在分會設定加成自訂角色才會匯入；`備註`、請假名單這類列不是角色，預覽會列在「沒匯入的列」，MCP 匯入的回報也會列出。`--` 跟 `NA` 一樣當作空白。
 
 主題、講題這類文字欄位保留儲存格裡的換行（人名欄位仍合併成一行）。
 
@@ -818,7 +821,7 @@ IG 的取得方式是**從粉專身上取**（`instagram_business_account`），
 | 資料表 | 內容 |
 |------|------|
 | `pathways` | 路徑代碼（主鍵）、中英名稱、是否已停用（legacy）、排序 |
-| `pathway_projects` | 專案中英名稱、排序 |
+| `pathway_projects` | 專案中英名稱、建議時長（`duration`）、演講目標（`objectives`，migration `0025`）、排序 |
 | `pathway_required` | 每條路徑各級的必修專案（第 1 級、指導計畫、回顧路徑都明列，程式不預設任何規則） |
 | `pathway_electives` | 各級選修清單，所有路徑共用；某專案若是該路徑的必修，就不會出現在該路徑的選修選單 |
 
@@ -826,6 +829,8 @@ IG 的取得方式是**從粉專身上取**（`instagram_business_account`），
 - **整份存檔**：編輯頁把整份目錄當草稿，`PUT /api/pathways` 在一個 transaction 裡整份取代，不會存到一半。
 - **議程存英文名稱**：`speeches[].pathwayProject` 存的是專案**英文名稱**（不是 id，因為這個欄位也放自由備註），印出時依議程語言顯示中文或英文。在管理頁改了既有專案的名稱，存檔時會把所有議程裡的舊名稱（含舊中文名）一併改成新英文名稱。
 - **路徑代碼建立後不可改**：議程以代碼記錄路徑；要換代碼請新增路徑再刪除舊的，已存的舊代碼會落在「其他／自訂」文字框。
+- **建議時長**：議程編輯器、角色安排頁（下拉與匯入）、MCP（`create_agenda`／`update_agenda`／`set_roles`／`import_roles_sheet`）換專案時，演講時長若是空白、預設的 `5'-7'`，或是上一個專案自動帶入的值，就換成新專案的建議時長（新專案沒有建議時長就回到 `5'-7'`）；手動改過的時長不動。規則在 `lib/pathways.js` 的 `suggestedDuration()`，後端 `_suggested_duration()` 是同一套。
+- **演講目標**：Word 範本 `{{#演講}}` 迴圈裡的 `{{演講目標}}`，網頁議程版型不印。
 - **三個欄位都保留手動輸入**：學習路徑、等級、專案名稱都有「其他／自訂」選項，選了會出現文字框可自由輸入。目錄裡沒有的值（手動輸入的、Sheet 匯入的 `4-1`、已刪除的路徑）開啟時直接顯示在文字框裡，可繼續編輯，開啟議程不會改寫資料。
 
 ---
@@ -1093,6 +1098,16 @@ https://<你的網域>/api/mcp
 | `MCP_PUBLIC_ORIGIN` | 選填。寫死對外網址（例如 `https://agenda.example.com`），MCP 的 resource／issuer 就不再從 `X-Forwarded-Host` 推算。Vercel 上不用設 |
 
 > `JWT_SECRET` 同時被 FastAPI（簽發）與 Next.js `middleware.js`（驗證登入 cookie）讀取，Vercel 上設一次兩邊都拿得到。
+
+### 檔案儲存：R2 與 Azure Blob
+
+同一份程式碼，兩個部署用不同的儲存：Vercel（master）用 R2；Azure VM（main）在 `.env` 設 `AZURE_STORAGE_ACCOUNT`、`AZURE_STORAGE_CONTAINER` 後改用 Blob。後端所有讀寫都經過 `api/index.py` 開頭的 `_store_*`，不直接呼叫 `_r2()`。
+
+- **連線**：用 VM 的 managed identity（`DefaultAzureCredential`，不需要帳號金鑰）。該身分要有容器的「Storage Blob Data Contributor」。使用者指派的身分要再設 `AZURE_CLIENT_ID`。
+- **讀取**：Blob 不開公開讀取，檔案由 `GET /api/files/<key>` 轉送，對外網址是 `PUBLIC_BASE_URL/api/files/<key>`（可用 `FILES_PUBLIC_URL` 改）。不需要登入，跟 R2 的公開 bucket 一樣靠路徑裡的亂數讓網址猜不到，所以 MCP 給的下載連結 Claude 抓得到、IG／Threads 發布也抓得到。除了匯出的 `status.json`，每個檔案都只寫一次，回應帶一年的 `immutable` 快取。
+- **上傳**：取代 R2 presigned PUT 的是後端自己簽的 `PUT /api/files/upload/<key>?ct=&exp=&sig=`（HMAC、限時、限定 Content-Type）。前端與 `/svc/agenda-export` 的上傳流程不變；議程輸出服務在 VM 上直接打 `FASTAPI_BASE_URL`，不繞回 nginx。
+- **舊連結**：Blob 模式下，指向 `R2_PUBLIC_URL` 的連結會對到同一個 key（搬遷保留 key），所以搬遷期間舊連結照常能用。
+- **搬遷**：`docker compose exec api python -m api.migrate_storage` 先預覽，再加 `--apply`：把 R2 物件複製到 Blob（已存在且大小相同的跳過，可重跑），再把資料庫所有文字／JSON 欄位裡的 `R2_PUBLIC_URL/` 換成新網址。R2 只讀不刪；確認沒有舊連結再被讀取後，從 `.env` 拿掉 `R2_*` 即可。
 
 以下為**選填**，只有「全站共用一個 App」才需要。各分會自己填 App ID / Secret 時用不到——分會層的值優先，這些只是沒填時的退路：
 
@@ -1678,7 +1693,7 @@ CREATE TABLE agendas (
 | `ai_jobs` | `0011` | 生圖／發布工作。`status` 由 `queued` 推進，結果存 `result`；`updated_at` 用來判斷被中斷的工作 |
 | `club_secrets` | `0012` | 分會層級密鑰（Meta App Secret、分會共用 AI 金鑰），加密存；不放 `clubs.settings` 是因為 `GET /api/clubs` 不需登入 |
 | `club_social_accounts` | `0012` | 分會已連接的 FB 粉專／IG／Threads，長效 token 加密存，`expires_at` 用來提前警告；`(club_id, platform)` 唯一 |
-| `pathways`、`pathway_projects`、`pathway_required`、`pathway_electives` | `0013` | Pathways 目錄，見「Pathways 路徑管理」 |
+| `pathways`、`pathway_projects`、`pathway_required`、`pathway_electives` | `0013`、`0025` | Pathways 目錄，見「Pathways 路徑管理」 |
 | `oauth_codes` | `0015`、`0016` | MCP 授權碼（只存雜湊，5 分鐘） |
 | `machines`、`machine_pairings`、`machine_tokens` | `0020` | 電子名牌。`machines`：`serial`（唯一）、`club_id`、`bound_username`、`status`（`pending`／`active`／`disabled`）、`last_seen_at`；`machine_pairings`：配對中的配對碼與輪詢密鑰（只存雜湊，10 分鐘）；`machine_tokens`：名牌憑證（只存雜湊，可撤銷） |
 | `club_memberships` | `0019` | 多分會會籍：`username`、`club_id`、`role`（`club_admin`／`club_member`，在該分會的角色）。主鍵 `(username, club_id)`，刪帳號或分會時一併刪除。`users.club_id`／`users.role` 是主要分會的鏡像 |

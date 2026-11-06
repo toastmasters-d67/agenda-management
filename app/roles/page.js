@@ -7,7 +7,7 @@ import { MemberAC } from '@/lib/memberAutocomplete';
 import { MAX_EVAL_EVALUATORS } from '@/lib/agendaTemplates';
 import { ROLE_GROUP_DEFS, MEETING_ROLES, MEETING_META, clubCustomRoles } from '@/lib/meetingRoles';
 import { parseRolesSheet, resolveMemberName, isPersonField, META_IDS } from '@/lib/rolesSheet';
-import { loadPathways, CUSTOM_VALUE, pathwaySelect, levelSelect, projectSelect } from '@/lib/pathways';
+import { loadPathways, CUSTOM_VALUE, pathwaySelect, levelSelect, projectSelect, suggestedDuration } from '@/lib/pathways';
 import Sidebar from '@/components/Sidebar';
 import './roles.css';
 import { withBase } from '@/lib/basePath';
@@ -98,7 +98,13 @@ function roleSet(data, role, value) {
     while (data.speeches.length <= role.idx) data.speeches.push(blankSpeech());
     // `speechField` carries the speech's title / pathway: the Pathways fields
     // are dropdown sub-rows here, the title only arrives via the sheet import.
-    data.speeches[role.idx][role.kind === 'speech' ? 'speaker' : role.field] = value;
+    const sp = data.speeches[role.idx];
+    // A new project may bring its suggested length (agenda editor does the same).
+    if (role.field === 'pathwayProject') {
+      const next = suggestedDuration(sp.duration, sp.pathwayProject, value);
+      if (next != null) sp.duration = next;
+    }
+    sp[role.kind === 'speech' ? 'speaker' : role.field] = value;
   } else if (role.kind === 'evaluator') {
     if (!Array.isArray(data.evaluators)) data.evaluators = [];
     while (data.evaluators.length <= role.idx) data.evaluators.push('');
@@ -410,8 +416,12 @@ function buildRows() {
     rows.push({ type: 'role', role: r });
   };
 
-  // Resolvable by the save path, but intentionally absent from `rows`.
+  // Resolvable by the save path, but intentionally absent from `rows`. Meta
+  // fields without a header cell (即席題目, the footer notes) still arrive
+  // via the sheet import, so they resolve too — as hidden fields.
   META_FIELDS.forEach((f) => { roleById[f.key] = f; });
+  MEETING_META.filter((m) => !m.header)
+    .forEach((m) => { roleById[m.key] = { key: m.key, label: m.zh, hidden: true }; });
 
   // Show as many speech / evaluator slots as the busiest loaded meeting needs.
   const maxSpeech = Math.max(3, ...meetings.map((m) => (m.data.speeches   || []).length));
@@ -971,7 +981,7 @@ async function startSheetImport() {
   const restoreBtn = busyButton(document.getElementById('btnImportSheet'), '讀取試算表…');
   try {
     const { csv } = await apiJson(`/clubs/${cid}/roles-sheet`);
-    const sheet = parseRolesSheet(csv);
+    const sheet = parseRolesSheet(csv, new Date(), clubCustomRoles(activeClub()));
     if (!sheet.columns.length) { toast('試算表裡找不到可辨識的例會日期', true); return; }
 
     // Asked only once the sheet is in hand: from here on the board really is
