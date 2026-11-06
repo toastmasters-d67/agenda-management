@@ -26,6 +26,7 @@ import {
   projectSelect,
   suggestedDuration,
   projectDurationNote,
+  isDurationList,
 } from '@/lib/pathways';
 import './agenda.css';
 import { withBase } from '@/lib/basePath';
@@ -496,7 +497,7 @@ function afterPwChange(i, field) {
  */
 function durationHintHtml(sp) {
   const note = projectDurationNote(sp.pathwayProject).trim();
-  if (!note.includes('\n')) return '<div class="sp-dur-hint" hidden></div>';
+  if (!isDurationList(note)) return '<div class="sp-dur-hint" hidden></div>';
   const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   return `<div class="sp-dur-hint time-override-hint">建議時長：<br>${esc(note).replace(/\n/g, '<br>')}</div>`;
 }
