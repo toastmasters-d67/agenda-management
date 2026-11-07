@@ -95,7 +95,7 @@ jobs:
         with:
           context: .
           file: Dockerfile.web
-          build-args: NEXT_PUBLIC_BASE_PATH=/club-management
+          # 掛在網域根目錄，不設 NEXT_PUBLIC_BASE_PATH（舊的 /club-management 網址由 nginx 導過來）。
           push: true
           tags: |
             ${{ env.REGISTRY }}/agenda-management-web:${{ env.IMAGE_TAG }}

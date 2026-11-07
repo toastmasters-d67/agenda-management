@@ -1,7 +1,7 @@
 # Production stack on vm-postgen-prod, at /srv/club-management/ next to its
 # .env (written by the deploy workflow from the PROD_ENV_FILE secret).
-# The host's nginx terminates TLS and proxies /club-management/ to the
-# 127.0.0.1 ports below — see nginx-club-management.conf.
+# The host's nginx terminates TLS and proxies the domain root (everything but
+# /post-generator/) to the 127.0.0.1 ports below — see nginx-club-management.conf.
 #
 # The VM is a B1s (1 vCPU / ~900 MB RAM) shared with post-generator, hence
 # the small Postgres settings and a single uvicorn worker.
