@@ -52,7 +52,7 @@ printf '%s\t%s\t(上一版 %s)\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$IMAGE_TAG" 
 # ⑤ 健康檢查：前端登入頁與後端都要回應。
 echo "→ 等待服務就緒"
 for _ in $(seq 1 30); do
-  if curl -fsS -o /dev/null http://127.0.0.1:3000/club-management/login \
+  if curl -fsS -o /dev/null http://127.0.0.1:3000/login \
      && curl -fsS -o /dev/null http://127.0.0.1:8001/.well-known/oauth-protected-resource; then
     echo "✓ 部署完成：${IMAGE_TAG}"
     docker image prune -f --filter "until=168h" >/dev/null || true
