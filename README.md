@@ -1176,9 +1176,9 @@ Push 到 GitHub 的 **`master`** 分支，Vercel 自動部署到正式站；其�
 
 ## 正式部署（Azure VM，Docker）
 
-正式站網址：`https://postgen-d67.eastasia.cloudapp.azure.com/`（2026-11 起掛在網域根目錄；舊的 `/club-management/...` 由 nginx 以 308 導到根目錄）
+正式站網址：`https://clubtools.toastmasters.org.tw/`（2026-11 起；DNS 是 CNAME 指到 `postgen-d67.eastasia.cloudapp.azure.com`）。舊網址 `https://postgen-d67.eastasia.cloudapp.azure.com/...`（含更早的 `/club-management/...`）由 nginx 以 308 導到新網域，只有 `/post-generator/` 留在舊網址。
 
-`vm-postgen-prod`（Ubuntu 24.04，B1s）與 post-generator 共用，主機上的 nginx 依路徑導流：`/post-generator/` 屬於 post-generator，其餘屬於本專案。
+`vm-postgen-prod`（Ubuntu 24.04，B1s）與 post-generator 共用。nginx 有兩個 443 區塊：`clubtools.toastmasters.org.tw`（`sites-enabled/postgen-clubtools`，來源 `deploy/nginx-clubtools.conf`）只服務本專案；`postgen-d67…`（`sites-enabled/postgen`）放 post-generator 的 `/post-generator/`，其餘導到新網域。
 
 | 元件 | 位置 |
 |------|------|
@@ -1186,7 +1186,8 @@ Push 到 GitHub 的 **`master`** 分支，Vercel 自動部署到正式站；其�
 | FastAPI | 容器 `api`，`127.0.0.1:8001` |
 | PostgreSQL 16 | 容器 `db`，不對外開 port，資料在 volume `club-management_pgdata` |
 | compose、`.env`、部署腳本 | `/srv/club-management/`（屬於 `deploy` 帳號） |
-| nginx 設定 | `/etc/nginx/snippets/club-management*.conf` 與 `post-generator.conf`（來源：`deploy/nginx-*.conf`），由 `sites-enabled/postgen` 的 443 區塊 `include` |
+| nginx 設定 | `/etc/nginx/snippets/club-management*.conf`、`post-generator.conf`、`old-host-redirect.conf` 與 `sites-available/clubtools`（來源：`deploy/nginx-*.conf`）。新網域的 443 區塊 include `club-management.conf`；舊網址的 443 區塊 include `old-host-redirect.conf` 與 `post-generator.conf` |
+| 憑證 | Let's Encrypt（certbot webroot `/var/www/certbot`，續期後 reload nginx），新舊網域各一張 |
 | 備份 | `/mnt/backup-disk/club-management/`（另一顆磁碟），每晚一次＋每次部署前一次，保留 14 天 |
 
 ### CI/CD（`.github/workflows/ci-cd.yml`）
@@ -1209,9 +1210,9 @@ GitHub → Settings → Environments → `production` 需要的 secrets：
 - 程式仍支援子路徑部署（`NEXT_PUBLIC_BASE_PATH`，build 時寫進 bundle）：手寫的 `<a href>`、`<img src>`、`fetch()`、`location.href` 都要透過 `lib/basePath.js` 的 `withBase()`。正式站與 Vercel 都不設。
 - 登入 cookie 的 path 跟著 basePath（根目錄就是 `/`）。post-generator 的 cookie 叫 `sid`、path 是 `/post-generator`，不會互相干擾。
 - FastAPI 經由 `/svc` 代理收到的 Host 是 `api:8001`，所以 OAuth / MCP 的 issuer 與 resource 以 `PUBLIC_BASE_URL` 為準；Microsoft 登入的回呼網址以 `PUBLIC_ORIGIN` 為準。
-- Microsoft 登入（Entra）、Meta 的 redirect URI 要登記為 `https://postgen-d67.eastasia.cloudapp.azure.com/svc/auth/microsoft/callback` 與 `.../club`。
-- MCP 端點是 `https://postgen-d67.eastasia.cloudapp.azure.com/api/mcp`。MCP 客戶端不跟隨導向，舊的 `/club-management/api/mcp` 要改設定、重新授權。
-- Azure Blob 的檔案連結存成 `PUBLIC_BASE_URL/api/files/...`；migration 0028 把舊的 `/club-management/api/files/` 連結改成根目錄。
+- Microsoft 登入（Entra，應用程式 ClubManagementPlatform）的 redirect URI 要登記 `https://clubtools.toastmasters.org.tw/svc/auth/microsoft/callback`；各分會自己的 Meta App 要登記 `https://clubtools.toastmasters.org.tw/club`。
+- MCP 端點是 `https://clubtools.toastmasters.org.tw/api/mcp`。MCP 客戶端不跟隨導向，換網址後要改設定、重新授權。
+- Azure Blob 的檔案連結存成 `PUBLIC_BASE_URL/api/files/...`；migration 0028 把舊的 `/club-management/api/files/` 連結改成根目錄，0029 把 `postgen-d67…` 的連結改成新網域。
 - **MCP 的 `export_agenda`（議程 PDF／JPG）**用無頭 Chromium 開議程頁截圖。`node_modules` 裡內建的 Chromium 是給 Vercel 的 Amazon Linux 版本，在 Alpine 跑不起來，所以 `Dockerfile.web` 另外 `apk add chromium font-noto-cjk font-noto-emoji`（沒有中文字型，議程上的中文會全部變成方框），並把執行檔連到固定的 `/usr/local/bin/agenda-chromium`、設成 `CHROME_EXECUTABLE_PATH`。route 會開 `http://127.0.0.1:3000/agenda`（同一個容器、加上 basePath），不需要額外設定網址。這讓 web 映像大約多 200 MB。
 
 ### 從 `/club-management` 搬到根目錄（2026-11，在 VM 上手動做一次）
@@ -1228,6 +1229,19 @@ GitHub → Settings → Environments → `production` 需要的 secrets：
 8. 驗證：`/` 開本系統登入頁、`/club-management/agenda` 導到 `/agenda`、`/post-generator/` 開 post-generator、議程裡的 Word 範本與圖片能下載。
 
 使用者需要重新登入一次（cookie 的 path 變了）。
+
+### 換到正式網域 clubtools.toastmasters.org.tw（2026-11，在 VM 上手動做一次）
+
+1. **DNS**：`clubtools.toastmasters.org.tw` CNAME 到 `postgen-d67.eastasia.cloudapp.azure.com`（不經 proxy）。
+2. **憑證與 nginx**：`sites-available/postgen` 的 80 區塊 `server_name` 加上新網域並 reload；用 `deploy/nginx-clubtools.conf` 開頭註解的 certbot 指令簽憑證；把 `deploy/nginx-clubtools.conf` 複製成 `sites-available/clubtools`，連結為 `sites-enabled/postgen-clubtools`，`nginx -t` 後 reload。此時新舊網址都能用。
+3. **Entra**：redirect URI 加上 `https://clubtools.toastmasters.org.tw/svc/auth/microsoft/callback`（舊的先留著）。
+4. **GitHub secret `PROD_ENV_FILE`**：`PUBLIC_ORIGIN`、`PUBLIC_BASE_URL` 改成 `https://clubtools.toastmasters.org.tw`。
+5. **部署**（push 到 `main` 或手動跑 workflow）：migration 0029 會改寫檔案連結。
+6. **舊網址導向**：`deploy/nginx-old-host-redirect.conf` 複製成 `/etc/nginx/snippets/old-host-redirect.conf`；`sites-available/postgen` 的 443 區塊把 `include snippets/club-management.conf;` 換成 `include snippets/old-host-redirect.conf;`，`nginx -t` 後 reload。
+7. **MCP 客戶端**改連 `https://clubtools.toastmasters.org.tw/api/mcp` 並重新授權；接了 Meta 的分會在自己的 Meta App 加上 `https://clubtools.toastmasters.org.tw/club`。
+8. 驗證：新網域登入（含 Microsoft）、`/.well-known/oauth-protected-resource` 的 resource 是新網域、議程裡的 Word 範本與圖片能下載、舊網址導到新網域、`/post-generator/` 仍在舊網址。
+
+使用者需要重新登入一次（cookie 綁網域）。
 
 ---
 
