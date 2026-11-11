@@ -6309,9 +6309,30 @@ def _explicit_durations(fields: dict) -> set:
     return {i for i, sp in enumerate(sps) if isinstance(sp, dict) and sp.get("duration") is not None}
 
 
+# app/agenda/page.js `durationOverrides`: per-meeting block lengths in minutes.
+_DURATION_OVERRIDE_KEYS = {
+    "receptionMins": "報到", "openingMins": "開場", "speechMins": "備稿演講（整段）",
+    "photoMins": "拍照", "intermissionMins": "中場休息", "topicsMins": "即席問答",
+    "evalMins": "講評（整段）", "closingMins": "結尾", "sharingMins": "會後分享",
+}
+
+
+def _duration_minutes(v, name: str) -> str:
+    """A minutes value as stored: "" (auto) or a non-negative whole number string."""
+    if v is None or str(v).strip() == "":
+        return ""
+    try:
+        n = int(str(v).strip())
+    except ValueError:
+        n = -1
+    if n < 0 or n > 240:
+        raise HTTPException(status_code=400, detail=f"{name} 要是 0–240 的整數分鐘數")
+    return str(n)
+
+
 def _apply_agenda_fields(data: dict, fields: dict) -> list:
     """Merge MCP-supplied fields into `data`. Returns the keys it changed."""
-    lists = ("speeches", "evaluators", "evalEvaluators", "varietySession", "lang")
+    lists = ("speeches", "evaluators", "evalEvaluators", "varietySession", "lang", "durationOverrides")
     unknown = [k for k in fields if k not in _AGENDA_TEXT_FIELDS and k not in lists]
     if unknown:
         raise HTTPException(status_code=400, detail="不認得的議程欄位：" + "、".join(unknown))
@@ -6359,6 +6380,19 @@ def _apply_agenda_fields(data: dict, fields: dict) -> list:
             if v.get("host") is not None:
                 vs["host"] = str(v["host"])
             data[k] = vs
+        elif k == "durationOverrides":
+            if not isinstance(v, dict):
+                raise HTTPException(status_code=400, detail="durationOverrides 要是物件")
+            bad = [dk for dk in v if dk not in _DURATION_OVERRIDE_KEYS]
+            if bad:
+                raise HTTPException(status_code=400, detail="不認得的時長欄位：" + "、".join(bad))
+            # Stored as strings, the way the editor's ⏱ 時間設定 saves them;
+            # "" = back to auto (the club default, else the built-in value).
+            do = {dk: "" for dk in _DURATION_OVERRIDE_KEYS}
+            do.update({dk: str(dv) for dk, dv in (data.get(k) or {}).items() if dk in do})
+            for dk, dv in v.items():
+                do[dk] = _duration_minutes(dv, _DURATION_OVERRIDE_KEYS[dk])
+            data[k] = do
         touched.append(k)
     return touched
 
@@ -7373,7 +7407,13 @@ _CLUB_SETTINGS = {
     "officer_vpm": "會員副會長（標準版左欄）", "officer_vppr": "公關副會長（標準版左欄）",
     "officer_secretary": "秘書（標準版左欄）", "officer_treasurer": "財務長（標準版左欄）",
     "officer_saa": "事務長（標準版左欄）",
+    # 預設時長 (standard / entrepreneur / chillhihigh); a meeting can still override.
+    "defaultReceptionMins": "預設報到時長（分鐘；空白＝自動 20）",
+    "defaultIntermissionMins": "預設中場休息時長（分鐘；空白＝自動吸收空檔，填了就固定）",
+    "defaultTopicsMins": "預設即席問答時長（分鐘；空白＝自動吸收空檔，填了就固定）",
 }
+# Minutes; validated as whole numbers (standard / entrepreneur / chillhihigh).
+_CLUB_DURATION_SETTINGS = ("defaultReceptionMins", "defaultIntermissionMins", "defaultTopicsMins")
 _CLUB_IMAGE_SETTINGS = {
     "ig_qr_url": "Instagram QR", "threads_qr_url": "Threads QR",
     "evoting_qr_url": "E-Voting QR", "membership_qr_url": "入會登記 QR",
@@ -7446,6 +7486,9 @@ def _club_changes(args: dict):
         raise HTTPException(status_code=400, detail="分會名稱不得為空")
     if cols.get("template_key") is not None and cols["template_key"] not in _TEMPLATE_KEYS:
         raise HTTPException(status_code=400, detail="template_key 只能是 " + "、".join(_TEMPLATE_KEYS))
+    for k in _CLUB_DURATION_SETTINGS:
+        if k in sets:
+            sets[k] = _duration_minutes(sets[k], _CLUB_SETTINGS[k].split("（")[0]) or None
     cols = {k: (None if v is None else str(v).strip() if k == "name" else str(v))
             for k, v in cols.items()}
     return cols, {k: (None if v is None else bool(v) if k in _CLUB_FLAG_SETTINGS else str(v))
@@ -8140,6 +8183,12 @@ _AGENDA_FIELDS_SCHEMA = {
                            "properties": {"enabled": {"type": "boolean"},
                                           "duration": {"type": "integer", "description": "分鐘"},
                                           "host": {"type": "string"}}},
+        "durationOverrides": {
+            "type": "object", "additionalProperties": False,
+            "description": "這一場各段時長（分鐘），只改有給的；空字串或 null＝還原自動"
+                           "（有分會預設時長就用分會預設）。對 standard、entrepreneur、chillhihigh 版型有效",
+            "properties": {k: {"type": ["integer", "string", "null"], "description": d}
+                           for k, d in _DURATION_OVERRIDE_KEYS.items()}},
     },
 }
 

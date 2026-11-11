@@ -475,6 +475,9 @@ function fieldHtml(f) {
   if (f.type === 'color') {
     return `<div class="modal-field"><label>${f.label}</label><input type="color" id="f_${f.key}" class="color-input"></div>`;
   }
+  if (f.type === 'number') {
+    return `<div class="modal-field"><label>${f.label}</label><input type="number" min="0" max="120" step="1" inputmode="numeric" id="f_${f.key}"${ph}></div>`;
+  }
   if (f.type === 'checkbox') {
     return `<div class="modal-field"><label class="check-label"><input type="checkbox" id="f_${f.key}"> ${f.label}</label></div>`;
   }
