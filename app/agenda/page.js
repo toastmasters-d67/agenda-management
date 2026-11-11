@@ -695,12 +695,16 @@ function calcTimes(spList) {
   const getTime = (key, auto) => (validTime(timeOverrides[key]) ? timeOverrides[key].trim() : auto);
   const validDur = (s) => { const n = parseInt(s, 10); return !isNaN(n) && n >= 0; };
   const getDur = (key, auto) => (validDur(durationOverrides[key]) ? parseInt(durationOverrides[key], 10) : auto);
+  // The club's 版型設定 → 預設時長 (clubs.settings.default*Mins). A meeting's own
+  // override still wins; a club default in turn beats the built-in auto value.
+  const clubSet = (getActiveClub() || {}).settings || {};
+  const clubDur = (key) => (validDur(clubSet[key]) ? parseInt(clubSet[key], 10) : null);
 
   // The agenda's 時間段 (`19:10 ~ 21:00`) is when the meeting opens and ends;
   // reception runs the `receptionMins` before it. Without a readable one, the
   // evening club defaults the system started with.
   const range = parseTimeRange(val('timeRange'));
-  const receptionMins = getDur('receptionMins', 20);
+  const receptionMins = getDur('receptionMins', clubDur('defaultReceptionMins') ?? 20);
   const receptionStart = getTime('receptionStart',
     range ? minsToTime(Math.max(0, timeToMins(range.start) - receptionMins)) : '18:50');
   const endTime = getTime('endTime', range ? range.end : '21:00');
@@ -719,10 +723,17 @@ function calcTimes(spList) {
   const closingMins = getDur('closingMins', 6);
   const sharingMins = getDur('sharingMins', 5);
 
-  const ovIM = parseInt(durationOverrides.intermissionMins, 10);
-  const hasManualIM = !isNaN(ovIM) && String(durationOverrides.intermissionMins).trim() !== '';
-  const ovTM = parseInt(durationOverrides.topicsMins, 10);
-  const hasManualTM = !isNaN(ovTM) && String(durationOverrides.topicsMins).trim() !== '';
+  // A club default for intermission / table topics pins that block just like a
+  // per-meeting value does — it no longer stretches to absorb the slack.
+  const pinned = (key, clubKey) => {
+    const n = parseInt(durationOverrides[key], 10);
+    if (!isNaN(n) && String(durationOverrides[key]).trim() !== '') return n;
+    return clubDur(clubKey);
+  };
+  const ovIM = pinned('intermissionMins', 'defaultIntermissionMins');
+  const hasManualIM = ovIM != null;
+  const ovTM = pinned('topicsMins', 'defaultTopicsMins');
+  const hasManualTM = ovTM != null;
 
   const baseIM = hasManualIM ? ovIM : 5;
   const baseTM = hasManualTM ? ovTM : 10;
@@ -2764,7 +2775,8 @@ export default function AgendaIndexPage() {
                 </div>
 
                 <hr style={{ margin: '6px 0', borderColor: '#ddd' }} />
-                <p className="time-override-hint"><strong>各段時長</strong>（議程表時長欄）</p>
+                <p className="time-override-hint"><strong>各段時長</strong>（議程表時長欄）<br />
+                  報到、中場休息、即席的分會預設值在「分會管理 › 版型設定 › 預設時長」設定；這裡填的只影響這一場。</p>
                 <div className="time-override-row">
                   <div className="time-override-label">
                     報到 Reception

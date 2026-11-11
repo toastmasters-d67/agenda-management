@@ -1129,6 +1129,8 @@ details[open] summary::before { content: "▼ "; }
 .tmpl-standard .s-meeting-no { margin-top: 0.5mm; }
 .tmpl-standard .s-block { margin-top: 5mm; }
 .tmpl-standard .s-officer + .s-officer { margin-top: 2.5mm; }
+/* an office held by two people: one name per line, as typed in 版型設定 */
+.tmpl-standard .s-officer { white-space: pre-line; }
 .tmpl-standard .s-label { color: var(--s-c); font-weight: 700; }
 .tmpl-standard .s-venue { margin-top: 1mm; }
 .tmpl-standard .s-link { color: #1a4fa0; text-decoration: underline; overflow-wrap: anywhere; }

@@ -166,6 +166,34 @@ def test_update_club_takes_the_display_switches_as_booleans(index, env):
     assert out["structuredContent"]["settings"]["show_logo"] is False
 
 
+def test_update_club_takes_default_durations_as_minutes(index, env):
+    out = call(index, "update_club", env["admin"], {"club_id": env["cid"], "settings": {
+        "defaultReceptionMins": 15, "defaultIntermissionMins": "10", "defaultTopicsMins": ""}})
+    assert not out["isError"]
+    st = out["structuredContent"]["settings"]
+    assert st["defaultReceptionMins"] == "15" and st["defaultIntermissionMins"] == "10"
+    assert "defaultTopicsMins" not in st          # blank = back to auto
+    with pytest.raises(index.HTTPException):
+        call(index, "update_club", env["admin"], {"club_id": env["cid"], "settings": {"defaultTopicsMins": "十五"}})
+
+
+def test_update_agenda_sets_and_clears_block_durations(index, env):
+    out = call(index, "update_agenda", env["officer"], {"agenda_id": env["aid"], "fields": {
+        "durationOverrides": {"receptionMins": 15, "topicsMins": "15"}}})
+    assert not out["isError"]
+    out = call(index, "update_agenda", env["officer"], {"agenda_id": env["aid"], "fields": {
+        "durationOverrides": {"receptionMins": None}}})
+    assert not out["isError"]
+    with index.get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT data FROM agendas WHERE id=%s", (env["aid"],))
+            do = cur.fetchone()[0]["durationOverrides"]
+    assert do["receptionMins"] == "" and do["topicsMins"] == "15" and do["intermissionMins"] == ""
+    for bad in ({"lunchMins": 5}, {"topicsMins": -1}):
+        with pytest.raises(index.HTTPException):
+            call(index, "update_agenda", env["officer"], {"agenda_id": env["aid"], "fields": {"durationOverrides": bad}})
+
+
 def test_machine_tools(index, env):
     out = call(index, "list_machines", env["officer"], {})
     assert not out["isError"] and out["structuredContent"]["machines"] == []

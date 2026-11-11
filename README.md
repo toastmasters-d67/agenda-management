@@ -167,6 +167,13 @@ EntrepreneurAgenda/
 | `topicsMins`／`intermissionMins` | 吸收距離 `endTime` 的剩餘時間（各上限 +10′）；任一邊被手動指定時，另一邊才吸收剩餘 |
 | 其他 | 固定預設值（報到 20′、開幕 10′、拍照 5′、結尾 6′、分享 5′） |
 
+### 分會預設時長（`clubs.settings.default*Mins`）
+
+報到、中場休息、即席問答三段可以在「分會管理 › 版型設定 › 預設時長」設定分會的預設分鐘數（`defaultReceptionMins`、`defaultIntermissionMins`、`defaultTopicsMins`；standard、entrepreneur、chillhihigh 版型）。優先順序：**這一場的 `durationOverrides` → 分會預設 → 上表的自動值**。
+
+- 中場休息／即席問答一旦有分會預設，就和逐場手動指定一樣**固定**，不再吸收距離 `endTime` 的剩餘時間；沒設的那一邊照舊吸收。
+- MCP：`update_club` 的 `settings` 可寫這三個鍵（0–240 的整數，空字串或 `null` 刪除）；`update_agenda` 的 `fields.durationOverrides` 可逐場改各段時長，只改有給的，空字串或 `null` 還原自動。
+
 ### 講評區固定列時長（`durationLabels`）
 
 `個別講評 2'~3'`、`計時員報告 1'`、`贅語報告 1'`、`語言講評 3'~5'`、`總講評 3'~5'`、`講評員講評 2'~3'` 原本寫死在版型裡，現在改為每場可編輯的**顯示字串**（可填區間，不參與加總運算），與 `signals` 同一套模式：載入時 merge 到預設值上，舊議程自動沿用原本字樣。
